@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"slices"
 	"time"
@@ -95,6 +96,7 @@ func manifestHandler() http.HandlerFunc {
 			})
 		}
 
+		log.Printf("매니페스트 요청 처리 완료 (date=%s, %d개 마켓)", date, len(markets))
 		writeJSON(w, http.StatusOK, manifestResponse{Date: date, Markets: markets})
 	}
 }
@@ -122,8 +124,11 @@ func fileHandler(storage dataset.Storage) http.HandlerFunc {
 		}
 		end := start.Add(24 * time.Hour)
 
+		log.Printf("[%s] %s 요청 수신 (date=%s)", market, kind, r.URL.Query().Get("date"))
+
 		file, err := loadFile(storage, market, kind, start, end)
 		if errors.Is(err, dataset.ErrNotFound) {
+			log.Printf("[%s] %s 캐시 없음 — 온디맨드 수집 시작", market, kind)
 			if err := ensureMarketCollected(storage, market, start, end); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "데이터 수집 실패: "+err.Error())
 				return
@@ -135,6 +140,7 @@ func fileHandler(storage dataset.Storage) http.HandlerFunc {
 			return
 		}
 
+		log.Printf("[%s] %s 응답 전송 완료", market, kind)
 		writeJSON(w, http.StatusOK, file)
 	}
 }

@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-05 | 시세 수집기→AI 트레이더 구간의 Kafka(시세 토픽) 의존을 제거 — `sa-collector`/`sa-ai-trader` IRSA의 MSK 권한, `sg-eks-aitrader`→`sg-msk` 보안 그룹 행, MSK 토픽 목록의 `market-data` 삭제(2.2절, 3장, 8장). architecture.md·requirements.md와 함께 정정 |
 | 2026-08-04 | requirements.md·architecture.md·ai-trader-design.md·api-specification.md·erd.md·회의록 및 기존 Terraform(`infra/`)을 근거로 네트워크·컴퓨트·보안 배치 설계 최초 작성 |
 
 ## 관련 문서
@@ -121,8 +122,8 @@ architecture.md에서 이미 "3개 클러스터로 분리"는 확정했다. 여�
 | `sa-ingest-api` | 백엔드 | MSK 발행(orders) | MSK |
 | `sa-matching-engine` | 백엔드 | MSK 구독/발행(orders, executions) | MSK |
 | `sa-recorder` | 백엔드 | RDS 접속, S3 PutObject | RDS, `team1-truss-trade-results` |
-| `sa-collector` | AI 트레이더 | S3 PutObject, MSK 발행(시세 토픽) | `team1-truss-market-data`, MSK |
-| `sa-ai-trader` | AI 트레이더 | MSK 구독(시세), S3 PutObject(주문 기록), **Bedrock InvokeModel**(모멘텀·평균회귀 봇만) | MSK, `team1-truss-order-records`, Bedrock |
+| `sa-collector` | AI 트레이더 | S3 PutObject | `team1-truss-market-data` |
+| `sa-ai-trader` | AI 트레이더 | S3 PutObject(주문 기록), **Bedrock InvokeModel**(모멘텀·평균회귀 봇만) | `team1-truss-order-records`, Bedrock |
 | `sa-replay-engine` | 리플레이 | S3 GetObject(주문 기록 파일 읽기) | `team1-truss-order-records` |
 
 Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운트에만** 부여한다(백엔드·리플레이 클러스터는 Bedrock을 호출하지 않으므로 아예 권한을 주지 않음 — NFR-18 최소 권한 원칙).
@@ -133,7 +134,7 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 
 - ENI를 `data-a`/`data-c` 서브넷에 배치(2 AZ)
 - 인증은 IAM 인증(SASL/IAM)만 사용 — EKS IRSA 자격 증명을 그대로 재사용하므로 별도 자격 증명 관리가 필요 없다(architecture.md에 명시된 방식)
-- 토픽: `market-data`(시세), `orders`, `executions` — 파티션 키는 마켓명(NFR-07)
+- 토픽: `orders`, `executions` — 파티션 키는 마켓명(NFR-07). 시세는 이 MSK를 거치지 않는다 — 시세 수집기→AI 트레이더는 HTTP 매니페스트/파일 API(풀 방식)를 쓴다(과거 데이터·소비자 1개뿐이라 Kafka pub-sub 이점이 없음, architecture.md 3장 참고)
 - 보안 그룹(`sg-msk`)은 아래 3장 참고
 
 ---
@@ -161,7 +162,7 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 
 | 버킷 | 용도 | 쓰기 주체 | 읽기 주체 |
 |---|---|---|---|
-| `team1-truss-market-data` (기존) | 시세 원본(OHLCV, 개별 체결) | 시세 수집기 | AI 트레이더(직접 아님, Kafka로 소비), 분석용 |
+| `team1-truss-market-data` (기존) | 시세 원본(OHLCV, 개별 체결) | 시세 수집기 | AI 트레이더(직접 아님, 시세 수집기의 매니페스트/파일 API를 HTTP로 호출해 받음), 분석용 |
 | `team1-truss-order-records` (신규) | 페이퍼 트레이딩 주문 기록 파일 | AI 트레이더 | 리플레이 엔진 |
 | `team1-truss-trade-results` (신규) | 주문·체결 결과 원본 | 기록기 | (조회용, 필요 시) |
 | `team1-truss-frontend` (신규) | 프론트엔드 정적 파일 | CI/CD 파이프라인 | CloudFront(OAC 경유만) |
@@ -191,7 +192,6 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 | 소스 | 대상 | 포트 | 용도 |
 |---|---|---|---|
 | `sg-eks-backend` | `sg-msk` | 9098 (IAM) | 접수 API 발행, 매칭 엔진 구독/발행 |
-| `sg-eks-aitrader` | `sg-msk` | 9098 (IAM) | 시세 수집기 발행, AI 트레이더 구독 |
 | `sg-eks-replay` | `sg-msk` | 9098 (IAM) | (리플레이는 Kafka 직접 접근 없음 — 접수 API만 호출. 표기는 배제 가능) |
 | `sg-eks-backend` | `sg-rds` | 5432 | 기록기 → RDS 저장 |
 | `sg-eks-backend` | `sg-redis` | 6379 | 매칭 엔진 쓰기, 접수 API 읽기 |
@@ -199,7 +199,7 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 | `sg-eks-replay` | `sg-eks-backend` (ALB/ClusterIP) | 443 | 리플레이 엔진 → 접수 API 호출 |
 | `public-a/c` (CloudFront) | `S3 (frontend)` | 443 | OAC 경유 정적 파일 서빙 |
 
-원칙: **RDS·Redis는 백엔드 클러스터에서만** 접근 가능(architecture.md 정합성 점검에서 AI 트레이더는 Redis를 직접 읽지 않고 접수 API의 GET 응답으로 호가창을 받는 구조로 확정됐으므로, `sg-redis`에 AI 트레이더/리플레이 클러스터를 열어줄 필요가 없다). MSK는 시세 수집기·AI 트레이더·백엔드가 접근하고, 리플레이 엔진은 Kafka를 직접 쓰지 않는다(접수 API만 호출).
+원칙: **RDS·Redis는 백엔드 클러스터에서만** 접근 가능(architecture.md 정합성 점검에서 AI 트레이더는 Redis를 직접 읽지 않고 접수 API의 GET 응답으로 호가창을 받는 구조로 확정됐으므로, `sg-redis`에 AI 트레이더/리플레이 클러스터를 열어줄 필요가 없다). **MSK도 백엔드 클러스터에서만** 접근한다(접수 API 발행, 매칭 엔진 구독/발행) — 시세 수집기·AI 트레이더·리플레이 엔진은 Kafka를 직접 쓰지 않는다. 시세 수집기→AI 트레이더는 HTTP 매니페스트/파일 API(풀 방식, 3장 참고), AI 트레이더·리플레이 엔진→접수 API는 위 두 행처럼 HTTP 호출이다.
 
 ---
 

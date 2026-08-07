@@ -1,4 +1,4 @@
-package main
+package validate
 
 import "testing"
 
@@ -26,50 +26,50 @@ func TestIsValidTickPrice(t *testing.T) {
 }
 
 func TestValidateSide(t *testing.T) {
-	if _, _, ok := validateSide("BUY"); !ok {
+	if _, _, ok := ValidateSide("BUY"); !ok {
 		t.Error("BUY는 유효해야 함")
 	}
-	if _, _, ok := validateSide("SELL"); !ok {
+	if _, _, ok := ValidateSide("SELL"); !ok {
 		t.Error("SELL은 유효해야 함")
 	}
-	code, _, ok := validateSide("HOLD")
+	code, _, ok := ValidateSide("HOLD")
 	if ok || code != "INVALID_SIDE" {
 		t.Errorf("HOLD는 INVALID_SIDE여야 하는데 ok=%v code=%q", ok, code)
 	}
 }
 
 func TestValidatePrice(t *testing.T) {
-	if _, _, _, ok := validatePrice("KRW-BTC", "71500000"); !ok {
+	if _, _, _, ok := ValidatePrice("KRW-BTC", "71500000"); !ok {
 		t.Error("71500000(1000원 배수)은 유효해야 함")
 	}
-	if _, code, _, ok := validatePrice("KRW-BTC", "71500123"); ok || code != "INVALID_PRICE_UNIT" {
+	if _, code, _, ok := ValidatePrice("KRW-BTC", "71500123"); ok || code != "INVALID_PRICE_UNIT" {
 		t.Errorf("호가 단위 배수가 아니면 INVALID_PRICE_UNIT이어야 하는데 ok=%v code=%q", ok, code)
 	}
-	if _, code, _, ok := validatePrice("KRW-BTC", "0"); ok || code != "INVALID_PRICE" {
+	if _, code, _, ok := ValidatePrice("KRW-BTC", "0"); ok || code != "INVALID_PRICE" {
 		t.Errorf("0은 INVALID_PRICE여야 하는데 ok=%v code=%q", ok, code)
 	}
-	if _, code, _, ok := validatePrice("KRW-BTC", "abc"); ok || code != "INVALID_PRICE" {
+	if _, code, _, ok := ValidatePrice("KRW-BTC", "abc"); ok || code != "INVALID_PRICE" {
 		t.Errorf("숫자가 아니면 INVALID_PRICE여야 하는데 ok=%v code=%q", ok, code)
 	}
 }
 
 func TestValidateQuantity(t *testing.T) {
-	if _, _, _, ok := validateQuantity("0.015"); !ok {
+	if _, _, _, ok := ValidateQuantity("0.015"); !ok {
 		t.Error("0.015는 유효해야 함")
 	}
-	if _, code, _, ok := validateQuantity("0"); ok || code != "INVALID_QUANTITY" {
+	if _, code, _, ok := ValidateQuantity("0"); ok || code != "INVALID_QUANTITY" {
 		t.Errorf("0은 INVALID_QUANTITY여야 하는데 ok=%v code=%q", ok, code)
 	}
-	if _, code, _, ok := validateQuantity("-1"); ok || code != "INVALID_QUANTITY" {
+	if _, code, _, ok := ValidateQuantity("-1"); ok || code != "INVALID_QUANTITY" {
 		t.Errorf("음수는 INVALID_QUANTITY여야 하는데 ok=%v code=%q", ok, code)
 	}
 }
 
 func TestIsTargetMarket(t *testing.T) {
-	if !isTargetMarket("KRW-BTC") {
+	if !IsTargetMarket("KRW-BTC") {
 		t.Error("KRW-BTC는 대상 마켓이어야 함")
 	}
-	if isTargetMarket("KRW-NOTREAL") {
+	if IsTargetMarket("KRW-NOTREAL") {
 		t.Error("KRW-NOTREAL은 대상 마켓이 아니어야 함")
 	}
 }

@@ -91,7 +91,7 @@ func runBot(ctx context.Context, b bot.Bot, market string, state *bot.MarketStat
 			return
 		case <-ticker.C:
 			for _, d := range b.Decide(state) {
-				if err := submitter.Submit(ctx, order.NewOrder(market, d)); err != nil {
+				if _, err := submitter.Submit(ctx, order.NewOrder(market, d)); err != nil {
 					log.Printf("[%s] %s 주문 제출 실패: %v", market, b.Name(), err)
 				}
 			}

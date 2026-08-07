@@ -38,15 +38,20 @@ func NewOrder(market string, d bot.Decision) Order {
 
 // OrderSubmitter는 생성된 주문을 어딘가로 보냅니다. 주문 접수 API(POST /v1/orders)가
 // 준비되면 이 인터페이스를 만족하는 HTTP 구현체로 교체하면 되고, 그 전까지는
-// LogOnlySubmitter로 파이프라인 자체를 검증합니다.
+// LogOnlySubmitter로 파이프라인 자체를 검증합니다. orderId를 반환하는 이유:
+// orderapi가 실제로 발급한 주문 번호를 RecordingSubmitter가 기록에 남겨야
+// (FR-17) 나중에 리플레이가 TRADE_ORDER.source_order_id로 원본 주문을 참조할
+// 수 있습니다(docs/erd.md 참고) — orderId는 제출이 성공하기 전엔 알 수 없으므로
+// Order 자체가 아니라 Submit의 반환값입니다.
 type OrderSubmitter interface {
-	Submit(ctx context.Context, o Order) error
+	Submit(ctx context.Context, o Order) (orderID string, err error)
 }
 
 // LogOnlySubmitter는 주문 접수 API 연동 전 임시로 쓰는 구현체 — 로그만 남깁니다.
+// 실제 API를 안 불러서 orderId가 없으므로 빈 문자열을 반환합니다.
 type LogOnlySubmitter struct{}
 
-func (LogOnlySubmitter) Submit(_ context.Context, o Order) error {
+func (LogOnlySubmitter) Submit(_ context.Context, o Order) (string, error) {
 	log.Printf("[order] %s %s qty=%s price=%s (주문 API 미연동 — 로그만 남김)", o.Market, o.Side, o.Quantity, o.Price)
-	return nil
+	return "", nil
 }

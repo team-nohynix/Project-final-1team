@@ -7,17 +7,22 @@ import (
 )
 
 // RecordedOrder는 주문 기록 파일(FR-17) 안의 이벤트 하나입니다. json 태그는
-// trader/orderstore가 이 값을 그대로 마샬링해서 저장하는 데 씁니다.
+// trader/orderstore가 이 값을 그대로 마샬링해서 저장하는 데 씁니다. OrderID는
+// orderapi가 접수 시 발급한 실제 주문 번호 — 나중에 replayengine이 리플레이
+// 주문을 다시 제출할 때 이 값을 함께 실어 보내면, 기록기가
+// TRADE_ORDER.source_order_id(docs/erd.md)로 원본 주문을 추적할 수 있습니다.
 type RecordedOrder struct {
 	TS       int64  `json:"ts"`
 	Side     string `json:"side"`
 	Price    string `json:"price"`
 	Quantity string `json:"quantity"`
+	OrderID  string `json:"orderId"`
 }
 
-// OrderRecorder는 주문 하나를 기록에 남깁니다.
+// OrderRecorder는 주문 하나를 기록에 남깁니다. orderID는 Submit이 성공해야만
+// 알 수 있으므로(Order 자체엔 없음) 별도 인자로 받습니다.
 type OrderRecorder interface {
-	Record(o Order)
+	Record(o Order, orderID string)
 }
 
 // InMemoryRecorder는 트레이더 실행 한 번 동안 마켓별로 주문을 메모리에 누적합니다.
@@ -32,7 +37,7 @@ func NewInMemoryRecorder() *InMemoryRecorder {
 	return &InMemoryRecorder{byMarket: make(map[string][]RecordedOrder)}
 }
 
-func (r *InMemoryRecorder) Record(o Order) {
+func (r *InMemoryRecorder) Record(o Order, orderID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.byMarket[o.Market] = append(r.byMarket[o.Market], RecordedOrder{
@@ -40,6 +45,7 @@ func (r *InMemoryRecorder) Record(o Order) {
 		Side:     o.Side,
 		Price:    o.Price,
 		Quantity: o.Quantity,
+		OrderID:  orderID,
 	})
 }
 
@@ -67,10 +73,11 @@ type RecordingSubmitter struct {
 	Recorder OrderRecorder
 }
 
-func (s RecordingSubmitter) Submit(ctx context.Context, o Order) error {
-	if err := s.Next.Submit(ctx, o); err != nil {
-		return err
+func (s RecordingSubmitter) Submit(ctx context.Context, o Order) (string, error) {
+	orderID, err := s.Next.Submit(ctx, o)
+	if err != nil {
+		return "", err
 	}
-	s.Recorder.Record(o)
-	return nil
+	s.Recorder.Record(o, orderID)
+	return orderID, nil
 }

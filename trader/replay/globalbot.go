@@ -50,7 +50,7 @@ func runGlobalBot(ctx context.Context, b bot.GlobalBot, states map[string]*bot.M
 			return
 		case <-ticker.C:
 			for _, gd := range b.Decide(states) {
-				if err := submitter.Submit(ctx, order.NewOrder(gd.Market, gd.Decision)); err != nil {
+				if _, err := submitter.Submit(ctx, order.NewOrder(gd.Market, gd.Decision)); err != nil {
 					log.Printf("[global] %s 주문 제출 실패 (%s): %v", b.Name(), gd.Market, err)
 				}
 			}

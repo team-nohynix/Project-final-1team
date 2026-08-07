@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -12,9 +13,16 @@ import (
 	"trader/order"
 	"trader/orderstore"
 	"trader/replay"
+	"trader/session"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	date := flag.String("date", "", "재생할 날짜 (YYYY-MM-DD, 필수)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 저장할 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에 저장)")
@@ -23,20 +31,50 @@ func main() {
 	cfg := LoadConfig()
 
 	if *date == "" {
-		log.Fatal("-date는 필수입니다 (YYYY-MM-DD)")
+		return fmt.Errorf("-date는 필수입니다 (YYYY-MM-DD)")
 	}
 	start, err := time.Parse("2006-01-02", *date)
 	if err != nil {
-		log.Fatalf("-date 형식이 올바르지 않습니다: %v", err)
+		return fmt.Errorf("-date 형식이 올바르지 않습니다: %w", err)
 	}
 	start = start.UTC()
 	end := start.Add(24 * time.Hour)
 
 	httpClient := client.NewHTTPClient()
 
+	// 팀 결정(2026-08-06): 두 개 이상의 트레이더, 또는 트레이더와 리플레이 엔진이
+	// 동시에 실행되는 상황은 undefined이므로 애초에 막는다 — 같은 매칭 엔진
+	// 호가창에 서로 다른 실행의 주문이 섞여 들어가는 걸 방지한다. orderapi의 세션
+	// API로 실행 시작 시점에 딱 한 번만 배타적으로 클레임한다(주문 하나하나가
+	// 오가는 경로에는 관여하지 않으므로 NFR-01 처리량에 영향 없음). run()을 별도
+	// 함수로 뽑아낸 이유도 이것과 직접 관련 있다 — log.Fatal은 os.Exit로 즉시
+	// 종료해 defer(세션 반납)를 건너뛰므로, 세션 반납이 항상 실행되도록 에러를
+	// 반환하는 형태로 바꾸고 main()에서 마지막에 한 번만 log.Fatal한다.
+	sessionClient := session.Client{HTTPClient: httpClient, BaseURL: cfg.OrderAPIURL}
+	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "trader")
+	if err != nil {
+		return fmt.Errorf("세션 클레임 실패 — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있습니다: %w", err)
+	}
+	log.Printf("세션 클레임 완료 (sessionId=%s)", sessionID)
+
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Go(func() {
+		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds)
+	})
+	defer func() {
+		stopHeartbeat()
+		heartbeatWG.Wait()
+		if err := sessionClient.Release(context.Background(), sessionID); err != nil {
+			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, err)
+		} else {
+			log.Printf("세션 반납 완료 (sessionId=%s)", sessionID)
+		}
+	}()
+
 	manifest, err := client.FetchManifest(context.Background(), httpClient, cfg.BackendURL, *date)
 	if err != nil {
-		log.Fatalf("매니페스트 조회 실패: %v", err)
+		return fmt.Errorf("매니페스트 조회 실패: %w", err)
 	}
 	log.Printf("매니페스트 수신: %d개 마켓", len(manifest.Markets))
 
@@ -111,7 +149,8 @@ func main() {
 
 	if len(failed) > 0 {
 		log.Printf("전체 재생 완료 — 실패한 마켓(%d개): %v", len(failed), failed)
-		return
+		return nil
 	}
 	log.Printf("전체 재생 완료 — %d개 마켓 전부 성공", len(manifest.Markets))
+	return nil
 }

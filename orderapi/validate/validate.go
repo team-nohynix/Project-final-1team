@@ -1,4 +1,5 @@
-package main
+// Package validate는 주문 접수 요청의 유효성 검증(마켓/side/가격/수량)을 담당합니다.
+package validate
 
 import (
 	"fmt"
@@ -16,7 +17,8 @@ var TargetMarkets = []string{
 	"KRW-ERA", "KRW-ADA", "KRW-AI", "KRW-NEAR", "KRW-ARX",
 }
 
-func isTargetMarket(market string) bool {
+// IsTargetMarket은 market이 대상 20개 마켓에 포함되는지 확인합니다.
+func IsTargetMarket(market string) bool {
 	return slices.Contains(TargetMarkets, market)
 }
 
@@ -59,16 +61,16 @@ func isValidTickPrice(price float64) bool {
 	return math.Abs(ratio-math.Round(ratio)) < 1e-6
 }
 
-// validateSide는 side가 BUY/SELL인지 확인합니다.
-func validateSide(side string) (errorCode, message string, ok bool) {
+// ValidateSide는 side가 BUY/SELL인지 확인합니다.
+func ValidateSide(side string) (errorCode, message string, ok bool) {
 	if side != "BUY" && side != "SELL" {
 		return "INVALID_SIDE", "side는 BUY 또는 SELL이어야 합니다.", false
 	}
 	return "", "", true
 }
 
-// validatePrice는 price 문자열을 파싱해 0보다 크고 호가 단위 배수인지 확인합니다.
-func validatePrice(market, priceStr string) (price float64, errorCode, message string, ok bool) {
+// ValidatePrice는 price 문자열을 파싱해 0보다 크고 호가 단위 배수인지 확인합니다.
+func ValidatePrice(market, priceStr string) (price float64, errorCode, message string, ok bool) {
 	price, err := strconv.ParseFloat(priceStr, 64)
 	if err != nil || price <= 0 {
 		return 0, "INVALID_PRICE", "가격이 0 이하이거나 형식 오류입니다.", false
@@ -81,8 +83,8 @@ func validatePrice(market, priceStr string) (price float64, errorCode, message s
 	return price, "", "", true
 }
 
-// validateQuantity는 quantity 문자열을 파싱해 0보다 큰지 확인합니다.
-func validateQuantity(quantityStr string) (quantity float64, errorCode, message string, ok bool) {
+// ValidateQuantity는 quantity 문자열을 파싱해 0보다 큰지 확인합니다.
+func ValidateQuantity(quantityStr string) (quantity float64, errorCode, message string, ok bool) {
 	quantity, err := strconv.ParseFloat(quantityStr, 64)
 	if err != nil || quantity <= 0 {
 		return 0, "INVALID_QUANTITY", "수량이 0 이하이거나 형식 오류입니다.", false

@@ -221,6 +221,7 @@ yarn-error.log
 
 .env
 backend/data/
+recorder/records/
 
 ### Terraform ###
 **/.terraform/*

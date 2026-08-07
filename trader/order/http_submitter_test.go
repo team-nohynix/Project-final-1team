@@ -20,14 +20,19 @@ func TestHTTPOrderSubmitterSubmitsAcceptedOrder(t *testing.T) {
 		gotKey = r.Header.Get("Idempotency-Key")
 		json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(orderResponse{OrderID: "ord_20260807_0000001"})
 	}))
 	defer srv.Close()
 
 	s := HTTPOrderSubmitter{Client: srv.Client(), BaseURL: srv.URL}
 	o := NewOrder("KRW-BTC", bot.Decision{Side: "BUY", Price: 90_000_000, Quantity: 0.001})
 
-	if err := s.Submit(context.Background(), o); err != nil {
+	orderID, err := s.Submit(context.Background(), o)
+	if err != nil {
 		t.Fatalf("Submit 실패: %v", err)
+	}
+	if orderID != "ord_20260807_0000001" {
+		t.Errorf("orderID = %q, want ord_20260807_0000001", orderID)
 	}
 	if gotPath != "/v1/orders" {
 		t.Errorf("경로 = %q, want /v1/orders", gotPath)
@@ -49,7 +54,7 @@ func TestHTTPOrderSubmitterReturnsErrorOnNonAccepted(t *testing.T) {
 	s := HTTPOrderSubmitter{Client: srv.Client(), BaseURL: srv.URL}
 	o := NewOrder("KRW-BTC", bot.Decision{Side: "SELL", Price: 90_000_000, Quantity: 0.001})
 
-	if err := s.Submit(context.Background(), o); err == nil {
+	if _, err := s.Submit(context.Background(), o); err == nil {
 		t.Fatal("400 응답에 대해 에러를 기대했으나 nil")
 	}
 }
@@ -59,16 +64,17 @@ func TestHTTPOrderSubmitterUsesFreshIdempotencyKeyEachCall(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
 		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(orderResponse{OrderID: "ord_20260807_0000001"})
 	}))
 	defer srv.Close()
 
 	s := HTTPOrderSubmitter{Client: srv.Client(), BaseURL: srv.URL}
 	o := NewOrder("KRW-BTC", bot.Decision{Side: "BUY", Price: 90_000_000, Quantity: 0.001})
 
-	if err := s.Submit(context.Background(), o); err != nil {
+	if _, err := s.Submit(context.Background(), o); err != nil {
 		t.Fatalf("첫 번째 Submit 실패: %v", err)
 	}
-	if err := s.Submit(context.Background(), o); err != nil {
+	if _, err := s.Submit(context.Background(), o); err != nil {
 		t.Fatalf("두 번째 Submit 실패: %v", err)
 	}
 

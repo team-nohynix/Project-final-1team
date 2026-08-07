@@ -25,7 +25,7 @@ func TestLogOnlySubmitterNeverErrors(t *testing.T) {
 	var s OrderSubmitter = LogOnlySubmitter{}
 	o := NewOrder("KRW-BTC", bot.Decision{Side: "SELL", Price: 90_000_000, Quantity: 0.001})
 
-	if err := s.Submit(context.Background(), o); err != nil {
+	if _, err := s.Submit(context.Background(), o); err != nil {
 		t.Errorf("LogOnlySubmitter.Submit 은 항상 nil을 반환해야 하는데: %v", err)
 	}
 }

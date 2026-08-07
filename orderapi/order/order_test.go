@@ -1,4 +1,4 @@
-package main
+package order
 
 import (
 	"strings"
@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-func TestOrderStoreNewOrderIDFormatAndUniqueness(t *testing.T) {
-	s := NewOrderStore()
+func TestStoreNewOrderIDFormatAndUniqueness(t *testing.T) {
+	s := NewStore()
 	now := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
 
 	id1 := s.NewOrderID(now)
@@ -21,8 +21,8 @@ func TestOrderStoreNewOrderIDFormatAndUniqueness(t *testing.T) {
 	}
 }
 
-func TestOrderStoreSaveAndGet(t *testing.T) {
-	s := NewOrderStore()
+func TestStoreSaveAndGet(t *testing.T) {
+	s := NewStore()
 	o := &Order{OrderID: "ord_test_1", Market: "KRW-BTC", Status: StatusAccepted}
 	s.Save(o)
 
