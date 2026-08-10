@@ -6,11 +6,19 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+// ErrTooManyRequests는 orderapi가 429(RDS 백프레셔, CLAUDE.md의 "RDS admission
+// control via recorder consumer lag" 참고)로 거절했음을 나타냅니다.
+// RetryingSubmitter가 이 에러인지 확인해서, 이것만 재시도합니다 — 검증 실패
+// (400) 등 다른 에러는 재시도해도 똑같이 실패할 가능성이 높거나 원인이 다르므로
+// 재시도 대상이 아닙니다.
+var ErrTooManyRequests = errors.New("주문 접수 API가 429(백프레셔)로 거절함")
 
 // HTTPOrderSubmitter는 생성된 주문을 실제 주문 접수 API(orderapi, POST /v1/orders)로 보냅니다.
 type HTTPOrderSubmitter struct {
@@ -33,9 +41,10 @@ type orderResponse struct {
 }
 
 // Submit은 o를 orderapi에 신규 주문으로 접수하고, orderapi가 발급한 orderId를
-// 반환합니다(RecordingSubmitter가 FR-17 기록에 남기기 위해 필요). trader에는
-// 재시도 로직이 없어서(한 번의 Submit 호출 = 한 번의 신규 주문 시도) 매 호출마다
-// 새 Idempotency-Key를 씁니다.
+// 반환합니다(RecordingSubmitter가 FR-17 기록에 남기기 위해 필요). Idempotency-Key는
+// o.IdempotencyKey(생성 시점에 한 번 정해짐, order.go 참고)를 그대로 씁니다 —
+// RetryingSubmitter가 같은 o로 여러 번 재시도해도 항상 같은 키가 나가야 하기
+// 때문입니다.
 func (s HTTPOrderSubmitter) Submit(ctx context.Context, o Order) (string, error) {
 	body, err := json.Marshal(orderRequest{
 		Market:   o.Market,
@@ -52,7 +61,7 @@ func (s HTTPOrderSubmitter) Submit(ctx context.Context, o Order) (string, error)
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", newIdempotencyKey())
+	req.Header.Set("Idempotency-Key", o.IdempotencyKey)
 	req.Header.Set("X-Order-Mode", "PAPER_TRADING")
 
 	resp, err := s.Client.Do(req)
@@ -67,6 +76,9 @@ func (s HTTPOrderSubmitter) Submit(ctx context.Context, o Order) (string, error)
 	// 근본 원인은 재사용 자체가 안 되고 있었던 것이라, 여기도 같은 문제가 있었습니다).
 	respBody, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "", fmt.Errorf("%w: %s", ErrTooManyRequests, respBody)
+	}
 	if resp.StatusCode != http.StatusAccepted {
 		return "", fmt.Errorf("주문 접수 실패 (status=%d): %s", resp.StatusCode, respBody)
 	}
@@ -79,7 +91,9 @@ func (s HTTPOrderSubmitter) Submit(ctx context.Context, o Order) (string, error)
 }
 
 // newIdempotencyKey는 orderapi/server.go의 requestID()와 같은 방식(crypto/rand -> hex)으로
-// 매 요청마다 새 키를 만듭니다.
+// 새 키를 만듭니다. order.go의 NewOrder가 Order 생성 시점에 한 번만 호출합니다
+// (예전엔 여기서 Submit마다 호출했지만, 재시도가 도입되면서 같은 논리적 주문의
+// 재시도가 매번 다른 키를 쓰게 되는 걸 막기 위해 옮겼습니다).
 func newIdempotencyKey() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {

@@ -79,10 +79,16 @@ func run() error {
 	log.Printf("매니페스트 수신: %d개 마켓", len(manifest.Markets))
 
 	// 주문 접수 API(orderapi)에 실제로 POST /v1/orders를 보냅니다.
-	// RecordingSubmitter로 감싸서, 성공적으로 "제출"된(202 응답을 받은) 주문만 recorder에 남깁니다(FR-17).
+	// RetryingSubmitter가 429(RDS 백프레셔)만 지수 백오프로 재시도하고, 그
+	// 최종 결과를 RecordingSubmitter가 성공했을 때만 recorder에 남깁니다(FR-17,
+	// "기록 건수와 접수 건수 일치"). 데코레이터 순서가 중요합니다 — Recording이
+	// 바깥이라야 재시도 도중의 중간 실패가 아니라 재시도까지 다 끝난 최종
+	// 결과만 기록 여부 판단에 씁니다.
 	recorder := order.NewInMemoryRecorder()
 	var submitter order.OrderSubmitter = order.RecordingSubmitter{
-		Next:     order.HTTPOrderSubmitter{Client: httpClient, BaseURL: cfg.OrderAPIURL},
+		Next: order.RetryingSubmitter{
+			Next: order.HTTPOrderSubmitter{Client: httpClient, BaseURL: cfg.OrderAPIURL},
+		},
 		Recorder: recorder,
 	}
 

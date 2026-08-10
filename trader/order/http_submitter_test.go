@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,6 +46,21 @@ func TestHTTPOrderSubmitterSubmitsAcceptedOrder(t *testing.T) {
 	}
 }
 
+func TestHTTPOrderSubmitterWraps429AsErrTooManyRequests(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"errorCode":"CONSUMER_LAG_EXCEEDED"}`, http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	s := HTTPOrderSubmitter{Client: srv.Client(), BaseURL: srv.URL}
+	o := NewOrder("KRW-BTC", bot.Decision{Side: "BUY", Price: 90_000_000, Quantity: 0.001})
+
+	_, err := s.Submit(context.Background(), o)
+	if !errors.Is(err, ErrTooManyRequests) {
+		t.Errorf("err = %v, want ErrTooManyRequests로 감싸져 있어야 함 (RetryingSubmitter가 errors.Is로 식별)", err)
+	}
+}
+
 func TestHTTPOrderSubmitterReturnsErrorOnNonAccepted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"errorCode":"INVALID_MARKET"}`, http.StatusBadRequest)
@@ -59,7 +75,12 @@ func TestHTTPOrderSubmitterReturnsErrorOnNonAccepted(t *testing.T) {
 	}
 }
 
-func TestHTTPOrderSubmitterUsesFreshIdempotencyKeyEachCall(t *testing.T) {
+// TestHTTPOrderSubmitterReusesSameKeyOnRepeatedSubmit — Idempotency-Key는 이제
+// Order 생성 시점(NewOrder)에 고정되므로, 같은 Order를 여러 번 Submit해도
+// (RetryingSubmitter가 재시도할 때 실제로 하는 일) 항상 같은 키가 나가야
+// 합니다 — 예전엔 반대로 "호출마다 새 키"가 맞는 동작이었지만, 재시도가
+// 도입되면서 뒤집혔습니다(order.go의 Order.IdempotencyKey 설명 참고).
+func TestHTTPOrderSubmitterReusesSameKeyOnRepeatedSubmit(t *testing.T) {
 	var keys []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, r.Header.Get("Idempotency-Key"))
@@ -78,7 +99,18 @@ func TestHTTPOrderSubmitterUsesFreshIdempotencyKeyEachCall(t *testing.T) {
 		t.Fatalf("두 번째 Submit 실패: %v", err)
 	}
 
-	if len(keys) != 2 || keys[0] == "" || keys[1] == "" || keys[0] == keys[1] {
-		t.Errorf("Idempotency-Key들 = %v, 매 호출마다 서로 다른 비어있지 않은 값을 기대함", keys)
+	if len(keys) != 2 || keys[0] == "" || keys[1] == "" || keys[0] != keys[1] {
+		t.Errorf("Idempotency-Key들 = %v, 같은 Order를 재사용하면 매번 같은 값을 기대함", keys)
+	}
+}
+
+// TestNewOrderGeneratesFreshKeyPerOrder — NewOrder를 따로 호출할 때마다는
+// (=서로 다른 논리적 주문) 서로 다른 키가 나와야 합니다.
+func TestNewOrderGeneratesFreshKeyPerOrder(t *testing.T) {
+	o1 := NewOrder("KRW-BTC", bot.Decision{Side: "BUY", Price: 90_000_000, Quantity: 0.001})
+	o2 := NewOrder("KRW-BTC", bot.Decision{Side: "BUY", Price: 90_000_000, Quantity: 0.001})
+
+	if o1.IdempotencyKey == "" || o2.IdempotencyKey == "" || o1.IdempotencyKey == o2.IdempotencyKey {
+		t.Errorf("IdempotencyKey들 = %q, %q — 서로 다른 비어있지 않은 값을 기대함", o1.IdempotencyKey, o2.IdempotencyKey)
 	}
 }
