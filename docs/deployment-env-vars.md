@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-10 (2차) | Kafka SASL/SCRAM(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`) + Redis AUTH(`REDIS_PASSWORD`) 환경변수 추가 — orderapi/matching/recorder 3개 모듈 전부. 기존 "코드에 인증 지원 없음" 참고 섹션은 삭제(이제 지원함) |
 | 2026-08-10 | 최초 작성 — AWS에서 6개 Go 모듈을 실제로 돌릴 때 필요한 환경변수/플래그 전체 정리 (AI 트레이더 Bedrock 연동 작업 직후) |
 
 ## 관련 문서
@@ -34,6 +35,8 @@ CLI 플래그 없음 — `go run .`으로 HTTP 서버만 띄우고, `POST /v1/co
 | `PORT` | 선택 | `8081` | 보통 그대로 둠 |
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠(고정 관례값) |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠(고정 관례값, 2026-08-10 체결 반영 기능 추가로 신설) |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | MSK SASL/SCRAM 사용자명/비밀번호 — 6번 문서 "Kafka/Redis 인증" 참고. 둘 다 비우면 인증 없이 붙음(로컬 그대로) |
+| `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | ElastiCache AUTH 토큰. 비우면 인증 없이 붙음 |
 
 CLI 플래그 없음. **주의**: `orders` 토픽은 자동 생성에 맡기면 안 되고 **정확히 20개 파티션**으로 미리 만들어둬야 함(마켓 1개=파티션 1개 전제, FR-11).
 
@@ -48,6 +51,8 @@ CLI 플래그 없음. **주의**: `orders` 토픽은 자동 생성에 맡기면 
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠 |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
 | `ASSIGNMENTS_TOPIC` | 선택 | `assignments` | 그대로 둠 |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | orderapi와 동일 값 — 6번 문서 참고 |
+| `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi와 동일 값 |
 
 CLI 플래그 없음. 인스턴스를 몇 개 띄우든(FR-11) 전부 같은 값을 보게 하면 됨 — 컨슈머 그룹 ID(`matching-engine`)는 코드 상수라 환경변수가 아님.
 
@@ -105,17 +110,21 @@ CLI 플래그:
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
 | `ASSIGNMENTS_TOPIC` | 선택 | `assignments` | 그대로 둠 |
 | `ARCHIVE_BUCKET` | 선택 | `""`(비우면 로컬 `./records`) | `team1-truss-trade-results`(이미 AWS엔 있음, Terraform state엔 아직 없음 — 5번 문서 참고) |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | orderapi/matching과 동일 값 — 아래 참고 |
+| `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi/matching과 동일 값 |
 
 CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
 
 ---
 
-## 참고: Kafka/Redis 인증에 대한 현재 코드의 전제
+## Kafka/Redis 인증 (2026-08-10 추가)
 
-지금 6개 모듈의 Kafka 클라이언트(`segmentio/kafka-go`)는 전부 **SASL/TLS 설정이 없다** — 브로커에 평문 TCP로 그냥 붙는다. Redis 클라이언트(`go-redis/v9`)도 마찬가지로 **비밀번호/AUTH 설정이 없다**.
+`orderapi`/`matching`/`recorder` 세 모듈 모두 **SASL/SCRAM-SHA-512(Kafka) + AUTH 토큰(Redis)** 인증을 지원한다. 두 값 다 선택(optional) 환경변수라, 비워두면 로컬 dev-kafka/dev-redis처럼 인증 없이 그대로 붙는다 — 즉 이 값들을 안 채워도 로컬 개발 워크플로는 전혀 바뀌지 않는다.
 
-즉:
-- `infra-placement-design.md`가 제안한 **MSK Serverless + SASL/IAM 인증**을 그대로 쓰면, 지금 코드로는 연결이 안 된다 — `github.com/aws/aws-msk-iam-sasl-signer-go` 같은 걸 붙이는 **코드 작업이 먼저 필요**하다.
-- ElastiCache를 **AUTH 토큰 있는 구성**으로 만들면 마찬가지로 코드 쪽에 `REDIS_PASSWORD` 같은 값을 추가해야 한다.
+**Kafka(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`)**: 둘 다 채워지면 SCRAM-SHA-512 + TLS로 MSK에 인증한다. **AWS_MSK_IAM이 아니라 SASL/SCRAM을 쓰기로 결정**했다 — `segmentio/kafka-go`(이 프로젝트가 쓰는 버전)가 AWS_MSK_IAM SASL 메커니즘을 내장 지원하지 않고, 직접 프로토콜을 구현하면 실제 MSK 없이는 검증할 방법이 없어 위험이 크다고 판단했기 때문이다. SCRAM은 kafka-go가 이미 지원하는 검증된 방식이고, 이번에 실제로(로컬 disposable Kafka 브로커에 SCRAM 인증 붙여서) 정상 동작을 확인했다.
 
-인프라 쪽에서 "VPC 프라이빗 서브넷 안이라 네트워크 격리로 충분하다"고 판단해 인증 없는 Kafka/Redis(보안 그룹으로만 접근 제어)로 간다면 지금 코드가 그대로 동작한다. IAM 인증/AUTH 토큰을 쓰기로 하면, 그건 이 문서의 범위를 넘는 별도 코드 작업이 필요하다는 것만 미리 알아두면 됨.
+MSK 쪽에서 준비해야 할 것: `kafka-configs.sh --bootstrap-server ... --alter --add-config 'SCRAM-SHA-512=[password=...]' --entity-type users --entity-name <사용자명>`으로 SCRAM 사용자를 등록해야 한다(AWS 콘솔/CLI에서도 가능). 이 사용자명/비밀번호를 `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`로 넘기면 된다 — Secrets Manager에 저장해두고 배포 시 주입하는 방식을 권장.
+
+**Redis(`REDIS_PASSWORD`)**: ElastiCache를 AUTH 토큰 있는 구성으로 만들고 그 토큰 값을 넘기면 된다 — `go-redis/v9`가 이미 지원하는 필드라 별도 구현이 필요 없었다.
+
+**인프라 쪽에서 "VPC 프라이빗 서브넷 안이라 네트워크 격리로 충분하다"고 판단하면, 이 환경변수들을 그냥 비워두는 것도 유효한 선택이다** — 코드가 두 경로(인증 있음/없음) 모두 지원하므로 어느 쪽으로 가든 코드 변경이 필요 없다.

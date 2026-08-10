@@ -3,6 +3,8 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-10 (3차) | Kafka/Redis 인증 지원 완료 — orderapi/matching/recorder 3개 모듈 모두 SASL/SCRAM-SHA-512(Kafka) + AUTH 토큰(Redis)을 지원하게 코드를 고쳤다. 5·6번 섹션을 "지금 코드는 인증 지원 안 함"에서 "이렇게 인증을 켜면 된다"로 다시 씀. `infra-placement-design.md`의 RDS 엔진(PostgreSQL→MySQL)뿐 아니라 Kafka 보안 그룹 매트릭스의 "9098 (IAM)" 표기도 이번에 SCRAM으로 정정 |
+| 2026-08-10 (2차) | 최초 작성 후 발견: RoundTripper 인터페이스에 nil 포인터를 담아 넘기면(콘크리트 타입 nil→인터페이스 nil 아님) 인증 없는 로컬 환경에서 오히려 패닉이 나는 버그를 실제로 겪고 고침(코드 쪽 이슈, 이 문서엔 직접 영향 없음) |
 | 2026-08-10 | 최초 작성 — 현재 실제 구현(Go 6개 모듈, MySQL로 전환된 recorder, 2026-08-10 추가된 Bedrock 연동)을 기준으로 필요한 AWS 리소스/권한을 정리. 기존 설계 문서와의 불일치 2건 발견 — 같은 날 `ai-trader-design.md`의 Python 표기는 Go로 정정했음(아래 1번은 해결됨). `infra-placement-design.md`의 RDS 엔진 표기(2번)는 아직 안 고침 |
 
 ## 먼저 확인해줄 것 — 기존 설계 문서와 실제 구현이 다른 부분
@@ -56,22 +58,23 @@
 | `team1_trader_role` (신규) | `trader` | S3 `team1-truss-order-records`에 PutObject + Bedrock `InvokeModel`(3번 참고) |
 | `team1_replayengine_role` (신규) | `replayengine` | S3 `team1-truss-order-records`에 GetObject |
 | `team1_recorder_role` (신규) | `recorder` | S3 `team1-truss-trade-results`에 PutObject |
-| `orderapi`/`matching`용 역할 | `orderapi`, `matching` | 지금은 S3/Bedrock 권한 불필요 — Kafka/Redis 접근은 보안 그룹(네트워크)으로 통제할지 IAM 인증(MSK SASL/IAM)으로 할지에 따라 달라짐(5번 참고) |
+| `orderapi`/`matching`/`recorder`용 역할 | `orderapi`, `matching`, `recorder` | S3/Bedrock IAM 권한 불필요 — Kafka/Redis 인증은 **IAM이 아니라 SASL/SCRAM 사용자명+비밀번호와 Redis AUTH 토큰**으로 처리한다(5·6번 참고). 이 값들은 IAM 정책이 아니라 Secrets Manager 등에 저장해 배포 시 환경변수로 주입하는 형태 |
 
 각 역할을 실제로 무엇에 붙일지(EC2 인스턴스 프로필 / EKS IRSA / Fargate 태스크 역할)는 컴퓨트를 뭘로 정하느냐에 따라 달라진다 — `backend`는 이미 EC2 인스턴스 프로필로 검증된 전례가 있음.
 
-## 5. Kafka — 중요: 지금 코드는 인증 없는 연결만 지원
+## 5. Kafka — 인증 지원 완료 (SASL/SCRAM, IAM 아님)
 
 - 필요한 것: 브로커 엔드포인트 1개(`KAFKA_BROKER`), `orders`/`executions`/`assignments` 3개 토픽. **`orders`는 자동 생성에 맡기면 안 되고 정확히 20개 파티션으로 미리 만들어야 한다**(마켓 1개 = 파티션 1개 전제).
-- `infra-placement-design.md`는 MSK Serverless + SASL/IAM 인증을 제안하는데, **지금 6개 모듈의 Kafka 클라이언트는 SASL/TLS 설정이 전혀 없다** — 이대로 MSK IAM 인증에 붙이면 연결이 안 된다. 두 가지 선택지:
-  1. MSK를 프라이빗 서브넷에 두고 **보안 그룹으로만 접근 통제**(인증 없음) — 지금 코드가 그대로 동작.
-  2. SASL/IAM 인증을 쓰고 싶다면 — 코드 쪽에 `aws-msk-iam-sasl-signer-go` 연동을 먼저 추가하는 별도 작업이 필요(이 문서 범위 밖, 별도로 알려주면 처리).
-- 어느 쪽으로 갈지 미리 정해주면 그에 맞게 진행할 수 있음.
+- **`infra-placement-design.md`는 MSK Serverless + SASL/IAM을 제안했는데, IAM 대신 SASL/SCRAM-SHA-512로 결정했다.** 이유: `segmentio/kafka-go`(이 프로젝트가 쓰는 Kafka 클라이언트 라이브러리)가 AWS_MSK_IAM SASL 메커니즘을 내장 지원하지 않아서 직접 프로토콜을 구현해야 하는데, 실제 MSK 없이는 그 구현을 검증할 방법이 없어 위험이 크다고 판단했다. SCRAM은 kafka-go가 이미 지원하는 검증된 방식이라 그쪽으로 갔다 — 로컬에서 disposable SASL/SCRAM 브로커를 직접 띄워 인증 성공/실패(틀린 비밀번호는 거절됨) 둘 다 실제로 확인했다.
+- **MSK 쪽 설정**: 클러스터를 SASL/SCRAM 인증 방식으로 만들고, `kafka-configs.sh --bootstrap-server ... --alter --add-config 'SCRAM-SHA-512=[password=...]' --entity-type users --entity-name <사용자명>`으로 사용자를 등록(AWS 콘솔/CLI로도 가능). 이 사용자명/비밀번호를 `orderapi`/`matching`/`recorder` 세 모듈 모두에 `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`로 넘기면 됨 — Secrets Manager에 저장해 배포 시 주입 권장.
+- **SCRAM은 TLS와 항상 같이 간다(SASL_SSL)** — 코드가 인증 정보를 채우면 자동으로 TLS도 같이 켜므로, 클러스터 쪽도 SASL_SSL(SASL_PLAINTEXT 아님)로 만들어야 한다. TLS 자체는 MSK가 발급하는 인증서를 그대로 신뢰하는 표준 설정이라 추가로 정할 게 없음.
+- **인증 없이 갈 수도 있다**: `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`를 비워두면 인증 없는 연결(로컬 dev-kafka와 동일)로 동작한다 — "VPC 프라이빗 서브넷 안이라 네트워크 격리로 충분하다"고 판단하면 이 경로로 가도 됨. 코드 변경 없이 두 경로 다 지원.
 
-## 6. Redis — 같은 이유로 인증 없는 연결만 지원
+## 6. Redis — 인증 지원 완료 (AUTH 토큰)
 
 - 필요한 것: 엔드포인트 1개(`REDIS_ADDR`). `orderapi`(세션 가드, 백프레셔 체크, 호가창 캐시), `matching`(스냅샷, 백프레셔, 부하 추적), `recorder`(백프레셔 감시)가 전부 같은 인스턴스를 씀.
-- ElastiCache를 **AUTH 토큰 있는 구성**으로 만들면 지금 코드로는 연결이 안 됨(비밀번호 넘기는 코드가 없음) — Kafka와 같은 이유. 인증 없이(보안 그룹으로만 통제) 갈지, 코드에 `REDIS_PASSWORD` 추가 작업을 먼저 할지 정해주면 됨.
+- ElastiCache를 **AUTH 토큰 있는 구성**으로 만들고 그 토큰을 `REDIS_PASSWORD`(세 모듈 공통)로 넘기면 됨 — `go-redis/v9`가 이미 지원하는 필드라 추가 구현 없이 바로 됨.
+- 비워두면 인증 없이 붙는다(로컬과 동일) — Kafka와 같은 이유로 인프라 판단에 따라 어느 쪽이든 선택 가능.
 
 ## 7. RDS — MySQL (PostgreSQL 아님, 위 "먼저 확인해줄 것" 참고)
 
@@ -91,5 +94,5 @@
 ## 9. 아직 정해지지 않은 것 (확인 후 알려주면 반영)
 
 - Bedrock 모델의 `ap-northeast-2` 가용 여부 / 크로스 리전 프로파일 필요 여부
-- Kafka/Redis를 인증 없이(보안 그룹만) 갈지, IAM/AUTH 인증을 쓸지 — 후자면 코드 작업이 먼저 필요
+- Kafka/Redis를 인증 없이(보안 그룹만) 갈지, SASL/SCRAM+AUTH 인증을 쓸지 — **코드는 이미 둘 다 지원하므로 이건 순수히 인프라 쪽 판단**(더 이상 코드 작업이 필요하지 않음)
 - 컴퓨트 방식(EKS/EC2/Lambda+K8s Job) 최종 결정
