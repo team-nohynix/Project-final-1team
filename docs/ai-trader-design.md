@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-10 | 7장 "구현 개요"의 스택을 Python→**Go**로 정정 — 실제 구현(`trader/` 모듈)이 이 프로젝트의 다른 컴포넌트와 통일해 Go로 진행됐고, 이 문서만 예전 계획(Python) 그대로 남아 있었다. 핵심 라이브러리·Bedrock 호출 코드 예시도 Go 기준(aws-sdk-go-v2)으로 교체하고, 현재 구현 상태(①~④ 완료, Claude 연동은 실제 Bedrock 접근으로 아직 미검증)를 추가 |
 | 2026-08-05 | 시세 수집기→AI 트레이더 구간의 Kafka 시세 토픽 구독을 제거하고 HTTP 매니페스트/파일 API(풀 방식)로 정정(2.1 다이어그램, 2.3 데이터 흐름, 7장 구현 개요) — architecture.md·requirements.md와 함께 정정 |
 | 2026-08-03 | - requirements.md 기준 AI 트레이더 설계 문서 최초 작성 후, 인프라를 EC2→EKS(Kubernetes Job)로 변경(AI 트레이더·리플레이 엔진·백엔드를 별도 클러스터로 두어 architecture.md와 정합성 맞춤)<br>- Claude 연동 방식(AWS Bedrock)과 설계 근거(EconAgent/FinCon) 반영, 판단 주기·주문 생성 주기 분리 및 호가창 생성 주체(매칭 엔진→Redis→접수 API) 데이터 흐름 명확화<br>- 3장에 봇 5종 구현 알고리즘(규칙 기반 3종 계산 로직, LLM 기반 2종 프롬프트 입력 데이터), 4장에 가격·수량 결정 규칙 구체화<br>- 다중 파드 환경의 주문 기록 파일 병합 문제 반영(5장·8장), 문서 표현·다이어그램 정리 |
 
@@ -221,9 +222,9 @@ LLM을 쓰지 않는 봇은 매 판단 주기마다 아래 규칙을 그대로 �
 - 프롬프트는 역할 프로필(persona, 고정)과 메모리(최근 판단 이력, 매 호출 갱신)로 구성하고, tool_choice로 위 방향 신호 스키마 출력을 강제한다
 - 역할 프로필은 매 호출 동일하므로 프롬프트 캐싱 대상이다
 
-```python
-from anthropic import AnthropicBedrockMantle
-client = AnthropicBedrockMantle(aws_region="us-east-1")
+```go
+cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region)) // aws-sdk-go-v2/config
+client := bedrockruntime.NewFromConfig(cfg)                          // aws-sdk-go-v2/service/bedrockruntime
 ```
 
 ---
@@ -294,10 +295,11 @@ client = AnthropicBedrockMantle(aws_region="us-east-1")
 
 ## 7. 구현 개요
 
-- **스택**: Python(비동기) — 시세 수집기 API 호출, Claude 호출, 접수 API 전송을 모두 비동기로 처리
-- **핵심 라이브러리**: `anthropic`(Bedrock 클라이언트 포함), `httpx`, `pydantic`, `boto3`
-- **구현 순서**: ① 규칙 기반 3종 봇(마켓메이커 봇·노이즈 봇·대량 주문 봇) + 목업 접수 API로 기본 파이프라인 완성 → ② 시세 수집기 연동(매니페스트/파일 API, HTTP) → ③ Claude 기반 2종 봇(모멘텀 추종 봇·평균회귀 봇) 추가 → ④ 주문 기록·S3 업로드 → ⑤ 오류 처리·모니터링 훅 → ⑥ 컨테이너화 후 EKS 배포(Kubernetes Job)
+- **스택**: Go — 시세 수집기 API 호출, Claude(Bedrock) 호출, 접수 API 전송 전부 이 언어 하나로 처리한다. `trader/` 모듈(Go, 별도 `go.mod`)이 AI 트레이더 실행 파일 자체다. (2026-08-05 이전에는 Python(비동기)으로 계획했으나, 실제 구현은 이 프로젝트의 다른 컴포넌트(`backend`/`orderapi`/`matching` 등)와 통일해 Go로 진행했다.)
+- **핵심 라이브러리**: `aws-sdk-go-v2/service/bedrockruntime`(Bedrock Converse API, tool-use로 방향 신호 스키마 강제), `aws-sdk-go-v2/config`(자격증명은 SDK 기본 체인 — API 키를 코드/설정 파일에 남기지 않는다는 NFR-18 원칙은 동일하게 유지, EC2/EKS에서는 인스턴스 프로필/IRSA가 자동으로 채움), `net/http`(시세 수집기·접수 API 호출), `encoding/json`(요청/응답 직렬화 — Python의 `pydantic` 대응은 Go의 구조체+`json` 태그가 그 역할), `aws-sdk-go-v2/service/s3`(주문 기록 업로드)
+- **구현 순서**: ① 규칙 기반 3종 봇(마켓메이커 봇·노이즈 봇·대량 주문 봇) + 목업 접수 API로 기본 파이프라인 완성 → ② 시세 수집기 연동(매니페스트/파일 API, HTTP) → ③ Claude 기반 2종 봇(모멘텀 추종 봇·평균회귀 봇) 추가 → ④ 주문 기록·S3 업로드 → ⑤ 오류 처리·모니터링 훅 → ⑥ 컨테이너화 후 배포
 - 매칭 엔진 구현을 기다리지 않고 독립적으로 개발·시험하기 위해(FR-23) 목업 접수 API로 1단계부터 시작한다
+- **현재 구현 상태(2026-08-10)**: ①~④ 완료 — `trader/bot/`(5종 봇), `trader/bot/bedrock.go`(Claude 호출), `trader/orderstore/`(주문 기록 S3 업로드)에 실제로 존재한다. Claude 연동은 실제 Bedrock 모델 액세스로 아직 손으로 검증하지 못했다(인프라 준비 후 확인 필요) — 자세한 환경변수/AWS 리소스 요구사항은 [`deployment-env-vars.md`](deployment-env-vars.md)/[`aws-infra-handoff.md`](aws-infra-handoff.md) 참고. ⑤~⑥은 아직.
 
 ---
 

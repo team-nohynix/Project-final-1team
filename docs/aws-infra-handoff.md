@@ -3,14 +3,12 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
-| 2026-08-10 | 최초 작성 — 현재 실제 구현(Go 6개 모듈, MySQL로 전환된 recorder, 2026-08-10 추가된 Bedrock 연동)을 기준으로 필요한 AWS 리소스/권한을 정리. 기존 설계 문서와의 불일치 2건 발견해 같이 기록 |
+| 2026-08-10 | 최초 작성 — 현재 실제 구현(Go 6개 모듈, MySQL로 전환된 recorder, 2026-08-10 추가된 Bedrock 연동)을 기준으로 필요한 AWS 리소스/권한을 정리. 기존 설계 문서와의 불일치 2건 발견 — 같은 날 `ai-trader-design.md`의 Python 표기는 Go로 정정했음(아래 1번은 해결됨). `infra-placement-design.md`의 RDS 엔진 표기(2번)는 아직 안 고침 |
 
 ## 먼저 확인해줄 것 — 기존 설계 문서와 실제 구현이 다른 부분
 
-이 문서를 보기 전에 `docs/ai-trader-design.md`, `docs/infra-placement-design.md`를 참고했다면 아래 두 가지를 먼저 알아둬야 한다. 실제로 구현된 코드(이 문서의 근거)와 두 문서 사이에 불일치가 있다.
-
-1. **`ai-trader-design.md`는 Python 스택(anthropic/httpx/pydantic/boto3)을 전제로 쓰여 있는데, 실제 AI 트레이더(`trader/`)는 Go로 구현돼 있다.** 컨테이너 이미지를 준비할 때 Python 베이스가 아니라 Go 베이스여야 한다.
-2. **`infra-placement-design.md` 4.1절은 RDS를 PostgreSQL로 설계했는데, 팀이 2026-08-07에 MySQL로 결정을 바꿨고 `recorder`도 실제로 MySQL(`go-sql-driver/mysql`)로 구현돼 있다.** RDS 엔진은 MySQL로 만들어야 한다.
+1. ~~`ai-trader-design.md`는 Python 스택을 전제로 쓰여 있었는데~~ — **2026-08-10에 Go로 정정 완료.** 이제 이 문서를 봐도 됨.
+2. **`infra-placement-design.md` 4.1절은 아직 RDS를 PostgreSQL로 설계해뒀는데, 팀이 2026-08-07에 MySQL로 결정을 바꿨고 `recorder`도 실제로 MySQL(`go-sql-driver/mysql`)로 구현돼 있다.** RDS 엔진은 MySQL로 만들어야 한다 — 이 문서는 아직 안 고쳐져 있으니 4.1절을 볼 때는 엔진만 MySQL로 읽어달라.
 
 나머지 설계(네트워크 배치, EKS 3클러스터 분리, MSK/ElastiCache 배치, 보안 그룹 등)는 이 두 가지 외에는 실제 구현과 크게 배치되지 않는 것으로 보인다 — 다만 **지금 이 순간 실제로 존재하는 AWS 리소스는 VPC(퍼블릭 서브넷 1개)와 S3 버킷 2개, IAM 역할 1개뿐**이다(아래 "현재 상태" 참고). `infra-placement-design.md`가 그리는 EKS 3클러스터/MSK/RDS/ElastiCache/CloudFront는 전부 아직 없는, 앞으로 만들어야 할 목표 상태다.
 
