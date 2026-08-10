@@ -42,12 +42,19 @@ type ExecutionConsumer struct {
 	reader *kafka.Reader
 }
 
-func NewExecutionConsumer(broker, topic, groupID string) *ExecutionConsumer {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewExecutionConsumer(broker, topic, groupID, saslUsername, saslPassword string) (*ExecutionConsumer, error) {
+	dialer, err := newDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &ExecutionConsumer{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
 		Topic:   topic,
+		Dialer:  dialer,
 		GroupID: groupID,
-	})}
+	})}, nil
 }
 
 // Run은 ctx가 끝나거나 에러가 날 때까지 executions를 계속 소비합니다.

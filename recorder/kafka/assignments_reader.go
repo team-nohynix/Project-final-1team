@@ -18,12 +18,19 @@ type AssignmentReader struct {
 	reader *kafka.Reader
 }
 
-func NewAssignmentReader(broker, topic, groupID string) *AssignmentReader {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewAssignmentReader(broker, topic, groupID, saslUsername, saslPassword string) (*AssignmentReader, error) {
+	dialer, err := newDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &AssignmentReader{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
 		Topic:   topic,
 		GroupID: groupID,
-	})}
+		Dialer:  dialer,
+	})}, nil
 }
 
 func (r *AssignmentReader) Run(ctx context.Context, handle func(ctx context.Context, ev events.AssignmentEvent) error) error {

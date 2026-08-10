@@ -136,19 +136,28 @@ func main() {
 	ctx := context.Background()
 
 	store := snapshotstore.NewRedisStore(cfg.RedisAddr)
-	producer := kafkaclient.NewExecutionProducer(cfg.KafkaBroker, cfg.ExecutionsTopic)
+	producer, err := kafkaclient.NewExecutionProducer(cfg.KafkaBroker, cfg.ExecutionsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("체결 프로듀서 생성 실패: %v", err)
+	}
 	defer producer.Close()
-	assignments := kafkaclient.NewAssignmentProducer(cfg.KafkaBroker, cfg.AssignmentsTopic)
+	assignments, err := kafkaclient.NewAssignmentProducer(cfg.KafkaBroker, cfg.AssignmentsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("배정 이벤트 프로듀서 생성 실패: %v", err)
+	}
 	defer assignments.Close()
 	instanceID := newInstanceID()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
-	tracker := rebalance.NewLoadTracker(redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets)
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	tracker, err := rebalance.NewLoadTracker(redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("부하 추적기 생성 실패: %v", err)
+	}
 	balancer := rebalance.NewLoadAwareBalancer(tracker, TargetMarkets)
 
 	registry := newMarketRegistry(producer, store, assignments, instanceID)
 
-	consumer, err := kafkaclient.NewGroupConsumer(cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry)
+	consumer, err := kafkaclient.NewGroupConsumer(cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
 	if err != nil {
 		log.Fatalf("컨슈머 그룹 생성 실패: %v", err)
 	}

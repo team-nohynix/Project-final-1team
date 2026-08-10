@@ -9,13 +9,16 @@ import (
 
 // Config는 기록기 실행에 필요한 환경변수를 담습니다.
 type Config struct {
-	KafkaBroker      string
-	OrdersTopic      string
-	ExecutionsTopic  string
-	AssignmentsTopic string
-	DatabaseURL      string
-	ArchiveBucket    string
-	RedisAddr        string
+	KafkaBroker       string
+	OrdersTopic       string
+	ExecutionsTopic   string
+	AssignmentsTopic  string
+	KafkaSASLUsername string
+	KafkaSASLPassword string
+	DatabaseURL       string
+	ArchiveBucket     string
+	RedisAddr         string
+	RedisPassword     string
 }
 
 // LoadConfig는 로컬 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을
@@ -61,13 +64,25 @@ func LoadConfig() Config {
 		assignmentsTopic = "assignments"
 	}
 
+	// REDIS_PASSWORD는 선택입니다 — orderapi/matching의 config.go와 같은 이유
+	// (2026-08-10 추가).
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+
+	// KAFKA_SASL_USERNAME/KAFKA_SASL_PASSWORD도 같은 이유로 선택입니다 —
+	// orderapi/matching의 config.go와 같은 이유(2026-08-10 추가).
+	kafkaSASLUsername := os.Getenv("KAFKA_SASL_USERNAME")
+	kafkaSASLPassword := os.Getenv("KAFKA_SASL_PASSWORD")
+
 	return Config{
-		KafkaBroker:      broker,
-		OrdersTopic:      ordersTopic,
-		ExecutionsTopic:  executionsTopic,
-		AssignmentsTopic: assignmentsTopic,
-		DatabaseURL:      dbURL,
-		ArchiveBucket:    os.Getenv("ARCHIVE_BUCKET"),
-		RedisAddr:        redisAddr,
+		KafkaBroker:       broker,
+		OrdersTopic:       ordersTopic,
+		ExecutionsTopic:   executionsTopic,
+		AssignmentsTopic:  assignmentsTopic,
+		KafkaSASLUsername: kafkaSASLUsername,
+		KafkaSASLPassword: kafkaSASLPassword,
+		DatabaseURL:       dbURL,
+		ArchiveBucket:     os.Getenv("ARCHIVE_BUCKET"),
+		RedisAddr:         redisAddr,
+		RedisPassword:     redisPassword,
 	}
 }

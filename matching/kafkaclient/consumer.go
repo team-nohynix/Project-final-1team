@@ -57,6 +57,7 @@ type GroupConsumer struct {
 	topic   string
 	markets []string // 인덱스 = 파티션 번호, orderapi의 marketPartitioner와 동일한 순서
 	life    MarketLifecycle
+	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 SCRAM+TLS(MSK) — auth.go 참고
 
 	// readersMu/readers는 지금 이 인스턴스가 담당 중인 파티션들의 *kafka.Reader를
 	// 추적합니다 — Lag()이 "이 인스턴스의 전체 처리 지연"을 계산하는 데 씁니다
@@ -73,18 +74,27 @@ type GroupConsumer struct {
 // 공유하는 고정값이어야 합니다(인스턴스별로 다르면 각자 자기 혼자만의 그룹에
 // 들어가서 재분배 자체가 일어나지 않습니다) — balancer는 matching/rebalance의
 // LoadAwareBalancer를 넘겨줍니다.
-func NewGroupConsumer(broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle) (*GroupConsumer, error) {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고) — 그룹
+// 멤버십(kafka.ConsumerGroup)과 실제 파티션 읽기(consumePartition의 kafka.Reader)
+// 양쪽 다 같은 dialer를 씁니다.
+func NewGroupConsumer(broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle, saslUsername, saslPassword string) (*GroupConsumer, error) {
+	dialer, err := NewDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	cg, err := kafka.NewConsumerGroup(kafka.ConsumerGroupConfig{
 		ID:             groupID,
 		Brokers:        []string{broker},
 		Topics:         []string{topic},
 		GroupBalancers: []kafka.GroupBalancer{balancer},
+		Dialer:         dialer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("컨슈머 그룹 생성 실패: %w", err)
 	}
 	return &GroupConsumer{
-		cg: cg, broker: broker, topic: topic, markets: markets, life: life,
+		cg: cg, broker: broker, topic: topic, markets: markets, life: life, dialer: dialer,
 		readers: make(map[int]*kafka.Reader),
 	}, nil
 }
@@ -155,6 +165,7 @@ func (c *GroupConsumer) consumePartition(genCtx context.Context, market string, 
 		Topic:     c.topic,
 		Partition: partition,
 		GroupID:   "", // 컨슈머 그룹은 멤버십 조정에만 쓰고 실제 읽기는 그룹 밖에서 함
+		Dialer:    c.dialer,
 	})
 	defer reader.Close()
 

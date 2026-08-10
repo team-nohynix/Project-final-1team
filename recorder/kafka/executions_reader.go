@@ -17,12 +17,19 @@ type ExecutionReader struct {
 	reader *kafka.Reader
 }
 
-func NewExecutionReader(broker, topic, groupID string) *ExecutionReader {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewExecutionReader(broker, topic, groupID, saslUsername, saslPassword string) (*ExecutionReader, error) {
+	dialer, err := newDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &ExecutionReader{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
 		Topic:   topic,
 		GroupID: groupID,
-	})}
+		Dialer:  dialer,
+	})}, nil
 }
 
 // Run — orders_reader.go의 Run과 완전히 같은 배칭/커밋 원칙입니다(RDS

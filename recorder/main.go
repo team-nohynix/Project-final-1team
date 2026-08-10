@@ -67,14 +67,23 @@ func main() {
 	go runPeriodicFlush(ctx, orderBatcher, archiveFlushInterval)
 	go runPeriodicFlush(ctx, execBatcher, archiveFlushInterval)
 
-	orderReader := rkafka.NewOrderReader(cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID)
+	orderReader, err := rkafka.NewOrderReader(cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("orders 리더 생성 실패: %v", err)
+	}
 	defer orderReader.Close()
-	execReader := rkafka.NewExecutionReader(cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID)
+	execReader, err := rkafka.NewExecutionReader(cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("executions 리더 생성 실패: %v", err)
+	}
 	defer execReader.Close()
-	assignmentReader := rkafka.NewAssignmentReader(cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID)
+	assignmentReader, err := rkafka.NewAssignmentReader(cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("assignments 리더 생성 실패: %v", err)
+	}
 	defer assignmentReader.Close()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
 	defer redisClient.Close()
 
 	// RDS 백프레셔 감시: orders/executions 리더의 랙을 주기적으로 확인해 Redis

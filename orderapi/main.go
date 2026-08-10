@@ -35,7 +35,10 @@ func main() {
 
 	store := order.NewStore()
 	idem := idempotency.NewStore()
-	producer := kafkaclient.NewOrderProducer(cfg.KafkaBroker, cfg.OrdersTopic)
+	producer, err := kafkaclient.NewOrderProducer(cfg.KafkaBroker, cfg.OrdersTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("주문 프로듀서 생성 실패: %v", err)
+	}
 	defer producer.Close()
 
 	// executions를 구독해 order.Store가 체결을 반영합니다(2026-08-10) —
@@ -45,7 +48,10 @@ func main() {
 	// 둘 다 시도합니다 — 이 orderapi 인스턴스가 접수한 쪽만 Store에 있으므로
 	// (반대편은 이미 orderapi가 재시작됐거나 원래 이 인스턴스가 접수한 게
 	// 아닐 수 있음) 한쪽만 찾아지는 것도 정상입니다.
-	execConsumer := kafkaclient.NewExecutionConsumer(cfg.KafkaBroker, cfg.ExecutionsTopic, "orderapi-executions")
+	execConsumer, err := kafkaclient.NewExecutionConsumer(cfg.KafkaBroker, cfg.ExecutionsTopic, "orderapi-executions", cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("executions 컨슈머 생성 실패: %v", err)
+	}
 	defer execConsumer.Close()
 	go func() {
 		err := execConsumer.Run(context.Background(), func(ctx context.Context, ev kafkaclient.ExecutionEvent) error {
@@ -56,7 +62,7 @@ func main() {
 		log.Fatalf("executions 컨슈머 종료: %v", err)
 	}()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
 	defer redisClient.Close()
 
 	sessionStore := session.NewRedisStore(redisClient, sessionTTL)

@@ -32,12 +32,19 @@ type OrderReader struct {
 	reader *kafka.Reader
 }
 
-func NewOrderReader(broker, topic, groupID string) *OrderReader {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewOrderReader(broker, topic, groupID, saslUsername, saslPassword string) (*OrderReader, error) {
+	dialer, err := newDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &OrderReader{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
 		Topic:   topic,
 		GroupID: groupID,
-	})}
+		Dialer:  dialer,
+	})}, nil
 }
 
 // Run은 메시지를 배치로 모아 handleBatch에 넘깁니다 — 메시지 1건당 DB 왕복
