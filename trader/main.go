@@ -79,10 +79,16 @@ func run() error {
 	log.Printf("매니페스트 수신: %d개 마켓", len(manifest.Markets))
 
 	// 주문 접수 API(orderapi)에 실제로 POST /v1/orders를 보냅니다.
-	// RecordingSubmitter로 감싸서, 성공적으로 "제출"된(202 응답을 받은) 주문만 recorder에 남깁니다(FR-17).
+	// RetryingSubmitter가 429(RDS 백프레셔)만 지수 백오프로 재시도하고, 그
+	// 최종 결과를 RecordingSubmitter가 성공했을 때만 recorder에 남깁니다(FR-17,
+	// "기록 건수와 접수 건수 일치"). 데코레이터 순서가 중요합니다 — Recording이
+	// 바깥이라야 재시도 도중의 중간 실패가 아니라 재시도까지 다 끝난 최종
+	// 결과만 기록 여부 판단에 씁니다.
 	recorder := order.NewInMemoryRecorder()
 	var submitter order.OrderSubmitter = order.RecordingSubmitter{
-		Next:     order.HTTPOrderSubmitter{Client: httpClient, BaseURL: cfg.OrderAPIURL},
+		Next: order.RetryingSubmitter{
+			Next: order.HTTPOrderSubmitter{Client: httpClient, BaseURL: cfg.OrderAPIURL},
+		},
 		Recorder: recorder,
 	}
 
@@ -102,12 +108,21 @@ func run() error {
 		states[entry.Market] = bot.NewMarketState(bot.PriceHistorySize)
 	}
 
+	// AI 트레이더(전체 조망형 봇)가 쓸 Bedrock 클라이언트입니다. 자격증명/모델
+	// 액세스가 아직 준비 안 된 로컬 환경이라도 여기서 바로 실패하진 않습니다 —
+	// SDK 설정 로드 자체는 대체로 성공하고, 실제 호출이 실패해야 그때 드러납니다
+	// (bot.MomentumAIBot.Decide가 그 실패를 로그만 남기고 넘어가게 처리해둠).
+	bedrockClient, err := bot.NewBedrockClient(context.Background(), cfg.BedrockRegion, cfg.BedrockModelID)
+	if err != nil {
+		return fmt.Errorf("Bedrock 클라이언트 생성 실패: %w", err)
+	}
+
 	// 전체 마켓 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var globalWG sync.WaitGroup
 	globalWG.Go(func() {
-		replay.RunGlobalBots(ctx, states, *speed, submitter)
+		replay.RunGlobalBots(ctx, states, submitter, bedrockClient)
 	})
 
 	var wg sync.WaitGroup

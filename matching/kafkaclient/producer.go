@@ -3,6 +3,7 @@ package kafkaclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -28,7 +29,13 @@ type ExecutionProducer struct {
 	writer *kafka.Writer
 }
 
-func NewExecutionProducer(broker, topic string) *ExecutionProducer {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewExecutionProducer(broker, topic, saslUsername, saslPassword string) (*ExecutionProducer, error) {
+	transport, err := NewTransport(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &ExecutionProducer{
 		writer: &kafka.Writer{
 			Addr:                   kafka.TCP(broker),
@@ -36,8 +43,9 @@ func NewExecutionProducer(broker, topic string) *ExecutionProducer {
 			Balancer:               &kafka.Hash{},
 			BatchTimeout:           10 * time.Millisecond,
 			AllowAutoTopicCreation: true,
+			Transport:              transport,
 		},
-	}
+	}, nil
 }
 
 // Publish는 engine.ExecutionPublisher 인터페이스를 만족합니다.

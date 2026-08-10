@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"orderapi/backpressure"
 	"orderapi/idempotency"
 	"orderapi/kafkaclient"
 	"orderapi/order"
@@ -81,7 +82,9 @@ func orderMode(r *http.Request) string {
 }
 
 // acceptOrderHandler는 POST /v1/orders를 처리합니다 (docs/api-specification.md 2.1, 2.2).
-func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer kafkaclient.Publisher) http.HandlerFunc {
+// checker는 NFR-13(RDS 백프레셔, 2026-08-07 — CLAUDE.md의 "RDS admission
+// control via recorder consumer lag" 참고)의 읽기 쪽입니다.
+func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer kafkaclient.Publisher, checker backpressure.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -96,6 +99,24 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(cached.Status)
 			w.Write(cached.Body)
+			return
+		}
+
+		// 캐시된 응답 재생(위)이 아니라 새 처리를 시작하는 시점에만 체크합니다 —
+		// 이미 결정된 재시도 응답은 백프레셔 상태와 무관하게 그대로 돌려줘야
+		// 합니다(새로운 부하가 아니라 이미 끝난 요청의 재생일 뿐이므로).
+		// idempotency 캐시에는 절대 남기지 않습니다(writeError, writeErrorAndCache
+		// 아님) — idempotency.go의 "5xx는 캐시 안 함" 규칙과 같은 이유로, 이
+		// 429도 일시적 상태라 같은 키로 나중에 재시도하면 성공할 수 있어야
+		// 합니다.
+		if active, err := checker.Active(r.Context()); err != nil {
+			log.Printf("백프레셔 플래그 조회 실패, 열린 것으로 간주(fail-open): %v", err)
+		} else if active {
+			// 2026-08-10부터 checker가 recorder 랙/matching 자체 랙 두 플래그를 모두
+			// 확인하는 MultiChecker이므로(main.go 참고), 메시지도 어느 한쪽으로
+			// 특정하지 않습니다 — 클라이언트 입장에선 원인이 뭐든 "잠시 후 재시도"가
+			// 동일한 대응이라 구분해서 알려줄 실익도 없습니다.
+			writeError(w, reqID, http.StatusTooManyRequests, "CONSUMER_LAG_EXCEEDED", "시스템이 처리 지연 중입니다. 잠시 후 다시 시도해주세요.")
 			return
 		}
 
@@ -178,7 +199,11 @@ func cancelOrderHandler(store *order.Store, producer kafkaclient.Publisher) http
 		// 그대로 돌려줍니다(재시도에 안전하게 만들기 위함).
 		if o.Status != order.StatusCanceled {
 			o.Status = order.StatusCanceled
-			o.CanceledQuantity = o.Quantity
+			// 2026-08-10부터 ApplyFill이 체결마다 RemainingQuantity를 깎으므로,
+			// 취소 수량은 원래 주문 전량(o.Quantity)이 아니라 그 시점의 남은
+			// 잔량이어야 합니다 — 부분체결 후 취소된 주문은 남은 만큼만
+			// 취소된 것이지 전량이 취소된 게 아닙니다.
+			o.CanceledQuantity = o.RemainingQuantity
 			o.CanceledAt = nowISO()
 
 			if err := producer.PublishCancel(r.Context(), o.OrderID, o.Market, o.CanceledAt); err != nil {

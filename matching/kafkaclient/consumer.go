@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	kafka "github.com/segmentio/kafka-go"
 	"github.com/shopspring/decimal"
@@ -56,23 +57,65 @@ type GroupConsumer struct {
 	topic   string
 	markets []string // 인덱스 = 파티션 번호, orderapi의 marketPartitioner와 동일한 순서
 	life    MarketLifecycle
+	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 SCRAM+TLS(MSK) — auth.go 참고
+
+	// readersMu/readers는 지금 이 인스턴스가 담당 중인 파티션들의 *kafka.Reader를
+	// 추적합니다 — Lag()이 "이 인스턴스의 전체 처리 지연"을 계산하는 데 씁니다
+	// (NFR-13, matching 쪽 컨슈머 랙 기반 백프레셔 — recorder 쪽 랙과는 별개
+	// 시나리오: matching이 못 따라가면 orders 토픽의 NEW/CANCEL이 쌓여서
+	// 매칭 자체가 밀리는 것이고, recorder가 못 따라가는 것과는 다른 병목입니다).
+	// 파티션은 리밸런스마다 계속 바뀌므로(consumePartition의 등록/해제) mutex로
+	// 보호합니다.
+	readersMu sync.Mutex
+	readers   map[int]*kafka.Reader
 }
 
 // NewGroupConsumer는 GroupConsumer를 만듭니다. groupID는 이 매칭 엔진 배포 전체가
 // 공유하는 고정값이어야 합니다(인스턴스별로 다르면 각자 자기 혼자만의 그룹에
 // 들어가서 재분배 자체가 일어나지 않습니다) — balancer는 matching/rebalance의
 // LoadAwareBalancer를 넘겨줍니다.
-func NewGroupConsumer(broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle) (*GroupConsumer, error) {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고) — 그룹
+// 멤버십(kafka.ConsumerGroup)과 실제 파티션 읽기(consumePartition의 kafka.Reader)
+// 양쪽 다 같은 dialer를 씁니다.
+func NewGroupConsumer(broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle, saslUsername, saslPassword string) (*GroupConsumer, error) {
+	dialer, err := NewDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	cg, err := kafka.NewConsumerGroup(kafka.ConsumerGroupConfig{
 		ID:             groupID,
 		Brokers:        []string{broker},
 		Topics:         []string{topic},
 		GroupBalancers: []kafka.GroupBalancer{balancer},
+		Dialer:         dialer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("컨슈머 그룹 생성 실패: %w", err)
 	}
-	return &GroupConsumer{cg: cg, broker: broker, topic: topic, markets: markets, life: life}, nil
+	return &GroupConsumer{
+		cg: cg, broker: broker, topic: topic, markets: markets, life: life, dialer: dialer,
+		readers: make(map[int]*kafka.Reader),
+	}, nil
+}
+
+// Lag은 이 인스턴스가 지금 담당 중인 모든 파티션의 컨슈머 랙(하이워터마크 -
+// 오프셋) 합계입니다 — matching/backpressure.Watcher가 씁니다. 각 파티션의
+// *kafka.Reader는 GroupID가 비어있어(consumePartition 참고) 컨슈머 그룹
+// 모드가 아니므로 Reader.Lag()이 그대로 유효한 값을 돌려줍니다(recorder
+// 쪽처럼 Stats().Lag로 돌아갈 필요가 없음 — recorder의 리더들은 실제로
+// GroupID를 쓰는 컨슈머 그룹 모드라 Lag()/ReadLag()이 -1/에러를 반환하는
+// 것과 다른 상황입니다).
+func (c *GroupConsumer) Lag() int64 {
+	c.readersMu.Lock()
+	defer c.readersMu.Unlock()
+	var total int64
+	for _, r := range c.readers {
+		if lag := r.Lag(); lag > 0 {
+			total += lag
+		}
+	}
+	return total
 }
 
 // Run은 제너레이션이 바뀔 때마다(=리밸런스) 이번 제너레이션에서 배정받은 파티션마다
@@ -122,8 +165,20 @@ func (c *GroupConsumer) consumePartition(genCtx context.Context, market string, 
 		Topic:     c.topic,
 		Partition: partition,
 		GroupID:   "", // 컨슈머 그룹은 멤버십 조정에만 쓰고 실제 읽기는 그룹 밖에서 함
+		Dialer:    c.dialer,
 	})
 	defer reader.Close()
+
+	// Lag()이 이 인스턴스가 지금 담당 중인 파티션들만 합산할 수 있도록,
+	// 이 파티션을 맡고 있는 동안만 레지스트리에 등록해둡니다.
+	c.readersMu.Lock()
+	c.readers[partition] = reader
+	c.readersMu.Unlock()
+	defer func() {
+		c.readersMu.Lock()
+		delete(c.readers, partition)
+		c.readersMu.Unlock()
+	}()
 
 	if err := reader.SetOffset(resumeFrom); err != nil {
 		log.Printf("[%s] 파티션 %d SetOffset(%d) 실패: %v", market, partition, resumeFrom, err)

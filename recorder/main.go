@@ -7,8 +7,10 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/redis/go-redis/v9"
 
 	"recorder/archive"
+	"recorder/backpressure"
 	"recorder/events"
 	rkafka "recorder/kafka"
 	"recorder/store"
@@ -27,6 +29,15 @@ const (
 	ordersGroupID      = "recorder-orders"
 	executionsGroupID  = "recorder-executions"
 	assignmentsGroupID = "recorder-assignments"
+
+	// RDS 백프레셔 워터마크(2026-08-07, CLAUDE.md의 "RDS admission control via
+	// recorder consumer lag" 참고) — 이 프로젝트 다른 곳의 봇 파라미터들처럼
+	// 실측 없이 잡은 잠정값이라, 실제 부하테스트로 재조정할 걸 전제로 합니다.
+	// High/Low를 다르게 둔 이유는 backpressure.Watcher의 히스테리시스 설명 참고.
+	backpressureHighWatermark = 5000
+	backpressureLowWatermark  = 1000
+	backpressureCheckInterval = 5 * time.Second
+	backpressureRedisKey      = "backpressure:recorder_lag"
 )
 
 func main() {
@@ -56,19 +67,44 @@ func main() {
 	go runPeriodicFlush(ctx, orderBatcher, archiveFlushInterval)
 	go runPeriodicFlush(ctx, execBatcher, archiveFlushInterval)
 
-	orderReader := rkafka.NewOrderReader(cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID)
+	orderReader, err := rkafka.NewOrderReader(cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("orders 리더 생성 실패: %v", err)
+	}
 	defer orderReader.Close()
-	execReader := rkafka.NewExecutionReader(cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID)
+	execReader, err := rkafka.NewExecutionReader(cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("executions 리더 생성 실패: %v", err)
+	}
 	defer execReader.Close()
-	assignmentReader := rkafka.NewAssignmentReader(cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID)
+	assignmentReader, err := rkafka.NewAssignmentReader(cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("assignments 리더 생성 실패: %v", err)
+	}
 	defer assignmentReader.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	defer redisClient.Close()
+
+	// RDS 백프레셔 감시: orders/executions 리더의 랙을 주기적으로 확인해 Redis
+	// 플래그를 켜고 끕니다 — orderapi/backpressure.RedisChecker가 이 플래그를
+	// 읽어 신규 주문을 429로 거절할지 결정합니다(기록기는 이 결정에 관여하지
+	// 않고 오직 관찰한 사실만 Redis에 남김).
+	watcher := &backpressure.Watcher{
+		Sources:       []backpressure.LagSource{orderReader.Lag, execReader.Lag},
+		Flag:          &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey},
+		HighWatermark: backpressureHighWatermark,
+		LowWatermark:  backpressureLowWatermark,
+		CheckInterval: backpressureCheckInterval,
+	}
+	go watcher.Run(ctx)
 
 	archiveDest := cfg.ArchiveBucket
 	if archiveDest == "" {
 		archiveDest = "(로컬 ./records)"
 	}
-	log.Printf("기록기 시작 (broker=%s, orders=%s, executions=%s, assignments=%s, archive=%s)",
-		cfg.KafkaBroker, cfg.OrdersTopic, cfg.ExecutionsTopic, cfg.AssignmentsTopic, archiveDest)
+	log.Printf("기록기 시작 (broker=%s, orders=%s, executions=%s, assignments=%s, archive=%s, redis=%s)",
+		cfg.KafkaBroker, cfg.OrdersTopic, cfg.ExecutionsTopic, cfg.AssignmentsTopic, archiveDest, cfg.RedisAddr)
 
 	// execReader.Run/orderReader.Run은 이제 메시지를 배치로 모아 넘겨줍니다
 	// (RDS 백프레셔 대응 배칭, 2026-08-07). S3 아카이브 배치(execBatcher/

@@ -32,12 +32,19 @@ type OrderReader struct {
 	reader *kafka.Reader
 }
 
-func NewOrderReader(broker, topic, groupID string) *OrderReader {
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
+func NewOrderReader(broker, topic, groupID, saslUsername, saslPassword string) (*OrderReader, error) {
+	dialer, err := newDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &OrderReader{reader: kafka.NewReader(kafka.ReaderConfig{
 		Brokers: []string{broker},
 		Topic:   topic,
 		GroupID: groupID,
-	})}
+		Dialer:  dialer,
+	})}, nil
 }
 
 // Run은 메시지를 배치로 모아 handleBatch에 넘깁니다 — 메시지 1건당 DB 왕복
@@ -124,4 +131,14 @@ func (r *OrderReader) Run(ctx context.Context, handleBatch func(ctx context.Cont
 
 func (r *OrderReader) Close() error {
 	return r.reader.Close()
+}
+
+// Lag는 이 리더의 현재 컨슈머 랙(가장 최근 읽은 배치의 하이워터마크 - 오프셋,
+// 메시지 건수)입니다 — RDS 백프레셔 감시(`backpressure.Watcher`)가 씁니다.
+// `kafka.Reader.Lag()`/`ReadLag()`는 컨슈머 그룹 모드에서 각각 -1/에러를
+// 반환하지만(공식 문서에 명시), `Stats().Lag`는 그룹 모드 여부와 무관하게
+// FetchMessage가 배치를 읽을 때마다 갱신되는 별도 통계값이라 여기선 안전하게
+// 씁니다(세그멘토 kafka-go@v0.4.51 소스 확인).
+func (r *OrderReader) Lag() int64 {
+	return r.reader.Stats().Lag
 }

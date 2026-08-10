@@ -3,6 +3,8 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-10 (2차) | 3장 MSK 인증을 SASL/IAM→**SASL/SCRAM-SHA-512**로 정정(kafka-go가 AWS_MSK_IAM을 지원하지 않아서 결정 변경, 코드도 이미 SCRAM으로 구현·검증됨). 8장 보안 그룹 매트릭스의 Kafka 포트도 9098(IAM)→9096(SCRAM)으로 정정 |
+| 2026-08-10 | 4.1절 RDS 엔진을 PostgreSQL→**MySQL**로 정정(팀이 2026-08-07에 이미 MySQL로 결정했고 `recorder`도 그렇게 구현돼 있었는데, 이 문서만 반영이 안 돼 있었음). 8장 보안 그룹 매트릭스의 RDS 포트도 5432→3306으로 정정 |
 | 2026-08-05 | 시세 수집기→AI 트레이더 구간의 Kafka(시세 토픽) 의존을 제거 — `sa-collector`/`sa-ai-trader` IRSA의 MSK 권한, `sg-eks-aitrader`→`sg-msk` 보안 그룹 행, MSK 토픽 목록의 `market-data` 삭제(2.2절, 3장, 8장). architecture.md·requirements.md와 함께 정정 |
 | 2026-08-04 | requirements.md·architecture.md·ai-trader-design.md·api-specification.md·erd.md·회의록 및 기존 Terraform(`infra/`)을 근거로 네트워크·컴퓨트·보안 배치 설계 최초 작성 |
 
@@ -75,7 +77,7 @@ flowchart TB
             RPA["리플레이 엔진 (Fargate)"]
         end
         subgraph DATA["data 서브넷 (2 AZ)"]
-            RDS[("RDS PostgreSQL")]
+            RDS[("RDS MySQL")]
             REDIS[("ElastiCache Redis")]
             MSK[("MSK Serverless ENI")]
         end
@@ -133,20 +135,24 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 ## 3. 메시징 — MSK Serverless
 
 - ENI를 `data-a`/`data-c` 서브넷에 배치(2 AZ)
-- 인증은 IAM 인증(SASL/IAM)만 사용 — EKS IRSA 자격 증명을 그대로 재사용하므로 별도 자격 증명 관리가 필요 없다(architecture.md에 명시된 방식)
+- **인증 정정(2026-08-10)**: 원래 이 절은 IAM 인증(SASL/IAM, EKS IRSA 자격증명 재사용)을 전제로 썼으나, **SASL/SCRAM-SHA-512로 결정을 바꿨다.** 이유: `orderapi`/`matching`/`recorder`가 쓰는 Kafka 클라이언트 라이브러리(`segmentio/kafka-go`)가 AWS_MSK_IAM SASL 메커니즘을 내장 지원하지 않아, IAM으로 가려면 그 프로토콜을 직접 구현해야 하는데 실제 MSK 없이는 검증할 방법이 없어 위험하다고 판단했다. SCRAM은 그 라이브러리가 이미 지원하는 검증된 방식이고, 실제로 로컬에 disposable SASL/SCRAM 브로커를 띄워 정상 동작(인증 성공/실패 둘 다)을 확인했다. **트레이드오프**: IRSA 자격증명을 그대로 재사용하지 못하므로, SCRAM 사용자명/비밀번호를 Secrets Manager 등으로 별도 관리해야 한다(`kafka-configs.sh --alter --add-config 'SCRAM-SHA-512=[password=...]' --entity-type users`로 등록, [`deployment-env-vars.md`](deployment-env-vars.md) 참고).
 - 토픽: `orders`, `executions` — 파티션 키는 마켓명(NFR-07). 시세는 이 MSK를 거치지 않는다 — 시세 수집기→AI 트레이더는 HTTP 매니페스트/파일 API(풀 방식)를 쓴다(과거 데이터·소비자 1개뿐이라 Kafka pub-sub 이점이 없음, architecture.md 3장 참고)
-- 보안 그룹(`sg-msk`)은 아래 3장 참고
+- 보안 그룹(`sg-msk`)은 아래 3장 참고 — 포트는 SASL/SCRAM 기준 9096(8장에 반영)
 
 ---
 
 ## 4. 데이터 계층
 
-### 4.1 RDS (PostgreSQL)
+### 4.1 RDS (MySQL)
+
+**엔진 정정(2026-08-10)**: 이 절은 원래 PostgreSQL로 설계했으나, 팀이 2026-08-07에 MySQL로 결정을 바꿨고 `recorder`도 실제로 `go-sql-driver/mysql` 기반으로 구현돼 있다(`recorder/schema.sql`, `recorder/store/mysql.go`). 아래 인스턴스 클래스·Multi-AZ 판단은 엔진과 무관하게 그대로 유효하고, 엔진만 MySQL 8+로 바꿔서 만들면 된다. 포트는 8장 보안 그룹 매트릭스에 반영(3306).
 
 - `data-a`(기본) / `data-c`(대기 서브넷, Multi-AZ 전환 대비)에 서브넷 그룹 구성
 - **1차는 Single-AZ**로 시작한다. NFR-12("서버 1대 또는 Kafka 1대 장애 시 유실 없음")가 명시하는 장애 시나리오는 컴퓨트 노드와 MSK 브로커이며 RDS 자체 장애 주입은 요구사항에 없다. Multi-AZ는 비용이 약 2배이므로, 부하 시험 계획에 RDS 장애 시나리오가 추가되면 그때 전환한다(전환은 인스턴스 재시작 없이 가능)
 - 인스턴스 클래스는 `db.t3.medium` 또는 `db.m6g.large`로 시작 — 체결 기록은 쓰기 위주(FR-09)이므로 gp3 스토리지에 IOPS를 필요 시 별도 프로비저닝
 - 자동 백업 활성화(스냅샷), `deletion_protection`은 프로젝트 종료 시 정리 편의를 위해 초기엔 비활성화하고 데모데이 직전에만 켜는 것을 권장
+- 스키마 자동 마이그레이션 없음 — `recorder/schema.sql`을 최초 1회 수동 적용(`mysql -h<엔드포인트> -u... -p... <db> < schema.sql`)
+- `recorder`의 `DATABASE_URL`은 URL이 아니라 `go-sql-driver/mysql`의 DSN 형식: `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐(자세한 배경은 [`deployment-env-vars.md`](deployment-env-vars.md) 6번 참고)
 
 ### 4.2 ElastiCache (Redis)
 
@@ -191,9 +197,9 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 
 | 소스 | 대상 | 포트 | 용도 |
 |---|---|---|---|
-| `sg-eks-backend` | `sg-msk` | 9098 (IAM) | 접수 API 발행, 매칭 엔진 구독/발행 |
-| `sg-eks-replay` | `sg-msk` | 9098 (IAM) | (리플레이는 Kafka 직접 접근 없음 — 접수 API만 호출. 표기는 배제 가능) |
-| `sg-eks-backend` | `sg-rds` | 5432 | 기록기 → RDS 저장 |
+| `sg-eks-backend` | `sg-msk` | 9096 (SASL_SSL/SCRAM, 2026-08-10 IAM→SCRAM 정정) | 접수 API 발행, 매칭 엔진 구독/발행 |
+| `sg-eks-replay` | `sg-msk` | 9096 (SASL_SSL/SCRAM) | (리플레이는 Kafka 직접 접근 없음 — 접수 API만 호출. 표기는 배제 가능) |
+| `sg-eks-backend` | `sg-rds` | 3306 | 기록기 → RDS 저장 (MySQL, 2026-08-10 엔진 정정) |
 | `sg-eks-backend` | `sg-redis` | 6379 | 매칭 엔진 쓰기, 접수 API 읽기 |
 | `sg-eks-aitrader` | `sg-eks-backend` (ALB/ClusterIP) | 443 | AI 트레이더 → 접수 API 호출 |
 | `sg-eks-replay` | `sg-eks-backend` (ALB/ClusterIP) | 443 | 리플레이 엔진 → 접수 API 호출 |

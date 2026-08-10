@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"orderapi/backpressure"
 	"orderapi/idempotency"
 	"orderapi/kafkaclient"
 	"orderapi/order"
@@ -48,9 +49,27 @@ func (f *fakePublisher) PublishCancel(ctx context.Context, orderID, market, canc
 	return nil
 }
 
+// fakeChecker는 실제 Redis 없이 백프레셔 상태를 통제하기 위한
+// backpressure.Checker 구현체입니다.
+type fakeChecker struct {
+	active bool
+	err    error
+}
+
+func (f *fakeChecker) Active(ctx context.Context) (bool, error) {
+	return f.active, f.err
+}
+
+// newOrderMux는 백프레셔가 항상 비활성인 것으로 취급합니다 — 기존 테스트
+// (백프레셔와 무관한 검증들)가 이 신호에 영향받지 않게 하기 위함입니다.
+// 백프레셔 자체를 테스트하려면 newOrderMuxWithChecker를 씁니다.
 func newOrderMux(store *order.Store, idem *idempotency.Store, pub kafkaclient.Publisher) *http.ServeMux {
+	return newOrderMuxWithChecker(store, idem, pub, &fakeChecker{})
+}
+
+func newOrderMuxWithChecker(store *order.Store, idem *idempotency.Store, pub kafkaclient.Publisher, checker backpressure.Checker) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/orders", acceptOrderHandler(store, idem, pub))
+	mux.HandleFunc("POST /v1/orders", acceptOrderHandler(store, idem, pub, checker))
 	mux.HandleFunc("DELETE /v1/orders/{orderId}", cancelOrderHandler(store, pub))
 	return mux
 }
@@ -138,6 +157,73 @@ func TestAcceptOrderSourceOrderIDPassedThrough(t *testing.T) {
 
 	if pub.lastSourceOrderID != "ord_20260806_0000001" {
 		t.Errorf("PublishNew에 전달된 sourceOrderID = %q, want ord_20260806_0000001", pub.lastSourceOrderID)
+	}
+}
+
+func TestAcceptOrderRejectsWithLagExceededWhenBackpressureActive(t *testing.T) {
+	pub := &fakePublisher{}
+	mux := newOrderMuxWithChecker(order.NewStore(), idempotency.NewStore(), pub, &fakeChecker{active: true})
+	rec := postOrder(mux, "key-1", `{"market":"KRW-BTC","side":"BUY","price":"71500000","quantity":"0.015"}`)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	var got errorResponse
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got.ErrorCode != "CONSUMER_LAG_EXCEEDED" {
+		t.Errorf("errorCode = %q, want CONSUMER_LAG_EXCEEDED", got.ErrorCode)
+	}
+	if pub.newCalls != 0 {
+		t.Errorf("백프레셔로 거절됐는데 PublishNew가 호출됨 (횟수=%d)", pub.newCalls)
+	}
+}
+
+func TestAcceptOrderLagExceededIsNotCachedAndClearsOnRetry(t *testing.T) {
+	pub := &fakePublisher{}
+	idem := idempotency.NewStore()
+	checker := &fakeChecker{active: true}
+	mux := newOrderMuxWithChecker(order.NewStore(), idem, pub, checker)
+	body := `{"market":"KRW-BTC","side":"BUY","price":"71500000","quantity":"0.015"}`
+
+	first := postOrder(mux, "same-key", body)
+	if first.Code != http.StatusTooManyRequests {
+		t.Fatalf("첫 요청 status = %d, want 429", first.Code)
+	}
+
+	// 백프레셔가 풀린 뒤 같은 Idempotency-Key로 재시도하면 — 429가 캐시돼있지
+	// 않아야 정상 접수로 이어질 수 있습니다(idempotency.go의 "5xx는 캐시 안 함"
+	// 규칙과 같은 이유로 429도 캐시하지 않기로 함).
+	checker.active = false
+	second := postOrder(mux, "same-key", body)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("백프레셔가 풀린 뒤 재시도 status = %d, want 202, body=%s", second.Code, second.Body.String())
+	}
+	if pub.newCalls != 1 {
+		t.Errorf("PublishNew 호출 횟수 = %d, want 1", pub.newCalls)
+	}
+}
+
+func TestAcceptOrderIdempotentCachedResponseIgnoresBackpressure(t *testing.T) {
+	pub := &fakePublisher{}
+	idem := idempotency.NewStore()
+	checker := &fakeChecker{active: false}
+	mux := newOrderMuxWithChecker(order.NewStore(), idem, pub, checker)
+	body := `{"market":"KRW-BTC","side":"BUY","price":"71500000","quantity":"0.015"}`
+
+	first := postOrder(mux, "same-key", body)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("첫 요청 status = %d, want 202", first.Code)
+	}
+
+	// 캐시된 응답 재생은 새로운 부하가 아니라 이미 끝난 요청을 그대로 돌려주는
+	// 것뿐이므로, 그 사이 백프레셔가 켜져도 영향받지 않아야 합니다.
+	checker.active = true
+	second := postOrder(mux, "same-key", body)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("캐시된 응답 재생 status = %d, want 202 (백프레셔와 무관해야 함)", second.Code)
+	}
+	if pub.newCalls != 1 {
+		t.Errorf("캐시 재생인데 PublishNew가 다시 호출됨 (횟수=%d)", pub.newCalls)
 	}
 }
 

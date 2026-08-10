@@ -8,6 +8,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	kafka "github.com/segmentio/kafka-go"
+
+	"matching/kafkaclient"
 )
 
 // LoadTracker는 파티션별 최신 오프셋을 브로커에서 직접 읽어(인스턴스 쪽에서 뭔가
@@ -20,10 +22,19 @@ type LoadTracker struct {
 	broker  string
 	topic   string
 	markets []string // 인덱스 = 파티션 번호(orderapi/kafkaclient의 marketPartitioner와 동일한 순서)
+	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 SCRAM+TLS(MSK) — kafkaclient/auth.go 참고
 }
 
-func NewLoadTracker(redisClient *redis.Client, broker, topic string, markets []string) *LoadTracker {
-	return &LoadTracker{redis: redisClient, broker: broker, topic: topic, markets: markets}
+// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
+// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다. readLastOffset이
+// kafka.DialLeader로 브로커에 직접 붙는 자리라 GroupConsumer와는 별도로
+// dialer가 필요합니다.
+func NewLoadTracker(redisClient *redis.Client, broker, topic string, markets []string, saslUsername, saslPassword string) (*LoadTracker, error) {
+	dialer, err := kafkaclient.NewDialer(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
+	return &LoadTracker{redis: redisClient, broker: broker, topic: topic, markets: markets, dialer: dialer}, nil
 }
 
 type reading struct {
@@ -69,7 +80,18 @@ func (t *LoadTracker) Loads(ctx context.Context) ([]Load, error) {
 }
 
 func (t *LoadTracker) readLastOffset(ctx context.Context, partition int) (int64, error) {
-	conn, err := kafka.DialLeader(ctx, "tcp", t.broker, t.topic, partition)
+	// t.dialer가 nil이면(로컬, 인증 없음) 패키지 레벨 kafka.DialLeader(내부적으로
+	// kafka.DefaultDialer 사용)를 그대로 씁니다 — nil *kafka.Dialer에 메서드를
+	// 직접 호출하면 필드 접근에서 패닉이 나므로, 인증이 있을 때만 t.dialer.DialLeader를 씁니다.
+	var (
+		conn *kafka.Conn
+		err  error
+	)
+	if t.dialer != nil {
+		conn, err = t.dialer.DialLeader(ctx, "tcp", t.broker, t.topic, partition)
+	} else {
+		conn, err = kafka.DialLeader(ctx, "tcp", t.broker, t.topic, partition)
+	}
 	if err != nil {
 		return 0, err
 	}

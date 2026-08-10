@@ -11,6 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"matching/backpressure"
 	"matching/engine"
 	"matching/kafkaclient"
 	"matching/rebalance"
@@ -28,6 +29,16 @@ const (
 	// 다르면 각자 자기 혼자만의 그룹에 들어가서 재분배 자체가 일어나지 않습니다. 토픽 이름
 	// 기본값(config.go의 ORDERS_TOPIC)과 같은 이유로 환경변수가 아니라 코드 상수입니다.
 	consumerGroupID = "matching-engine"
+
+	// matching 자체 컨슈머 랙 기반 백프레셔(NFR-13, 원래 matching 쪽으로 스코프된
+	// 버전 — recorder 랙 버전과는 별개, matching/backpressure 패키지 설명 참고).
+	// recorder와 마찬가지로 실측 없이 잡은 잠정값입니다. Redis 키는 recorder의
+	// backpressureRedisKey("backpressure:recorder_lag")와 겹치지 않도록 별도로
+	// 둡니다 — orderapi가 두 키를 각각 독립적으로 확인합니다.
+	backpressureHighWatermark = 5000
+	backpressureLowWatermark  = 1000
+	backpressureCheckInterval = 5 * time.Second
+	backpressureRedisKey      = "backpressure:matching_lag"
 )
 
 // marketRegistry는 kafkaclient.MarketLifecycle을 구현해 마켓별 Engine의 생명주기를
@@ -125,23 +136,46 @@ func main() {
 	ctx := context.Background()
 
 	store := snapshotstore.NewRedisStore(cfg.RedisAddr)
-	producer := kafkaclient.NewExecutionProducer(cfg.KafkaBroker, cfg.ExecutionsTopic)
+	producer, err := kafkaclient.NewExecutionProducer(cfg.KafkaBroker, cfg.ExecutionsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("체결 프로듀서 생성 실패: %v", err)
+	}
 	defer producer.Close()
-	assignments := kafkaclient.NewAssignmentProducer(cfg.KafkaBroker, cfg.AssignmentsTopic)
+	assignments, err := kafkaclient.NewAssignmentProducer(cfg.KafkaBroker, cfg.AssignmentsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("배정 이벤트 프로듀서 생성 실패: %v", err)
+	}
 	defer assignments.Close()
 	instanceID := newInstanceID()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
-	tracker := rebalance.NewLoadTracker(redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets)
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	tracker, err := rebalance.NewLoadTracker(redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	if err != nil {
+		log.Fatalf("부하 추적기 생성 실패: %v", err)
+	}
 	balancer := rebalance.NewLoadAwareBalancer(tracker, TargetMarkets)
 
 	registry := newMarketRegistry(producer, store, assignments, instanceID)
 
-	consumer, err := kafkaclient.NewGroupConsumer(cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry)
+	consumer, err := kafkaclient.NewGroupConsumer(cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
 	if err != nil {
 		log.Fatalf("컨슈머 그룹 생성 실패: %v", err)
 	}
 	defer consumer.Close()
+
+	// matching 자체 랙 감시: 이 인스턴스가 지금 담당 중인 파티션들의 랙 합계(consumer.Lag,
+	// GroupConsumer.readers 레지스트리 기반)를 주기적으로 확인해 Redis 플래그를 켭니다.
+	// 비활성일 때는 명시적으로 끄지 않습니다(matching/backpressure.RedisFlag 참고) — FR-11로
+	// 여러 인스턴스가 동시에 도는데, 한 인스턴스가 회복됐다고 다른 인스턴스가 세운 플래그를
+	// 지워버리면 안 되기 때문입니다. orderapi는 이 키와 recorder의 키를 둘 다 확인합니다.
+	matchingWatcher := &backpressure.Watcher{
+		Sources:       []backpressure.LagSource{consumer.Lag},
+		Flag:          &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey},
+		HighWatermark: backpressureHighWatermark,
+		LowWatermark:  backpressureLowWatermark,
+		CheckInterval: backpressureCheckInterval,
+	}
+	go matchingWatcher.Run(ctx)
 
 	log.Printf("매칭 엔진 시작 (instanceId=%s, Kafka broker=%s, orders=%s, executions=%s, assignments=%s, redis=%s, 마켓 %d개, group=%s)",
 		instanceID, cfg.KafkaBroker, cfg.OrdersTopic, cfg.ExecutionsTopic, cfg.AssignmentsTopic, cfg.RedisAddr, len(TargetMarkets), consumerGroupID)

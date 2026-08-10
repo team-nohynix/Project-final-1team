@@ -4,6 +4,7 @@ package kafkaclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -32,8 +33,16 @@ type OrderProducer struct {
 	writer *kafka.Writer
 }
 
-// NewOrderProducer는 topic에 발행하는 Publisher를 만듭니다.
-func NewOrderProducer(broker, topic string) *OrderProducer {
+// NewOrderProducer는 topic에 발행하는 Publisher를 만듭니다. saslUsername/saslPassword가
+// 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 그대로 붙고, 채워져 있으면(MSK)
+// SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고). matching/kafkaclient.NewGroupConsumer와
+// 같은 이유로 에러를 반환합니다(SASL 메커니즘 생성이 실패할 수 있는 연산이라) —
+// 호출부(main.go)가 로그/종료를 결정합니다.
+func NewOrderProducer(broker, topic, saslUsername, saslPassword string) (*OrderProducer, error) {
+	transport, err := newTransport(saslUsername, saslPassword)
+	if err != nil {
+		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
+	}
 	return &OrderProducer{
 		writer: &kafka.Writer{
 			Addr:         kafka.TCP(broker),
@@ -46,8 +55,9 @@ func NewOrderProducer(broker, topic string) *OrderProducer {
 			// 실패합니다(실제로 이 버그를 겪고 알게 됨). prod에서 토픽을 미리 만들어
 			// 관리하게 되면 이 옵션은 굳이 없어도 되지만, 켜져 있어도 무해합니다.
 			AllowAutoTopicCreation: true,
+			Transport:              transport,
 		},
-	}
+	}, nil
 }
 
 // orderEvent는 Kafka orders 토픽에 싣는 메시지 모양입니다. FR-22가 말하는
