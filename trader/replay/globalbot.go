@@ -21,22 +21,24 @@ func globalBots() []bot.GlobalBot {
 // RunGlobalBots는 globalBots를 각자 판단 주기로 돌립니다. ctx가 취소되면(전체 마켓
 // 재생 종료) 멈춥니다. states는 main.go가 마켓별로 미리 만들어 각 ReplayMarket과
 // 공유하는 것과 동일한 맵으로, 여기서는 읽기만 합니다.
-func RunGlobalBots(ctx context.Context, states map[string]*bot.MarketState, speed float64, submitter order.OrderSubmitter) {
+func RunGlobalBots(ctx context.Context, states map[string]*bot.MarketState, submitter order.OrderSubmitter) {
 	var wg sync.WaitGroup
 	for _, b := range globalBots() {
 		wg.Go(func() {
-			runGlobalBot(ctx, b, states, speed, submitter)
+			runGlobalBot(ctx, b, states, submitter)
 		})
 	}
 	wg.Wait()
 }
 
-func runGlobalBot(ctx context.Context, b bot.GlobalBot, states map[string]*bot.MarketState, speed float64, submitter order.OrderSubmitter) {
-	// TODO(Bedrock 연동 시 재검토): 다른 봇들과 동일하게 배속으로 주기를 나누고 있지만,
-	// 실제 Bedrock 호출 지연은 배속에 따라 줄어들지 않는다. 배속을 올리면 이전 호출이
-	// 끝나기 전에 다음 틱이 오는 상황이 생길 수 있어, 연동 시점에 "고정 실주기로 돌리기"
-	// 또는 "이전 호출 진행 중이면 이번 틱 스킵" 중 하나로 다시 설계해야 한다.
-	interval := time.Duration(float64(b.Interval()) / speed)
+func runGlobalBot(ctx context.Context, b bot.GlobalBot, states map[string]*bot.MarketState, submitter order.OrderSubmitter) {
+	// 다른 봇들과 달리 배속(speed)으로 주기를 나누지 않습니다 — 실제 Bedrock 호출
+	// 지연은 리플레이를 얼마나 빨리 돌리든 그대로이기 때문입니다(고정 실주기).
+	// b.Decide()는 아래 select 루프 안에서 동기로 호출하는데, time.Ticker는 채널
+	// 버퍼가 1개뿐이라 리시버(이 루프)가 Decide()로 바쁜 동안 지나간 틱은 그냥
+	// 버려집니다 — 그래서 "이전 호출이 아직 진행 중이면 이번 틱은 스킵"이 별도
+	// 잠금/플래그 없이 이 구조만으로 그대로 성립합니다.
+	interval := b.Interval()
 	if interval <= 0 {
 		interval = time.Millisecond
 	}

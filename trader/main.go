@@ -113,7 +113,7 @@ func run() error {
 
 	var globalWG sync.WaitGroup
 	globalWG.Go(func() {
-		replay.RunGlobalBots(ctx, states, *speed, submitter)
+		replay.RunGlobalBots(ctx, states, submitter)
 	})
 
 	var wg sync.WaitGroup
