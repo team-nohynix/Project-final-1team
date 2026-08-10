@@ -9,10 +9,11 @@ import (
 
 // Config는 orderapi 실행에 필요한 환경변수를 담습니다.
 type Config struct {
-	Port        string
-	KafkaBroker string
-	OrdersTopic string
-	RedisAddr   string
+	Port            string
+	KafkaBroker     string
+	OrdersTopic     string
+	ExecutionsTopic string
+	RedisAddr       string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -46,6 +47,13 @@ func LoadConfig() Config {
 		topic = "orders"
 	}
 
+	// EXECUTIONS_TOPIC도 ORDERS_TOPIC과 같은 이유로 고정 관례값 기본값을
+	// 둡니다 — order.Store가 체결을 반영하려고 구독하는 토픽(2026-08-10 추가).
+	execTopic := os.Getenv("EXECUTIONS_TOPIC")
+	if execTopic == "" {
+		execTopic = "executions"
+	}
+
 	// 호가창 조회(GET /v1/markets/{market}/orderbook, FR-12)가 매칭 엔진이 써둔 Redis
 	// 스냅샷을 읽으므로, KAFKA_BROKER와 같은 이유로 REDIS_ADDR도 필수로 요구합니다.
 	redisAddr := os.Getenv("REDIS_ADDR")
@@ -53,5 +61,5 @@ func LoadConfig() Config {
 		log.Fatal("REDIS_ADDR 환경변수가 필요합니다.")
 	}
 
-	return Config{Port: port, KafkaBroker: broker, OrdersTopic: topic, RedisAddr: redisAddr}
+	return Config{Port: port, KafkaBroker: broker, OrdersTopic: topic, ExecutionsTopic: execTopic, RedisAddr: redisAddr}
 }
