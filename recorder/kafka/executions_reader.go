@@ -96,3 +96,8 @@ func (r *ExecutionReader) Run(ctx context.Context, handleBatch func(ctx context.
 func (r *ExecutionReader) Close() error {
 	return r.reader.Close()
 }
+
+// Lag — orders_reader.go의 Lag()와 같은 이유·같은 방식입니다.
+func (r *ExecutionReader) Lag() int64 {
+	return r.reader.Stats().Lag
+}

@@ -7,11 +7,16 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"orderapi/backpressure"
 	"orderapi/idempotency"
 	"orderapi/kafkaclient"
 	"orderapi/order"
 	"orderapi/session"
 )
+
+// backpressureRedisKey는 recorder/backpressure.RedisFlag가 쓰는 것과 반드시
+// 같은 값이어야 합니다(모듈 간 타입 비공유 원칙 — 값만 맞추면 됨).
+const backpressureRedisKey = "backpressure:recorder_lag"
 
 // sessionTTL은 세션 락의 Redis 만료 시간입니다 — 클라이언트(trader/replayengine)는
 // 이 값의 1/3 주기로 하트비트를 보내야 하고(session.Client.Claim이 응답에 실어주는
@@ -30,9 +35,10 @@ func main() {
 	defer redisClient.Close()
 
 	sessionStore := session.NewRedisStore(redisClient, sessionTTL)
+	lagChecker := &backpressure.RedisChecker{Client: redisClient, Key: backpressureRedisKey}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/orders", acceptOrderHandler(store, idem, producer))
+	mux.HandleFunc("POST /v1/orders", acceptOrderHandler(store, idem, producer, lagChecker))
 	mux.HandleFunc("DELETE /v1/orders/{orderId}", cancelOrderHandler(store, producer))
 	mux.HandleFunc("GET /v1/markets/{market}/orderbook", orderbookHandler(redisClient))
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(sessionStore))
