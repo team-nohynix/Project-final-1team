@@ -7,7 +7,7 @@ const defaultTotalOrders = 1800000
 const defaultGenerationTime = 60 // seconds
 
 const scenarioName = ref(defaultScenarioName)
-const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 UTC 00:00~다음 날 UTC 00:00 구간을 수집
+const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 const totalOrders = ref(defaultTotalOrders)
 const generationTime = ref(defaultGenerationTime)
 
@@ -82,32 +82,98 @@ const canStartPaperTrading = computed(() => {
   return collectionStatus.value === 'completed' && canCreate.value
 })
 
-// 시세 수집 요청 시작 (백엔드 API 미확정 — 실제 요청은 아직 구현하지 않음)
+// Types for collect API response
+type CollectResult = {
+  market: string
+  status: 'ok' | 'error'
+  batchPath?: string
+  streamPath?: string
+  error?: string
+}
+
+type CollectResponse = {
+  date: string
+  range: { start: string; end: string }
+  results: CollectResult[]
+}
+
+// 시세 수집 요청 시작
 const requestMarketData = async () => {
   if (!canRequestCollection.value || collectionStatus.value === 'collecting') return
 
   collectionStatus.value = 'collecting'
   collectedData.value = null
+  errorMessage.value = ''
 
   try {
-    // TODO: 백엔드 시세 수집 요청 API 연결 (예: POST /api/market-data/collect)
-    // const payload = { date: selectedDate.value } // 20개 마켓 전체 대상, 해당 날짜 UTC 00:00~다음 날 UTC 00:00 수집
-    // const response = await marketDataApi.requestCollection(payload)
-    // handleCollectionSuccess(response.data)
+    const payload = { date: selectedDate.value }
+    const res = await fetch('/v1/collect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    if (!res.ok) {
+      // Try to parse backend error message if provided
+      let backendMsg = ''
+      try {
+        const errJson = await res.json()
+        backendMsg = errJson?.error || JSON.stringify(errJson)
+      } catch (e) {
+        backendMsg = res.statusText || `HTTP ${res.status}`
+      }
+      throw new Error(backendMsg)
+    }
+
+    const data = (await res.json()) as CollectResponse
+
+    const results = Array.isArray(data.results) ? data.results : []
+    const marketCount = results.length
+    const successCount = results.filter((r) => r.status === 'ok').length
+    const failCount = results.filter((r) => r.status === 'error').length
+
+    // Aggregate failed market messages for display
+    if (failCount > 0) {
+      const failMsgs = results
+        .filter((r) => r.status === 'error')
+        .map((r) => `${r.market}${r.error ? ` (${r.error})` : ''}`)
+      errorMessage.value = `일부 마켓 수집 실패: ${failMsgs.join(', ')}`
+    }
+
+    handleCollectionSuccess({
+      date: data.date,
+      marketCount,
+      successCount,
+      failCount,
+    })
   } catch (error) {
-    handleCollectionError(error)
+    handleCollectionError(error instanceof Error ? error : new Error(String(error)))
   }
 }
 
 // 수집 완료 처리 (API 응답 데이터를 그대로 저장)
-const handleCollectionSuccess = (data) => {
+const handleCollectionSuccess = (data: { date?: string; marketCount?: number; successCount?: number; failCount?: number }) => {
   collectedData.value = data
-  collectionStatus.value = 'completed'
+
+  // 완료 판정: 20개 마켓이 모두 성공했을 때만 completed
+  const marketCount = data.marketCount ?? 0
+  const successCount = data.successCount ?? 0
+  const failCount = data.failCount ?? 0
+
+  if (marketCount === 20 && successCount === 20 && failCount === 0) {
+    collectionStatus.value = 'completed'
+  } else if (failCount > 0) {
+    collectionStatus.value = 'failed'
+  } else {
+    // 미완료 상태(예: 마켓 수가 20 미만이거나 기타 불명확한 경우)는 실패로 처리
+    collectionStatus.value = 'failed'
+  }
 }
 
 // 수집 실패 처리
-const handleCollectionError = (error) => {
+const handleCollectionError = (error: Error | any) => {
   console.error('시세 수집 실패:', error)
+  errorMessage.value = error instanceof Error ? error.message : String(error)
   collectionStatus.value = 'failed'
 }
 
@@ -199,7 +265,7 @@ const reset = () => {
             :disabled="collectionStatus === 'collecting'"
           />
           <p class="date-hint">
-            선택한 날짜의 KST 00:00부터 다음 날 UTC 00:00까지 20개 마켓의 시세를 수집합니다.
+            선택한 날짜의 KST 00:00부터 다음 날 KST 00:00까지 20개 마켓의 시세를 수집합니다.
           </p>
         </div>
 
