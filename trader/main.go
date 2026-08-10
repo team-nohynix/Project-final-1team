@@ -108,12 +108,21 @@ func run() error {
 		states[entry.Market] = bot.NewMarketState(bot.PriceHistorySize)
 	}
 
+	// AI 트레이더(전체 조망형 봇)가 쓸 Bedrock 클라이언트입니다. 자격증명/모델
+	// 액세스가 아직 준비 안 된 로컬 환경이라도 여기서 바로 실패하진 않습니다 —
+	// SDK 설정 로드 자체는 대체로 성공하고, 실제 호출이 실패해야 그때 드러납니다
+	// (bot.MomentumAIBot.Decide가 그 실패를 로그만 남기고 넘어가게 처리해둠).
+	bedrockClient, err := bot.NewBedrockClient(context.Background(), cfg.BedrockRegion, cfg.BedrockModelID)
+	if err != nil {
+		return fmt.Errorf("Bedrock 클라이언트 생성 실패: %w", err)
+	}
+
 	// 전체 마켓 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var globalWG sync.WaitGroup
 	globalWG.Go(func() {
-		replay.RunGlobalBots(ctx, states, submitter)
+		replay.RunGlobalBots(ctx, states, submitter, bedrockClient)
 	})
 
 	var wg sync.WaitGroup

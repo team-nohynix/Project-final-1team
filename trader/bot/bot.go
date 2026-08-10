@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -91,8 +92,11 @@ type GlobalDecision struct {
 // GlobalBot은 여러 마켓의 상태를 한 번에 보고 판단하는 봇입니다 — "20개 종목 중 어디를,
 // 얼마나" 판단하는 포트폴리오형 AI 트레이더(모멘텀 추종/평균회귀)에 씁니다. 마켓별로
 // 따로 인스턴스를 두지 않고, 판단 주기마다 딱 한 번 호출되어 모든 마켓을 동시에 봅니다.
+//
+// Bot.Decide와 달리 ctx를 받습니다 — AI 트레이더는 실제로 Bedrock을 호출하는 I/O라
+// 타임아웃/취소가 필요하기 때문입니다(마켓별 규칙 기반 봇은 순수 계산이라 필요 없음).
 type GlobalBot interface {
 	Name() string
 	Interval() time.Duration
-	Decide(states map[string]*MarketState) []GlobalDecision
+	Decide(ctx context.Context, states map[string]*MarketState) []GlobalDecision
 }
