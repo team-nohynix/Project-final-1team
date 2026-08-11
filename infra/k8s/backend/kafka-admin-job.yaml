@@ -1,0 +1,69 @@
+# orders/executions 토픽을 1회 생성하는 관리용 Job. Terraform으로는 못 만든다(Kafka 어드민
+# 클라이언트가 필요). 파티션 20개 = 마켓 20개(파티션 키가 마켓명). 완료 후 이 Job은 지워도
+# 된다 — kafka-topics.sh --create는 이미 있으면 에러만 내고 끝나 재실행해도 안전하다.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-kafka-admin
+  namespace: backend
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::727646470302:role/team1-sa-kafka-admin
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-bootstrap
+  namespace: backend
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: sa-kafka-admin
+      restartPolicy: Never
+      initContainers:
+        - name: fetch-iam-auth-jar
+          image: curlimages/curl:8.11.0
+          command:
+            - sh
+            - -c
+            - curl -sSL -o /jars/aws-msk-iam-auth-all.jar https://repo1.maven.org/maven2/software/amazon/msk/aws-msk-iam-auth/2.2.0/aws-msk-iam-auth-2.2.0-all.jar
+          volumeMounts:
+            - name: jars
+              mountPath: /jars
+      containers:
+        - name: kafka-topics
+          # bitnami/kafka:3.7 태그는 Docker Hub에서 내려가 ImagePullBackOff가 난다 —
+          # infra/dev-kafka/docker-compose.yml에서 검증된 이미지로 대체.
+          image: apache/kafka:3.7.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cat > /tmp/client.properties <<EOF
+              security.protocol=SASL_SSL
+              sasl.mechanism=AWS_MSK_IAM
+              sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;
+              sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
+              EOF
+              export CLASSPATH=/jars/aws-msk-iam-auth-all.jar
+              for topic in orders executions; do
+                /opt/kafka/bin/kafka-topics.sh \
+                  --bootstrap-server "$BOOTSTRAP_BROKERS" \
+                  --command-config /tmp/client.properties \
+                  --create --if-not-exists \
+                  --topic "$topic" --partitions 20 --replication-factor 3
+              done
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server "$BOOTSTRAP_BROKERS" \
+                --command-config /tmp/client.properties --list
+          env:
+            - name: BOOTSTRAP_BROKERS
+              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+          volumeMounts:
+            - name: jars
+              mountPath: /jars
+      volumes:
+        - name: jars
+          emptyDir: {}

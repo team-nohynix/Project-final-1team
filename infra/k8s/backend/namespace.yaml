@@ -1,0 +1,7 @@
+# 이름은 irsa.tf 트러스트 정책과 일치해야 한다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend
+  labels:
+    team: team1
