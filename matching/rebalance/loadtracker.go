@@ -22,15 +22,14 @@ type LoadTracker struct {
 	broker  string
 	topic   string
 	markets []string // 인덱스 = 파티션 번호(orderapi/kafkaclient의 marketPartitioner와 동일한 순서)
-	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 SCRAM+TLS(MSK) — kafkaclient/auth.go 참고
+	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 AWS_MSK_IAM+TLS(MSK) — kafkaclient/auth.go 참고
 }
 
-// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
-// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다. readLastOffset이
-// kafka.DialLeader로 브로커에 직접 붙는 자리라 GroupConsumer와는 별도로
-// dialer가 필요합니다.
-func NewLoadTracker(redisClient *redis.Client, broker, topic string, markets []string, saslUsername, saslPassword string) (*LoadTracker, error) {
-	dialer, err := kafkaclient.NewDialer(saslUsername, saslPassword)
+// useIAM이 false면(로컬 dev-kafka) 인증 없이 붙고, true면(MSK) AWS_MSK_IAM+TLS로
+// 인증합니다. readLastOffset이 kafka.DialLeader로 브로커에 직접 붙는 자리라
+// GroupConsumer와는 별도로 dialer가 필요합니다.
+func NewLoadTracker(ctx context.Context, redisClient *redis.Client, broker, topic string, markets []string, useIAM bool) (*LoadTracker, error) {
+	dialer, err := kafkaclient.NewDialer(ctx, useIAM)
 	if err != nil {
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}

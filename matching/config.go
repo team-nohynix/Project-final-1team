@@ -9,14 +9,14 @@ import (
 
 // Config는 매칭 엔진 실행에 필요한 환경변수를 담습니다.
 type Config struct {
-	KafkaBroker       string
-	OrdersTopic       string
-	ExecutionsTopic   string
-	AssignmentsTopic  string
-	KafkaSASLUsername string
-	KafkaSASLPassword string
-	RedisAddr         string
-	RedisPassword     string
+	KafkaBroker      string
+	OrdersTopic      string
+	ExecutionsTopic  string
+	AssignmentsTopic string
+	KafkaUseIAMAuth  bool
+	RedisAddr        string
+	RedisPassword    string
+	RedisTLSEnabled  bool
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -55,22 +55,23 @@ func LoadConfig() Config {
 		assignmentsTopic = "assignments"
 	}
 
-	// REDIS_PASSWORD는 선택입니다 — orderapi/config.go와 같은 이유(2026-08-10 추가).
+	// REDIS_PASSWORD/REDIS_TLS_ENABLED는 선택입니다 — orderapi/config.go와
+	// 같은 이유(2026-08-10/2026-08-11 추가).
 	redisPassword := os.Getenv("REDIS_PASSWORD")
+	redisTLSEnabled := os.Getenv("REDIS_TLS_ENABLED") == "true"
 
-	// KAFKA_SASL_USERNAME/KAFKA_SASL_PASSWORD도 같은 이유로 선택입니다 —
-	// orderapi/config.go와 같은 이유(2026-08-10 추가).
-	kafkaSASLUsername := os.Getenv("KAFKA_SASL_USERNAME")
-	kafkaSASLPassword := os.Getenv("KAFKA_SASL_PASSWORD")
+	// KAFKA_USE_IAM_AUTH도 같은 이유로 선택입니다 — orderapi/config.go와 같은
+	// 이유(2026-08-11, SCRAM에서 IAM으로 교체 — CLAUDE.md 참고).
+	kafkaUseIAMAuth := os.Getenv("KAFKA_USE_IAM_AUTH") == "true"
 
 	return Config{
-		KafkaBroker:       broker,
-		OrdersTopic:       ordersTopic,
-		ExecutionsTopic:   executionsTopic,
-		AssignmentsTopic:  assignmentsTopic,
-		KafkaSASLUsername: kafkaSASLUsername,
-		KafkaSASLPassword: kafkaSASLPassword,
-		RedisAddr:         redisAddr,
-		RedisPassword:     redisPassword,
+		KafkaBroker:      broker,
+		OrdersTopic:      ordersTopic,
+		ExecutionsTopic:  executionsTopic,
+		AssignmentsTopic: assignmentsTopic,
+		KafkaUseIAMAuth:  kafkaUseIAMAuth,
+		RedisAddr:        redisAddr,
+		RedisPassword:    redisPassword,
+		RedisTLSEnabled:  redisTLSEnabled,
 	}
 }

@@ -33,13 +33,13 @@ type OrderProducer struct {
 	writer *kafka.Writer
 }
 
-// NewOrderProducer는 topic에 발행하는 Publisher를 만듭니다. saslUsername/saslPassword가
-// 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 그대로 붙고, 채워져 있으면(MSK)
-// SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고). matching/kafkaclient.NewGroupConsumer와
-// 같은 이유로 에러를 반환합니다(SASL 메커니즘 생성이 실패할 수 있는 연산이라) —
+// NewOrderProducer는 topic에 발행하는 Publisher를 만듭니다. useIAM이 false면
+// (로컬 dev-kafka) 인증 없이 그대로 붙고, true면(MSK) AWS_MSK_IAM+TLS로
+// 인증합니다(auth.go 참고). matching/kafkaclient.NewGroupConsumer와 같은
+// 이유로 에러를 반환합니다(자격증명 로드가 실패할 수 있는 연산이라) —
 // 호출부(main.go)가 로그/종료를 결정합니다.
-func NewOrderProducer(broker, topic, saslUsername, saslPassword string) (*OrderProducer, error) {
-	transport, err := newTransport(saslUsername, saslPassword)
+func NewOrderProducer(ctx context.Context, broker, topic string, useIAM bool) (*OrderProducer, error) {
+	transport, err := newTransport(ctx, useIAM)
 	if err != nil {
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}

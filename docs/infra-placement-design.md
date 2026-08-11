@@ -3,7 +3,8 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
-| 2026-08-10 (2차) | 3장 MSK 인증을 SASL/IAM→**SASL/SCRAM-SHA-512**로 정정(kafka-go가 AWS_MSK_IAM을 지원하지 않아서 결정 변경, 코드도 이미 SCRAM으로 구현·검증됨). 8장 보안 그룹 매트릭스의 Kafka 포트도 9098(IAM)→9096(SCRAM)으로 정정 |
+| 2026-08-11 | 3장 MSK 인증을 SASL/SCRAM→**AWS_MSK_IAM으로 되돌림** — `infra/msk.tf`가 실제로 만드는 MSK Serverless는 IAM 인증만 지원하고 SASL/SCRAM을 지원하지 않는다는 걸 AWS 공식 문서로 확인. kafka-go의 AWS_MSK_IAM 미지원 판단도 불완전했던 것으로 정정(`aws_msk_iam_v2` 서브모듈 존재). 8장 Kafka 포트도 9096(SCRAM)→9098(IAM)로 되돌림 |
+| 2026-08-10 (2차) | 3장 MSK 인증을 SASL/IAM→**SASL/SCRAM-SHA-512**로 정정(kafka-go가 AWS_MSK_IAM을 지원하지 않아서 결정 변경, 코드도 이미 SCRAM으로 구현·검증됨). 8장 보안 그룹 매트릭스의 Kafka 포트도 9098(IAM)→9096(SCRAM)으로 정정. **2026-08-11에 다시 IAM/9098로 되돌림(위 항목 참고)** |
 | 2026-08-10 | 4.1절 RDS 엔진을 PostgreSQL→**MySQL**로 정정(팀이 2026-08-07에 이미 MySQL로 결정했고 `recorder`도 그렇게 구현돼 있었는데, 이 문서만 반영이 안 돼 있었음). 8장 보안 그룹 매트릭스의 RDS 포트도 5432→3306으로 정정 |
 | 2026-08-05 | 시세 수집기→AI 트레이더 구간의 Kafka(시세 토픽) 의존을 제거 — `sa-collector`/`sa-ai-trader` IRSA의 MSK 권한, `sg-eks-aitrader`→`sg-msk` 보안 그룹 행, MSK 토픽 목록의 `market-data` 삭제(2.2절, 3장, 8장). architecture.md·requirements.md와 함께 정정 |
 | 2026-08-04 | requirements.md·architecture.md·ai-trader-design.md·api-specification.md·erd.md·회의록 및 기존 Terraform(`infra/`)을 근거로 네트워크·컴퓨트·보안 배치 설계 최초 작성 |
@@ -135,9 +136,9 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 ## 3. 메시징 — MSK Serverless
 
 - ENI를 `data-a`/`data-c` 서브넷에 배치(2 AZ)
-- **인증 정정(2026-08-10)**: 원래 이 절은 IAM 인증(SASL/IAM, EKS IRSA 자격증명 재사용)을 전제로 썼으나, **SASL/SCRAM-SHA-512로 결정을 바꿨다.** 이유: `orderapi`/`matching`/`recorder`가 쓰는 Kafka 클라이언트 라이브러리(`segmentio/kafka-go`)가 AWS_MSK_IAM SASL 메커니즘을 내장 지원하지 않아, IAM으로 가려면 그 프로토콜을 직접 구현해야 하는데 실제 MSK 없이는 검증할 방법이 없어 위험하다고 판단했다. SCRAM은 그 라이브러리가 이미 지원하는 검증된 방식이고, 실제로 로컬에 disposable SASL/SCRAM 브로커를 띄워 정상 동작(인증 성공/실패 둘 다)을 확인했다. **트레이드오프**: IRSA 자격증명을 그대로 재사용하지 못하므로, SCRAM 사용자명/비밀번호를 Secrets Manager 등으로 별도 관리해야 한다(`kafka-configs.sh --alter --add-config 'SCRAM-SHA-512=[password=...]' --entity-type users`로 등록, [`deployment-env-vars.md`](deployment-env-vars.md) 참고).
+- **인증(2026-08-11, 원래대로 IAM으로 확정)**: 이 절은 원래 IAM 인증(SASL/IAM, EKS IRSA 자격증명 재사용)을 전제로 썼다가, 2026-08-10에 `segmentio/kafka-go`가 AWS_MSK_IAM을 내장 지원하지 않는다는(불완전한) 판단으로 SASL/SCRAM-SHA-512로 한 번 바꿨었다. **2026-08-11에 다시 IAM으로 되돌렸다** — 실제로는 `github.com/segmentio/kafka-go/sasl/aws_msk_iam_v2`라는 별도 서브모듈로 AWS_MSK_IAM이 지원되고 있었고(메인 모듈만 검색해서 놓쳤던 것), 무엇보다 이 절이 전제하는 **MSK Serverless는 애초에 SASL/SCRAM을 지원하지 않고 IAM 인증만 허용**한다(AWS 공식 문서로 확인). 그래서 원래 설계(IAM, IRSA 자격증명 재사용)가 맞았다 — SCRAM 사용자명/비밀번호를 Secrets Manager로 관리할 필요가 없어졌고, `orderapi`/`matching`/`recorder`가 쓰는 역할에 MSK 클러스터 ARN으로 스코프한 `kafka-cluster:*` IAM 정책만 붙이면 된다([`deployment-env-vars.md`](deployment-env-vars.md)/[`aws-infra-handoff.md`](aws-infra-handoff.md) 참고).
 - 토픽: `orders`, `executions` — 파티션 키는 마켓명(NFR-07). 시세는 이 MSK를 거치지 않는다 — 시세 수집기→AI 트레이더는 HTTP 매니페스트/파일 API(풀 방식)를 쓴다(과거 데이터·소비자 1개뿐이라 Kafka pub-sub 이점이 없음, architecture.md 3장 참고)
-- 보안 그룹(`sg-msk`)은 아래 3장 참고 — 포트는 SASL/SCRAM 기준 9096(8장에 반영)
+- 보안 그룹(`sg-msk`)은 아래 3장 참고 — 포트는 IAM 인증 기준 9098(8장에 반영, 9096/SCRAM 표기는 되돌림)
 
 ---
 
@@ -197,8 +198,8 @@ Bedrock 호출 권한은 **AI 트레이더 클러스터의 서비스 어카운�
 
 | 소스 | 대상 | 포트 | 용도 |
 |---|---|---|---|
-| `sg-eks-backend` | `sg-msk` | 9096 (SASL_SSL/SCRAM, 2026-08-10 IAM→SCRAM 정정) | 접수 API 발행, 매칭 엔진 구독/발행 |
-| `sg-eks-replay` | `sg-msk` | 9096 (SASL_SSL/SCRAM) | (리플레이는 Kafka 직접 접근 없음 — 접수 API만 호출. 표기는 배제 가능) |
+| `sg-eks-backend` | `sg-msk` | 9098 (SASL_SSL/IAM, 2026-08-11 SCRAM→IAM 되돌림 — MSK Serverless는 IAM만 지원) | 접수 API 발행, 매칭 엔진 구독/발행 |
+| `sg-eks-replay` | `sg-msk` | 9098 (SASL_SSL/IAM) | (리플레이는 Kafka 직접 접근 없음 — 접수 API만 호출. 표기는 배제 가능) |
 | `sg-eks-backend` | `sg-rds` | 3306 | 기록기 → RDS 저장 (MySQL, 2026-08-10 엔진 정정) |
 | `sg-eks-backend` | `sg-redis` | 6379 | 매칭 엔진 쓰기, 접수 API 읽기 |
 | `sg-eks-aitrader` | `sg-eks-backend` (ALB/ClusterIP) | 443 | AI 트레이더 → 접수 API 호출 |

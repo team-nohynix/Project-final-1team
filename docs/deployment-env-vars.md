@@ -3,7 +3,8 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
-| 2026-08-10 (2차) | Kafka SASL/SCRAM(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`) + Redis AUTH(`REDIS_PASSWORD`) 환경변수 추가 — orderapi/matching/recorder 3개 모듈 전부. 기존 "코드에 인증 지원 없음" 참고 섹션은 삭제(이제 지원함) |
+| 2026-08-11 | `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD` 삭제, `KAFKA_USE_IAM_AUTH`로 교체(SCRAM→AWS_MSK_IAM 전환 — `infra/msk.tf`가 MSK **Serverless**를 쓰는데, MSK Serverless는 IAM 인증만 지원하고 SASL/SCRAM 자체를 지원하지 않는다는 걸 AWS 공식 문서로 확인함). `REDIS_TLS_ENABLED` 신설(`infra/elasticache.tf`가 `transit_encryption_enabled=true`+AUTH 토큰 없음 조합을 쓰는데, 기존 `REDIS_PASSWORD` 하나로는 이 조합을 표현할 수 없었음) |
+| 2026-08-10 (2차) | Kafka SASL/SCRAM(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`) + Redis AUTH(`REDIS_PASSWORD`) 환경변수 추가 — orderapi/matching/recorder 3개 모듈 전부. 기존 "코드에 인증 지원 없음" 참고 섹션은 삭제(이제 지원함). **2026-08-11에 Kafka 쪽은 다시 교체됨(위 항목 참고)** |
 | 2026-08-10 | 최초 작성 — AWS에서 6개 Go 모듈을 실제로 돌릴 때 필요한 환경변수/플래그 전체 정리 (AI 트레이더 Bedrock 연동 작업 직후) |
 
 ## 관련 문서
@@ -35,8 +36,9 @@ CLI 플래그 없음 — `go run .`으로 HTTP 서버만 띄우고, `POST /v1/co
 | `PORT` | 선택 | `8081` | 보통 그대로 둠 |
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠(고정 관례값) |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠(고정 관례값, 2026-08-10 체결 반영 기능 추가로 신설) |
-| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | MSK SASL/SCRAM 사용자명/비밀번호 — 6번 문서 "Kafka/Redis 인증" 참고. 둘 다 비우면 인증 없이 붙음(로컬 그대로) |
+| `KAFKA_USE_IAM_AUTH` | 선택 (2026-08-11 추가) | `false` | `true`면 AWS_MSK_IAM으로 MSK에 인증(자격증명은 SDK 기본 체인/EKS IRSA) — 6번 문서 "Kafka/Redis 인증" 참고. `false`면 인증 없이 붙음(로컬 그대로) |
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | ElastiCache AUTH 토큰. 비우면 인증 없이 붙음 |
+| `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | `true`면 Redis 연결에 TLS 사용 — ElastiCache가 `transit_encryption_enabled=true`면 반드시 켜야 함(AUTH 토큰 여부와 별개) |
 
 CLI 플래그 없음. **주의**: `orders` 토픽은 자동 생성에 맡기면 안 되고 **정확히 20개 파티션**으로 미리 만들어둬야 함(마켓 1개=파티션 1개 전제, FR-11).
 
@@ -51,8 +53,9 @@ CLI 플래그 없음. **주의**: `orders` 토픽은 자동 생성에 맡기면 
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠 |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
 | `ASSIGNMENTS_TOPIC` | 선택 | `assignments` | 그대로 둠 |
-| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | orderapi와 동일 값 — 6번 문서 참고 |
+| `KAFKA_USE_IAM_AUTH` | 선택 (2026-08-11 추가) | `false` | orderapi와 동일 값 — 6번 문서 참고 |
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi와 동일 값 |
+| `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | orderapi와 동일 값 |
 
 CLI 플래그 없음. 인스턴스를 몇 개 띄우든(FR-11) 전부 같은 값을 보게 하면 됨 — 컨슈머 그룹 ID(`matching-engine`)는 코드 상수라 환경변수가 아님.
 
@@ -110,21 +113,22 @@ CLI 플래그:
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
 | `ASSIGNMENTS_TOPIC` | 선택 | `assignments` | 그대로 둠 |
 | `ARCHIVE_BUCKET` | 선택 | `""`(비우면 로컬 `./records`) | `team1-truss-trade-results`(이미 AWS엔 있음, Terraform state엔 아직 없음 — 5번 문서 참고) |
-| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | 선택 (2026-08-10 추가) | 둘 다 비움 | orderapi/matching과 동일 값 — 아래 참고 |
+| `KAFKA_USE_IAM_AUTH` | 선택 (2026-08-11 추가) | `false` | orderapi/matching과 동일 값 — 아래 참고 |
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi/matching과 동일 값 |
+| `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | orderapi/matching과 동일 값 |
 
 CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
 
 ---
 
-## Kafka/Redis 인증 (2026-08-10 추가)
+## Kafka/Redis 인증 (2026-08-10 추가, Kafka 쪽 2026-08-11 교체)
 
-`orderapi`/`matching`/`recorder` 세 모듈 모두 **SASL/SCRAM-SHA-512(Kafka) + AUTH 토큰(Redis)** 인증을 지원한다. 두 값 다 선택(optional) 환경변수라, 비워두면 로컬 dev-kafka/dev-redis처럼 인증 없이 그대로 붙는다 — 즉 이 값들을 안 채워도 로컬 개발 워크플로는 전혀 바뀌지 않는다.
+`orderapi`/`matching`/`recorder` 세 모듈 모두 **AWS_MSK_IAM(Kafka) + AUTH 토큰/TLS(Redis)** 인증을 지원한다. 전부 선택(optional) 환경변수라, 비워두면/`false`면 로컬 dev-kafka/dev-redis처럼 인증 없이 그대로 붙는다 — 즉 이 값들을 안 채워도 로컬 개발 워크플로는 전혀 바뀌지 않는다.
 
-**Kafka(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`)**: 둘 다 채워지면 SCRAM-SHA-512 + TLS로 MSK에 인증한다. **AWS_MSK_IAM이 아니라 SASL/SCRAM을 쓰기로 결정**했다 — `segmentio/kafka-go`(이 프로젝트가 쓰는 버전)가 AWS_MSK_IAM SASL 메커니즘을 내장 지원하지 않고, 직접 프로토콜을 구현하면 실제 MSK 없이는 검증할 방법이 없어 위험이 크다고 판단했기 때문이다. SCRAM은 kafka-go가 이미 지원하는 검증된 방식이고, 이번에 실제로(로컬 disposable Kafka 브로커에 SCRAM 인증 붙여서) 정상 동작을 확인했다.
+**Kafka(`KAFKA_USE_IAM_AUTH`)**: `true`면 AWS_MSK_IAM + TLS로 MSK에 인증한다. **2026-08-10에는 SASL/SCRAM을 먼저 택했다가 2026-08-11에 IAM으로 교체했다** — 이유는 인프라 쪽 사정이 아니라 MSK 자체의 제약이다: `infra/msk.tf`가 실제로 프로비저닝하는 건 MSK **Serverless**인데, AWS 공식 문서에 "MSK Serverless requires IAM access control for all clusters. Apache Kafka access control lists (ACLs) are not supported"라고 명시돼 있다 — 즉 MSK Serverless에서는 SASL/SCRAM 자체가 옵션이 아니다. (SCRAM을 골랐던 원래 근거 — "`segmentio/kafka-go`가 AWS_MSK_IAM을 지원하지 않는다" — 도 다시 확인해보니 틀렸다: 메인 모듈만 봐서 놓친 것이고, 실제로는 `github.com/segmentio/kafka-go/sasl/aws_msk_iam_v2`라는 별도 서브모듈로 2023년부터 존재한다. AWS SDK v2 기반이라 이 프로젝트가 S3/Bedrock에서 이미 쓰는 자격증명 체인을 그대로 재사용할 수 있어서, 직접 프로토콜을 구현하는 것과는 리스크가 다르다.) 자격증명은 AWS SDK v2 기본 체인(EC2 인스턴스 프로파일/EKS IRSA)을 그대로 쓴다 — 별도 사용자명/비밀번호가 필요 없다.
 
-MSK 쪽에서 준비해야 할 것: `kafka-configs.sh --bootstrap-server ... --alter --add-config 'SCRAM-SHA-512=[password=...]' --entity-type users --entity-name <사용자명>`으로 SCRAM 사용자를 등록해야 한다(AWS 콘솔/CLI에서도 가능). 이 사용자명/비밀번호를 `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`로 넘기면 된다 — Secrets Manager에 저장해두고 배포 시 주입하는 방식을 권장.
+MSK 쪽에서 준비해야 할 것: EKS IRSA가 매핑된 IAM 역할에 `kafka-cluster:Connect`/`kafka-cluster:*Topic*`/`kafka-cluster:*Group*` 등 MSK IAM 정책 액션을 클러스터 ARN으로 스코프해서 붙여줘야 한다. Secrets Manager에 넣을 별도 비밀값은 필요 없다 — IAM 역할 자체가 자격증명이다.
 
-**Redis(`REDIS_PASSWORD`)**: ElastiCache를 AUTH 토큰 있는 구성으로 만들고 그 토큰 값을 넘기면 된다 — `go-redis/v9`가 이미 지원하는 필드라 별도 구현이 필요 없었다.
+**Redis(`REDIS_PASSWORD`/`REDIS_TLS_ENABLED`)**: `REDIS_PASSWORD`는 ElastiCache를 AUTH 토큰 있는 구성으로 만들고 그 토큰 값을 넘기면 된다. `REDIS_TLS_ENABLED`는 2026-08-11에 별도로 추가했다 — `infra/elasticache.tf`가 `transit_encryption_enabled=true`인데 `auth_token`은 안 두는 구성이라("TLS는 필수, 비밀번호는 없음"), 기존 `REDIS_PASSWORD` 하나만으로는 이 조합을 표현할 수 없었다. 둘 다 `go-redis/v9`가 이미 지원하는 필드(`Password`/`TLSConfig`)라 별도 구현이 필요 없었다.
 
-**인프라 쪽에서 "VPC 프라이빗 서브넷 안이라 네트워크 격리로 충분하다"고 판단하면, 이 환경변수들을 그냥 비워두는 것도 유효한 선택이다** — 코드가 두 경로(인증 있음/없음) 모두 지원하므로 어느 쪽으로 가든 코드 변경이 필요 없다.
+**인프라 쪽에서 "VPC 프라이빗 서브넷 안이라 네트워크 격리로 충분하다"고 판단하면, 이 환경변수들을 그냥 비워두는 것도 유효한 선택이다** — 코드가 두 경로(인증 있음/없음) 모두 지원하므로 어느 쪽으로 가든 코드 변경이 필요 없다. 다만 MSK Serverless는 이 선택권이 없다(IAM 필수) — 위 참고.

@@ -17,10 +17,10 @@ type ExecutionReader struct {
 	reader *kafka.Reader
 }
 
-// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
-// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
-func NewExecutionReader(broker, topic, groupID, saslUsername, saslPassword string) (*ExecutionReader, error) {
-	dialer, err := newDialer(saslUsername, saslPassword)
+// useIAM이 false면(로컬 dev-kafka) 인증 없이 붙고, true면(MSK) AWS_MSK_IAM+TLS로
+// 인증합니다(auth.go 참고).
+func NewExecutionReader(ctx context.Context, broker, topic, groupID string, useIAM bool) (*ExecutionReader, error) {
+	dialer, err := newDialer(ctx, useIAM)
 	if err != nil {
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}

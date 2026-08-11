@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"log"
 	"time"
@@ -79,23 +80,27 @@ func main() {
 	go runPeriodicFlush(ctx, orderBatcher, archiveFlushInterval)
 	go runPeriodicFlush(ctx, execBatcher, archiveFlushInterval)
 
-	orderReader, err := rkafka.NewOrderReader(cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	orderReader, err := rkafka.NewOrderReader(ctx, cfg.KafkaBroker, cfg.OrdersTopic, ordersGroupID, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("orders 리더 생성 실패: %v", err)
 	}
 	defer orderReader.Close()
-	execReader, err := rkafka.NewExecutionReader(cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	execReader, err := rkafka.NewExecutionReader(ctx, cfg.KafkaBroker, cfg.ExecutionsTopic, executionsGroupID, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("executions 리더 생성 실패: %v", err)
 	}
 	defer execReader.Close()
-	assignmentReader, err := rkafka.NewAssignmentReader(cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	assignmentReader, err := rkafka.NewAssignmentReader(ctx, cfg.KafkaBroker, cfg.AssignmentsTopic, assignmentsGroupID, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("assignments 리더 생성 실패: %v", err)
 	}
 	defer assignmentReader.Close()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
+	if cfg.RedisTLSEnabled {
+		redisOpts.TLSConfig = &tls.Config{}
+	}
+	redisClient := redis.NewClient(redisOpts)
 	defer redisClient.Close()
 
 	// RDS 백프레셔 감시: orders/executions 리더의 랙을 주기적으로 확인해 Redis

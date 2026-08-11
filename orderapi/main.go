@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net/http"
 	"time"
@@ -33,9 +34,11 @@ const sessionTTL = 30 * time.Second
 func main() {
 	cfg := LoadConfig()
 
+	ctx := context.Background()
+
 	store := order.NewStore()
 	idem := idempotency.NewStore()
-	producer, err := kafkaclient.NewOrderProducer(cfg.KafkaBroker, cfg.OrdersTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	producer, err := kafkaclient.NewOrderProducer(ctx, cfg.KafkaBroker, cfg.OrdersTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("주문 프로듀서 생성 실패: %v", err)
 	}
@@ -48,7 +51,7 @@ func main() {
 	// 둘 다 시도합니다 — 이 orderapi 인스턴스가 접수한 쪽만 Store에 있으므로
 	// (반대편은 이미 orderapi가 재시작됐거나 원래 이 인스턴스가 접수한 게
 	// 아닐 수 있음) 한쪽만 찾아지는 것도 정상입니다.
-	execConsumer, err := kafkaclient.NewExecutionConsumer(cfg.KafkaBroker, cfg.ExecutionsTopic, "orderapi-executions", cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	execConsumer, err := kafkaclient.NewExecutionConsumer(ctx, cfg.KafkaBroker, cfg.ExecutionsTopic, "orderapi-executions", cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("executions 컨슈머 생성 실패: %v", err)
 	}
@@ -62,7 +65,11 @@ func main() {
 		log.Fatalf("executions 컨슈머 종료: %v", err)
 	}()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
+	if cfg.RedisTLSEnabled {
+		redisOpts.TLSConfig = &tls.Config{}
+	}
+	redisClient := redis.NewClient(redisOpts)
 	defer redisClient.Close()
 
 	sessionStore := session.NewRedisStore(redisClient, sessionTTL)

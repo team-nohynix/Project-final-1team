@@ -29,10 +29,10 @@ type ExecutionProducer struct {
 	writer *kafka.Writer
 }
 
-// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
-// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고).
-func NewExecutionProducer(broker, topic, saslUsername, saslPassword string) (*ExecutionProducer, error) {
-	transport, err := NewTransport(saslUsername, saslPassword)
+// useIAM이 false면(로컬 dev-kafka) 인증 없이 붙고, true면(MSK) AWS_MSK_IAM+TLS로
+// 인증합니다(auth.go 참고).
+func NewExecutionProducer(ctx context.Context, broker, topic string, useIAM bool) (*ExecutionProducer, error) {
+	transport, err := NewTransport(ctx, useIAM)
 	if err != nil {
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}

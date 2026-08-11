@@ -74,12 +74,11 @@ type GroupConsumer struct {
 // 공유하는 고정값이어야 합니다(인스턴스별로 다르면 각자 자기 혼자만의 그룹에
 // 들어가서 재분배 자체가 일어나지 않습니다) — balancer는 matching/rebalance의
 // LoadAwareBalancer를 넘겨줍니다.
-// saslUsername/saslPassword가 둘 다 비어있으면(로컬 dev-kafka) 인증 없이 붙고,
-// 채워져 있으면(MSK) SCRAM-SHA-512+TLS로 인증합니다(auth.go 참고) — 그룹
-// 멤버십(kafka.ConsumerGroup)과 실제 파티션 읽기(consumePartition의 kafka.Reader)
-// 양쪽 다 같은 dialer를 씁니다.
-func NewGroupConsumer(broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle, saslUsername, saslPassword string) (*GroupConsumer, error) {
-	dialer, err := NewDialer(saslUsername, saslPassword)
+// useIAM이 false면(로컬 dev-kafka) 인증 없이 붙고, true면(MSK) AWS_MSK_IAM+TLS로
+// 인증합니다(auth.go 참고) — 그룹 멤버십(kafka.ConsumerGroup)과 실제 파티션
+// 읽기(consumePartition의 kafka.Reader) 양쪽 다 같은 dialer를 씁니다.
+func NewGroupConsumer(ctx context.Context, broker, groupID, topic string, balancer kafka.GroupBalancer, markets []string, life MarketLifecycle, useIAM bool) (*GroupConsumer, error) {
+	dialer, err := NewDialer(ctx, useIAM)
 	if err != nil {
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}

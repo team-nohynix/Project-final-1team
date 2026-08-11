@@ -9,14 +9,14 @@ import (
 
 // Config는 orderapi 실행에 필요한 환경변수를 담습니다.
 type Config struct {
-	Port              string
-	KafkaBroker       string
-	OrdersTopic       string
-	ExecutionsTopic   string
-	KafkaSASLUsername string
-	KafkaSASLPassword string
-	RedisAddr         string
-	RedisPassword     string
+	Port            string
+	KafkaBroker     string
+	OrdersTopic     string
+	ExecutionsTopic string
+	KafkaUseIAMAuth bool
+	RedisAddr       string
+	RedisPassword   string
+	RedisTLSEnabled bool
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -71,22 +71,28 @@ func LoadConfig() Config {
 	// KAFKA_BROKER 같은 필수값들과는 다릅니다.
 	redisPassword := os.Getenv("REDIS_PASSWORD")
 
-	// KAFKA_SASL_USERNAME/KAFKA_SASL_PASSWORD도 같은 이유로 선택입니다 —
-	// 둘 다 비어있으면 로컬 dev-kafka처럼 인증 없는 연결(kafkaclient.newDialer/
-	// newTransport가 nil을 돌려줌), 둘 다 채워져 있으면 SCRAM-SHA-512+TLS로
-	// MSK에 인증합니다(2026-08-10 추가 — AWS_MSK_IAM은 kafka-go에 내장 지원이
-	// 없어서 검증된 SCRAM을 택함, CLAUDE.md 참고).
-	kafkaSASLUsername := os.Getenv("KAFKA_SASL_USERNAME")
-	kafkaSASLPassword := os.Getenv("KAFKA_SASL_PASSWORD")
+	// REDIS_TLS_ENABLED도 같은 이유로 선택(기본 false)입니다 — 2026-08-11 추가.
+	// team1_truss ElastiCache는 transit_encryption_enabled=true인데 auth_token은
+	// 안 둡니다(infra/elasticache.tf) — "TLS는 필수, 비밀번호는 없음"이라는
+	// REDIS_PASSWORD 하나로는 표현 못 하는 조합이라 별도 플래그로 뽑았습니다.
+	redisTLSEnabled := os.Getenv("REDIS_TLS_ENABLED") == "true"
+
+	// KAFKA_USE_IAM_AUTH도 같은 이유로 선택(기본 false)입니다 — 2026-08-11
+	// SCRAM에서 IAM으로 교체(CLAUDE.md 참고: MSK Serverless는 SASL/SCRAM을
+	// 지원하지 않고 IAM 인증만 지원한다는 걸 AWS 공식 문서로 확인함). false면
+	// 로컬 dev-kafka처럼 인증 없는 연결(kafkaclient.newDialer/newTransport가
+	// nil을 돌려줌), true면 AWS_MSK_IAM(+TLS)으로 MSK에 인증합니다 — 자격증명은
+	// AWS SDK v2 기본 체인(EC2 인스턴스 프로파일/EKS IRSA)을 그대로 씁니다.
+	kafkaUseIAMAuth := os.Getenv("KAFKA_USE_IAM_AUTH") == "true"
 
 	return Config{
-		Port:              port,
-		KafkaBroker:       broker,
-		OrdersTopic:       topic,
-		ExecutionsTopic:   execTopic,
-		KafkaSASLUsername: kafkaSASLUsername,
-		KafkaSASLPassword: kafkaSASLPassword,
-		RedisAddr:         redisAddr,
-		RedisPassword:     redisPassword,
+		Port:            port,
+		KafkaBroker:     broker,
+		OrdersTopic:     topic,
+		ExecutionsTopic: execTopic,
+		KafkaUseIAMAuth: kafkaUseIAMAuth,
+		RedisAddr:       redisAddr,
+		RedisPassword:   redisPassword,
+		RedisTLSEnabled: redisTLSEnabled,
 	}
 }

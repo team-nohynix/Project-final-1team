@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -145,20 +146,24 @@ func main() {
 	ctx := context.Background()
 
 	store := snapshotstore.NewRedisStore(cfg.RedisAddr)
-	producer, err := kafkaclient.NewExecutionProducer(cfg.KafkaBroker, cfg.ExecutionsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	producer, err := kafkaclient.NewExecutionProducer(ctx, cfg.KafkaBroker, cfg.ExecutionsTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("체결 프로듀서 생성 실패: %v", err)
 	}
 	defer producer.Close()
-	assignments, err := kafkaclient.NewAssignmentProducer(cfg.KafkaBroker, cfg.AssignmentsTopic, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	assignments, err := kafkaclient.NewAssignmentProducer(ctx, cfg.KafkaBroker, cfg.AssignmentsTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("배정 이벤트 프로듀서 생성 실패: %v", err)
 	}
 	defer assignments.Close()
 	instanceID := newInstanceID()
 
-	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
-	tracker, err := rebalance.NewLoadTracker(redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
+	if cfg.RedisTLSEnabled {
+		redisOpts.TLSConfig = &tls.Config{}
+	}
+	redisClient := redis.NewClient(redisOpts)
+	tracker, err := rebalance.NewLoadTracker(ctx, redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("부하 추적기 생성 실패: %v", err)
 	}
@@ -166,7 +171,7 @@ func main() {
 
 	registry := newMarketRegistry(producer, store, assignments, instanceID)
 
-	consumer, err := kafkaclient.NewGroupConsumer(cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry, cfg.KafkaSASLUsername, cfg.KafkaSASLPassword)
+	consumer, err := kafkaclient.NewGroupConsumer(ctx, cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("컨슈머 그룹 생성 실패: %v", err)
 	}
