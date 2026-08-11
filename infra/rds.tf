@@ -19,14 +19,13 @@ resource "aws_db_subnet_group" "team1_rds" {
 resource "aws_rds_cluster" "team1_truss" {
   cluster_identifier = "team1-truss-db"
 
-  engine         = "postgres"
-  engine_version = "17.10"
+  engine         = "mysql"
+  engine_version = "8.4.10"
 
   db_cluster_instance_class = "db.m6gd.large"
   storage_type              = "gp3"
   allocated_storage         = 100
-  # gp3 Postgres는 allocated_storage 400GB 미만이면 생성 시점에 IOPS를 지정할 수 없다.
-  # 이 값은 AWS가 자동 할당한 실제 값(aws rds describe-db-clusters로 확인)이다.
+  # AWS가 자동 할당한 실제 값(aws rds describe-db-clusters로 확인).
   iops              = 3000
   storage_encrypted = true
 
@@ -38,7 +37,9 @@ resource "aws_rds_cluster" "team1_truss" {
   master_username             = "team1admin"
   manage_master_user_password = true
 
-  backup_retention_period = 7
+  # Multi-AZ DB 클러스터는 백업을 완전히 끌 수 없다 — 0을 넣어도 AWS가 최솟값 1로 강제한다
+  # (실제 apply로 확인됨). 그 실제 값을 명시해 드리프트를 없앤다.
+  backup_retention_period = 1
   deletion_protection     = false
   skip_final_snapshot     = true
 
