@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"recorder/idgen"
 )
@@ -26,6 +29,67 @@ func parseTimestamp(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("시각 파싱 실패 (%q): %w", s, err)
 	}
 	return t, nil
+}
+
+// maxDBRetries/baseDBRetryWait/maxDBRetryWait는 데드락/락 대기 타임아웃
+// 재시도 파라미터입니다(2026-08-11 부하 테스트 중 발견 — 아래 설명 참고).
+// 이 프로젝트 다른 재시도 파라미터(trader/order/retry.go)들과 같은 이유로
+// 실측 없이 잡은 잠정값입니다.
+const (
+	maxDBRetries    = 5
+	baseDBRetryWait = 50 * time.Millisecond
+	maxDBRetryWait  = 1 * time.Second
+)
+
+// isRetryableMySQLError는 데드락(1213)/락 대기 타임아웃(1205)인지 판단합니다.
+// 둘 다 InnoDB에서 동시 쓰기 트랜잭션이 같은 행을 다른 순서로 잠글 때 정상적으로
+// 발생할 수 있는 일시적 상황이지 버그가 아닙니다 — 트랜잭션을 처음부터 다시
+// 실행하면 대개 성공합니다(MySQL 자체가 에러 메시지에도 "try restarting
+// transaction"이라고 안내). 2026-08-11 실측 부하 테스트에서 실제로 발견:
+// orders 리더(신규 주문 INSERT)와 executions 리더(체결 반영 UPDATE)가 같은
+// order_id를 거의 동시에 서로 다른 순서로 건드리면서 진짜 데드락이 났고,
+// 기존엔 이걸 그냥 치명적 에러로 취급해 프로세스를 통째로 재시작했는데(오프셋
+// 미커밋 상태라 재시작하면 같은 배치를 다시 시도하는 방식) 지속적인 동시
+// 부하 아래서는 재시작해도 같은 충돌 패턴이 또 나서 사실상 멈춰버렸습니다.
+// 프로세스 재시작 대신 이 함수 안에서 바로 재시도하면 훨씬 빠르고 덜
+// 파괴적입니다.
+func isRetryableMySQLError(err error) bool {
+	var myErr *mysql.MySQLError
+	if !errors.As(err, &myErr) {
+		return false
+	}
+	return myErr.Number == 1213 || myErr.Number == 1205
+}
+
+// withRetryOnDeadlock은 fn(보통 BeginTx...Commit 전체, 또는 단일 쓰기 문 하나)을
+// 실행하고 데드락/락 대기 타임아웃이면 지수 백오프+지터로 재시도합니다. fn은
+// 매번 처음부터 다시 실행 가능해야 합니다 — 실패한 트랜잭션은 재개할 수 없으므로
+// 호출부는 항상 fn 안에서 새 트랜잭션을 시작합니다. 지터를 더하는 이유는
+// trader/order/retry.go의 RetryingSubmitter와 같습니다 — 데드락은 보통 두
+// 트랜잭션이 거의 동시에 충돌해서 나므로, 지터 없이 똑같은 간격으로 재시도하면
+// 또 동시에 부딪힐 수 있습니다.
+func withRetryOnDeadlock(fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt <= maxDBRetries; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isRetryableMySQLError(err) {
+			return err
+		}
+		lastErr = err
+		if attempt == maxDBRetries {
+			break
+		}
+		wait := baseDBRetryWait * time.Duration(1<<uint(attempt))
+		if wait > maxDBRetryWait {
+			wait = maxDBRetryWait
+		}
+		wait += time.Duration(rand.Int63n(int64(wait)/5 + 1))
+		time.Sleep(wait)
+	}
+	return lastErr
 }
 
 // MySQLStore는 Store를 실제 MySQL(RDS)로 구현합니다. 이 파일은 손으로
@@ -69,10 +133,12 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) e
 		args = append(args, o.OrderID, nullIfEmpty(o.ClientRequestID), o.Market, o.Side, o.Price, o.Quantity, o.Quantity, o.Mode, submittedAt, nullIfEmpty(o.SourceOrderID))
 	}
 
-	if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
-		return fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(orders), err)
-	}
-	return nil
+	return withRetryOnDeadlock(func() error {
+		if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
+			return fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(orders), err)
+		}
+		return nil
+	})
 }
 
 // CancelOrdersBatch는 취소 여러 건을 한 트랜잭션(=한 번의 커밋) 안에서
@@ -95,30 +161,32 @@ func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInpu
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("취소 일괄 반영 실패: %w", err)
-	}
-	defer tx.Rollback()
-
-	for _, c := range cancels {
-		parsed, err := parseTimestamp(c.CanceledAt)
+	return withRetryOnDeadlock(func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
+			return fmt.Errorf("취소 일괄 반영 실패: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE trade_order
-			SET status = 'CANCELED', canceled_at = ?
-			WHERE order_id = ? AND status NOT IN ('CANCELED', 'FILLED')
-		`, parsed, c.OrderID); err != nil {
-			return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
-		}
-	}
+		defer tx.Rollback()
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("취소 일괄 반영 실패 (커밋): %w", err)
-	}
-	return nil
+		for _, c := range cancels {
+			parsed, err := parseTimestamp(c.CanceledAt)
+			if err != nil {
+				return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE trade_order
+				SET status = 'CANCELED', canceled_at = ?
+				WHERE order_id = ? AND status NOT IN ('CANCELED', 'FILLED')
+			`, parsed, c.OrderID); err != nil {
+				return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("취소 일괄 반영 실패 (커밋): %w", err)
+		}
+		return nil
+	})
 }
 
 // ApplyExecutionsBatch는 체결 여러 건을 한 트랜잭션(=한 번의 커밋) 안에서:
@@ -134,49 +202,55 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 		return nil, nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	var results []ExecutionResult
+	err := withRetryOnDeadlock(func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("체결 일괄 반영 실패: %w", err)
+		}
+		defer tx.Rollback()
+
+		results = make([]ExecutionResult, len(execs))
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO execution (execution_id, market_code, buy_order_id, sell_order_id, price, quantity, mode, executed_at) VALUES `)
+		args := make([]any, 0, len(execs)*7)
+
+		for i, in := range execs {
+			buyMode, buyFound, err := updateFill(ctx, tx, in.BuyOrderID, in.Quantity)
+			if err != nil {
+				return err
+			}
+			sellMode, sellFound, err := updateFill(ctx, tx, in.SellOrderID, in.Quantity)
+			if err != nil {
+				return err
+			}
+
+			mode, mismatched := ResolveMode(buyMode, buyFound, sellMode, sellFound)
+			execID := idgen.NewExecutionID()
+
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())")
+			args = append(args, execID, in.Market, in.BuyOrderID, in.SellOrderID, in.Price, in.Quantity, nullIfEmpty(mode))
+
+			results[i] = ExecutionResult{
+				ExecutionID: execID, Mode: mode,
+				BuyFound: buyFound, SellFound: sellFound, ModeMismatched: mismatched,
+			}
+		}
+
+		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+			return fmt.Errorf("체결 일괄 저장 실패 (%d건): %w", len(execs), err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("체결 일괄 반영 실패 (커밋): %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("체결 일괄 반영 실패: %w", err)
+		return nil, err
 	}
-	defer tx.Rollback()
-
-	results := make([]ExecutionResult, len(execs))
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO execution (execution_id, market_code, buy_order_id, sell_order_id, price, quantity, mode, executed_at) VALUES `)
-	args := make([]any, 0, len(execs)*7)
-
-	for i, in := range execs {
-		buyMode, buyFound, err := updateFill(ctx, tx, in.BuyOrderID, in.Quantity)
-		if err != nil {
-			return nil, err
-		}
-		sellMode, sellFound, err := updateFill(ctx, tx, in.SellOrderID, in.Quantity)
-		if err != nil {
-			return nil, err
-		}
-
-		mode, mismatched := ResolveMode(buyMode, buyFound, sellMode, sellFound)
-		execID := idgen.NewExecutionID()
-
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		sb.WriteString("(?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())")
-		args = append(args, execID, in.Market, in.BuyOrderID, in.SellOrderID, in.Price, in.Quantity, nullIfEmpty(mode))
-
-		results[i] = ExecutionResult{
-			ExecutionID: execID, Mode: mode,
-			BuyFound: buyFound, SellFound: sellFound, ModeMismatched: mismatched,
-		}
-	}
-
-	if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
-		return nil, fmt.Errorf("체결 일괄 저장 실패 (%d건): %w", len(execs), err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("체결 일괄 반영 실패 (커밋): %w", err)
-	}
-
 	return results, nil
 }
 

@@ -31,11 +31,23 @@ const (
 	assignmentsGroupID = "recorder-assignments"
 
 	// RDS 백프레셔 워터마크(2026-08-07, CLAUDE.md의 "RDS admission control via
-	// recorder consumer lag" 참고) — 이 프로젝트 다른 곳의 봇 파라미터들처럼
-	// 실측 없이 잡은 잠정값이라, 실제 부하테스트로 재조정할 걸 전제로 합니다.
-	// High/Low를 다르게 둔 이유는 backpressure.Watcher의 히스테리시스 설명 참고.
-	backpressureHighWatermark = 5000
-	backpressureLowWatermark  = 1000
+	// recorder consumer lag" 참고). High/Low를 다르게 둔 이유는
+	// backpressure.Watcher의 히스테리시스 설명 참고.
+	//
+	// 2026-08-11 실측 후 하향 조정(5000/1000 → 2000/400): 실제 부하테스트 중
+	// orders/executions 두 리더가 같은 trade_order 행을 동시에 건드리면서 진짜
+	// MySQL 데드락이 나는 걸 발견했습니다(재시도 로직은 추가해서 죽지는 않게
+	// 고쳤음, store/mysql.go의 withRetryOnDeadlock 참고) — 그런데 데드락이
+	// 아니더라도 두 리더 간 락 경합 자체가 남아있어서, 한번 크게 밀리면
+	// (특히 executions 쪽) 회복이 예상보다 훨씬 느릴 수 있다는 걸 확인했습니다.
+	// 이 경합의 정확한 한계치까지는 아직 못 쟀지만(실측이 극단적인 인위적
+	// 백로그 상황이라 일반화하기 어려움), "더 못 재서 낮췄다"보다는 "밀리기
+	// 시작하는 시점을 앞당겨서 큰 동시 백로그가 애초에 잘 안 쌓이게" 하는
+	// 쪽이 안전하다고 판단해 보수적으로 낮췄습니다. 여전히 잠정값이고, 정확한
+	// 한계치는 락 경합 자체를 더 깊이 고치거나(팀 결정: 이번엔 보류) 더 정교한
+	// 정상 부하 재현 테스트로 재조정할 여지가 있습니다.
+	backpressureHighWatermark = 2000
+	backpressureLowWatermark  = 400
 	backpressureCheckInterval = 5 * time.Second
 	backpressureRedisKey      = "backpressure:recorder_lag"
 )

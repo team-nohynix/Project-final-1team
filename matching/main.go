@@ -32,9 +32,18 @@ const (
 
 	// matching 자체 컨슈머 랙 기반 백프레셔(NFR-13, 원래 matching 쪽으로 스코프된
 	// 버전 — recorder 랙 버전과는 별개, matching/backpressure 패키지 설명 참고).
-	// recorder와 마찬가지로 실측 없이 잡은 잠정값입니다. Redis 키는 recorder의
-	// backpressureRedisKey("backpressure:recorder_lag")와 겹치지 않도록 별도로
-	// 둡니다 — orderapi가 두 키를 각각 독립적으로 확인합니다.
+	// Redis 키는 recorder의 backpressureRedisKey("backpressure:recorder_lag")와
+	// 겹치지 않도록 별도로 둡니다 — orderapi가 두 키를 각각 독립적으로 확인합니다.
+	//
+	// 2026-08-11 FR-19 실측(real trader→replayengine 재생, 20개 마켓, 4번의
+	// 부하 시나리오 — 1/2/4/7 replayengine 인스턴스)에서 matching의 이 랙
+	// 플래그는 단 한 번도 켜지지 않았습니다 — 즉 이 값들은 실제로 겪어본
+	// 부하 범위 안에서는 문제없이 여유가 있다는 게 확인됐습니다(같은 테스트에서
+	// recorder는 데드락 버그가 드러났고 watermark를 낮췄음 — CLAUDE.md의
+	// "RDS admission control via recorder consumer lag" 참고). 그래서 여기는
+	// 낮추지 않고 그대로 둡니다 — 다만 이 테스트가 matching의 진짜 한계치를
+	// 찾아낸 건 아니라서(여유가 있다는 것만 확인됨, 얼마나 여유 있는지는
+	// 모름) 여전히 잠정값입니다.
 	backpressureHighWatermark = 5000
 	backpressureLowWatermark  = 1000
 	backpressureCheckInterval = 5 * time.Second
