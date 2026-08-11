@@ -1,0 +1,48 @@
+# 매칭 엔진 — 앱 팀원이 올린 matching-latest 이미지. 환경변수는 앱 팀원이 전달한
+# "AWS 리소스·권한·계정 정리" 문서(2026-08-11) 기준 — Kafka는 KAFKA_USE_IAM_AUTH=true
+# 하나로 IAM 인증을 켜고(KAFKA_SECURITY_PROTOCOL/SASL_MECHANISM은 앱이 안 읽음), Redis는
+# TLS만 필수(AUTH 토큰 없음)라 REDIS_TLS_ENABLED=true만 준다. replicas는 우선 1로 고정,
+# KEDA는 이게 뜨는 거 확인한 뒤에 붙인다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matching-engine
+  namespace: backend
+  labels:
+    app: matching-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: matching-engine
+  template:
+    metadata:
+      labels:
+        app: matching-engine
+    spec:
+      serviceAccountName: sa-matching-engine
+      tolerations:
+        - key: workload
+          value: backend
+          effect: NoSchedule
+      nodeSelector:
+        team1.io/workload: backend
+      containers:
+        - name: matching-engine
+          image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:matching-latest
+          env:
+            - name: KAFKA_BROKER
+              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "true"
+            - name: REDIS_ADDR
+              value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "true"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

@@ -1,0 +1,54 @@
+# 기록기 — recorder-latest. 환경변수는 앱 담당자가 전달한 "AWS 리소스·권한·계정 정리"
+# 문서(2026-08-11) 기준 — Kafka는 KAFKA_USE_IAM_AUTH=true 하나, Redis는 REDIS_TLS_ENABLED만
+# (AUTH 토큰 없음), DATABASE_URL은 go-sql-driver/mysql DSN(user:pass@tcp(host:port)/db).
+# 스키마는 자동 마이그레이션이 없어 recorder/schema.sql을 수동 적용해야 한다(아직 미적용).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recorder
+  namespace: backend
+  labels:
+    app: recorder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recorder
+  template:
+    metadata:
+      labels:
+        app: recorder
+    spec:
+      serviceAccountName: sa-recorder
+      tolerations:
+        - key: workload
+          value: backend
+          effect: NoSchedule
+      nodeSelector:
+        team1.io/workload: backend
+      containers:
+        - name: recorder
+          image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest
+          env:
+            - name: KAFKA_BROKER
+              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "true"
+            - name: REDIS_ADDR
+              value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: recorder-db-secret
+                  key: DATABASE_URL
+            - name: S3_TRADE_RESULTS_BUCKET
+              value: "team1-truss-trade-results"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

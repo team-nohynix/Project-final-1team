@@ -1,0 +1,62 @@
+# 접수 API(orderapi) — 앱 담당자가 전달한 deployment-env-vars.md 문서 2번 표 기준.
+# JOB_TRIGGER_QUEUE_URL을 채워야 POST /v1/jobs 라우트가 등록된다(비우면 main.go가 라우트
+# 자체를 안 만듦).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orderapi
+  namespace: backend
+  labels:
+    app: orderapi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orderapi
+  template:
+    metadata:
+      labels:
+        app: orderapi
+    spec:
+      serviceAccountName: sa-ingest-api
+      tolerations:
+        - key: workload
+          value: backend
+          effect: NoSchedule
+      nodeSelector:
+        team1.io/workload: backend
+      containers:
+        - name: orderapi
+          image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:orderapi-latest
+          ports:
+            - containerPort: 8081
+          env:
+            - name: KAFKA_BROKER
+              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "true"
+            - name: REDIS_ADDR
+              value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "true"
+            - name: JOB_TRIGGER_QUEUE_URL
+              value: "https://sqs.ap-northeast-2.amazonaws.com/727646470302/team1-sqs-job-trigger"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderapi
+  namespace: backend
+spec:
+  selector:
+    app: orderapi
+  ports:
+    - port: 8081
+      targetPort: 8081

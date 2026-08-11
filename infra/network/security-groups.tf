@@ -120,7 +120,7 @@ resource "aws_security_group" "team1_sg_msk" {
 }
 
 resource "aws_security_group" "team1_sg_rds" {
-  name        = "team1-sg-rds"
+  name = "team1-sg-rds"
   # description은 SG를 ForceNew(전체 교체)시키는 필드라 엔진명이 바뀌어도 여기선 안 건드린다
   # — RDS가 이 SG에 이미 붙어 있으면 ENI 분리 권한 문제로 교체 자체가 실패한다.
   description = "team1 RDS (PostgreSQL) - backend node group (recorder) only"
@@ -271,6 +271,18 @@ resource "aws_security_group" "team1_sg_vpc_endpoints" {
       aws_security_group.team1_sg_eks_cluster.id,
       aws_security_group.team1_sg_lambda_job_trigger.id,
     ]
+  }
+
+  ingress {
+    # Fargate 파드는 우리가 만든 team1_sg_eks_cluster가 아니라 EKS가 자동 생성하는
+    # 클러스터 SG(eks-cluster-sg-team1-eks-*)를 쓴다 — root 스택 리소스라 여기(network 스택)서
+    # SG ID로 참조하면 순환 의존이 생겨서, VPC 전체 CIDR로 대신 허용한다(실제 ECR 이미지 pull
+    # i/o timeout으로 발견).
+    description = "whole VPC CIDR (covers Fargate pods, which use the EKS auto-created cluster SG)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.team1_vpc.cidr_block]
   }
 
   egress {
