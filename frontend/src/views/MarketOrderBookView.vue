@@ -71,32 +71,7 @@ const selectMarket = (s) => {
   selected.value = s
 }
 
-// AI order flow state for right card
-const aiSide = ref('buy') // initial selection: buy
-const aiPrice = ref(currentPrice.value)
-const aiQty = ref(0.125)
-const statusMessage = ref('')
-
-watch(selected, () => {
-  // update default price when market changes
-  aiPrice.value = currentPrice.value
-})
-
-const aiValid = computed(() => {
-  return Number(aiPrice.value) > 0 && Number(aiQty.value) > 0
-})
-
-const toggleSide = (s) => {
-  aiSide.value = s
-}
-
-const createAIOrder = () => {
-  if (!aiValid.value) return
-  statusMessage.value = '더미 AI 주문 생성 완료'
-  setTimeout(() => {
-    statusMessage.value = ''
-  }, 3000)
-}
+// Right panel is display-only for recent trades in demo mode
 
 // Helpers for formatted displays and parsing
 const formatShort = (n) => {
@@ -111,11 +86,7 @@ const formatNumber = (n) => {
   return Number(n).toLocaleString()
 }
 
-const onPriceInput = (val) => {
-  // accept numbers with commas
-  const parsed = Number(String(val).replace(/,/g, ''))
-  if (!isNaN(parsed)) aiPrice.value = parsed
-}
+
 </script>
 
 <template>
@@ -137,7 +108,7 @@ const onPriceInput = (val) => {
       <div class="summary-right">
         <span class="live-dot-small"></span>
         <div class="live-badge">LIVE</div>
-        <div class="demo-badge">데모 데이터</div>
+          <div class="demo-badge">데모 데이터</div>
       </div>
     </div>
 
@@ -168,47 +139,28 @@ const onPriceInput = (val) => {
 
       <main class="col col-orderbook">
         <div class="orderbook-card">
-          <div class="left-title">호가창</div>
           <div class="ob-header-row">
-            <span class="th price">가격</span><span class="th qty">수량</span
-            ><span class="th cum">누적</span>
+            <div class="left-title">호가</div>
+            <div class="m-price">{{ currentPrice.toLocaleString() }} KRW</div>
           </div>
 
-          <div class="asks">
-            <div v-for="(a, i) in selectedBook.asks.slice(0, 4)" :key="'a' + i" class="ob-row ask">
-              <div class="price">{{ a.price.toLocaleString() }}</div>
+          <div class="ob-asks">
+            <div v-for="(a, i) in selectedBook.asks" :key="'ask'+i" class="ob-row ask">
+              <div class="price">{{ formatNumber(a.price) }} KRW</div>
               <div class="qty">{{ a.qty }}</div>
-              <div class="cum">
-                {{
-                  a.cum !== undefined
-                    ? a.cum.toFixed(4)
-                    : selectedBook.asks
-                        .slice(0, i + 1)
-                        .reduce((s, x) => s + x.qty, 0)
-                        .toFixed(4)
-                }}
-              </div>
+              <div class="cum">{{ a.cum ? a.cum.toFixed(4) : '' }}</div>
             </div>
           </div>
 
           <div class="spread-full">
-            <div class="spread-pill">₩10,000 · 0.01%</div>
+            <div class="spread-pill">스프레드: {{ selectedBook.asks[0] && selectedBook.bids[0] ? (selectedBook.asks[0].price - selectedBook.bids[0].price) : '-' }} KRW</div>
           </div>
 
-          <div class="bids">
-            <div v-for="(b, i) in selectedBook.bids.slice(0, 4)" :key="'b' + i" class="ob-row bid">
-              <div class="price">{{ b.price.toLocaleString() }}</div>
+          <div class="ob-bids">
+            <div v-for="(b, i) in selectedBook.bids" :key="'bid'+i" class="ob-row bid">
+              <div class="price">{{ formatNumber(b.price) }} KRW</div>
               <div class="qty">{{ b.qty }}</div>
-              <div class="cum">
-                {{
-                  b.cum !== undefined
-                    ? b.cum.toFixed(4)
-                    : selectedBook.bids
-                        .slice(0, i + 1)
-                        .reduce((s, x) => s + x.qty, 0)
-                        .toFixed(4)
-                }}
-              </div>
+              <div class="cum">{{ b.cum ? b.cum.toFixed(4) : '' }}</div>
             </div>
           </div>
         </div>
@@ -296,20 +248,10 @@ const onPriceInput = (val) => {
   margin-bottom: 12px;
 }
 
-.live-dot-small {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  background: #ff4d4f;
-  border-radius: 50%;
-  margin-right: 8px;
-}
-.live-badge {
-  display: inline-block;
-  color: #ffb3b3;
-  font-weight: 700;
-  margin-right: 10px;
-}
+
+/* replaced LIVE indicator with demo badge only */
+.live-dot-small { display: none; }
+.live-badge { display: none; }
 
 .summary-bar {
   display: flex;
@@ -558,66 +500,13 @@ const onPriceInput = (val) => {
   flex-direction: column;
   gap: 8px;
 }
-.ai-buttons {
-  display: flex;
-  gap: 8px;
-}
-.side-btn {
-  flex: 1;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: #0b2530;
-  color: #cfe6ef;
-  border: 0;
-  cursor: pointer;
-}
-.buy-active {
-  background: #bff5d9;
-  color: #0b2b20;
-  font-weight: 700;
-}
-.sell-active {
-  background: #ff6b6b;
-  color: #ffffff;
-  font-weight: 700;
-}
-.ai-input {
-  padding: 10px;
-  border-radius: 8px;
-  background: #062028;
-  border: 1px solid #12323a;
-  color: #f3f7fc;
-}
-.input-label {
-  color: #9fb0c1;
-  font-size: 12px;
-}
-.ai-create {
-  width: 100%;
-  padding: 12px;
-  border-radius: 10px;
-  background: #2f8bff;
-  color: white;
-  border: 0;
-  cursor: pointer;
-  font-weight: 700;
-}
-.ai-create:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.ai-create:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-.ai-note {
-  font-size: 12px;
-  color: #9fb0c1;
-  margin-top: 6px;
-}
-.status-msg {
+.trades-note {
   margin-top: 8px;
-  color: #bfe8db;
-  font-weight: 700;
+  padding: 8px;
+  background: #071a24;
+  color: #9fb0c1;
+  border-radius: 8px;
+  border: 1px solid #16323b;
 }
 
 @media (max-width: 1100px) {
