@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-11 (5차) | `recorder/schema.sql` 최초 적용 방법을 별도 문서([`recorder-schema-bootstrap.md`](recorder-schema-bootstrap.md))로 분리 — 처음엔 K8s Job/ConfigMap으로 만들었다가, 1회성 작업에 과한 구조라 삭제하고 ad hoc `kubectl run` 명령 두 줄로 대체 |
 | 2026-08-11 (4차) | `orderapi`에 `POST /v1/jobs`(trader/replayengine 실행 요청을 SQS로 발행) 신설, `JOB_TRIGGER_QUEUE_URL`(선택) 환경변수 추가 — 2번 표 참고. `infra/lambda/job-trigger/index.py`의 실제 로직(K8s Job 생성) 구현, `infra/k8s/{ai-trader,replay}/configmap.yaml` 신설(CLAUDE.md "Trader/simulator launch via K8s Job" 참고) |
 | 2026-08-11 (3차) | 실제 AWS 상태를 `terraform state list`/`aws` CLI로 다시 확인(읽기 전용, 변경 없음) — 이 문서가 "아직 없음"이라고 적어둔 것 상당수가 이미 실제로 존재했다: RDS는 이미 MySQL 8.4로 적용 완료, `team1-truss-order-records`/`team1-truss-trade-results` 버킷 둘 다 생성+Terraform state 반영 완료, MSK/ElastiCache/EKS/IRSA 전부 적용 완료. 아래 표들의 "아직 미생성"/"드리프트" 표기를 실제 상태에 맞게 정정. 6개 모듈 전부 Dockerfile 작성 완료 + `team1-truss` ECR에 `{모듈}-latest` 태그로 푸시 완료 — 새 "컨테이너 이미지" 섹션 추가. `recorder`가 필요로 하는 `secretsmanager:GetSecretValue` IAM 권한이 이미 붙어 있는데(RDS가 `manage_master_user_password=true`, 즉 AWS가 관리하는 Secrets Manager 시크릿) `recorder` 코드는 아직 이 시크릿을 직접 읽어오는 로직이 없다는 것도 새로 발견 — "미해결" 섹션에 기록 |
 | 2026-08-11 | `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD` 삭제, `KAFKA_USE_IAM_AUTH`로 교체(SCRAM→AWS_MSK_IAM 전환 — `infra/msk.tf`가 MSK **Serverless**를 쓰는데, MSK Serverless는 IAM 인증만 지원하고 SASL/SCRAM 자체를 지원하지 않는다는 걸 AWS 공식 문서로 확인함). `REDIS_TLS_ENABLED` 신설(`infra/elasticache.tf`가 `transit_encryption_enabled=true`+AUTH 토큰 없음 조합을 쓰는데, 기존 `REDIS_PASSWORD` 하나로는 이 조합을 표현할 수 없었음) |
@@ -137,7 +138,7 @@ CLI 플래그:
 
 CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
 
-**`schema.sql`은 저장소를 따로 클론하지 않아도 이미지 안에서 바로 꺼낼 수 있음** (2026-08-11 추가 — 처음엔 최종 런타임 스테이지에 복사가 안 돼 있어서 이미지만 갖고 배포하는 쪽에서 파일을 못 찾는 문제가 있었음, 수정 후 재푸시됨): `docker run --rm --entrypoint cat 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest /app/schema.sql > schema.sql` 또는 `docker cp`로 꺼내면 됨.
+**`schema.sql` 최초 적용 방법은 [`recorder-schema-bootstrap.md`](recorder-schema-bootstrap.md) 참고** (2026-08-11) — `kubectl run --rm -i` 한 번씩, 두 줄로 DB 생성 + 스키마 적용을 끝낸다(영구 K8s Job/ConfigMap은 한 번만 하는 작업에 안 맞아서 만들었다가 다시 지움). 이미지에서 `schema.sql`만 꺼내는 방법(`docker run --rm --entrypoint cat 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest /app/schema.sql > schema.sql`)도 여전히 가능함.
 
 **미해결: `DATABASE_URL`의 비밀번호를 어떻게 채울지 아직 코드로 안 풀림.** `infra/irsa.tf`의 `sa-recorder` 역할에 `secretsmanager:GetSecretValue`가 RDS의 마스터 유저 시크릿 ARN으로 스코프되어 이미 붙어 있다 — RDS가 `manage_master_user_password=true`(AWS가 Secrets Manager로 비밀번호를 자동 관리)로 만들어졌기 때문이다. 그런데 `recorder/config.go`는 지금 `DATABASE_URL`을 완성된 DSN 문자열 그대로 `os.Getenv`로만 읽고, Secrets Manager를 호출하는 코드가 전혀 없다. IAM 권한이 이미 이렇게 좁게 스코프되어 있다는 건 "recorder가 직접 Secrets Manager를 호출해서 비밀번호를 가져와야 한다"는 설계를 전제한 것으로 보이는데, 그 부분이 아직 구현되지 않았다. 배포 전에 다음 중 하나를 정해야 한다: (a) `recorder`에 AWS SDK v2로 `secretsmanager:GetSecretValue`를 호출해 DSN을 완성하는 로직을 추가(예: `DB_SECRET_ARN` 환경변수 + 나머지 host/port/dbname은 별도 값), 또는 (b) 배포 파이프라인이 미리 시크릿 값을 읽어 `DATABASE_URL`을 완성된 문자열로 주입(이 경우 recorder의 IAM 권한 중 `secretsmanager:GetSecretValue`는 불필요해짐). 코드 담당 쪽 결정이 필요해서 여기 표에는 반영하지 않고 이렇게 별도로 남겨둔다.
 
