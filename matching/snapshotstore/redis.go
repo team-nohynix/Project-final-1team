@@ -38,9 +38,17 @@ type RedisStore struct {
 	queue  chan engine.Snapshot
 }
 
-func NewRedisStore(addr string) *RedisStore {
+// NewRedisStore는 이미 만들어진 *redis.Client를 그대로 씁니다 — 여기서 새
+// redis.NewClient(&redis.Options{Addr: addr})로 직접 만들지 않습니다. 예전에는
+// addr 문자열만 받아 내부에서 새로 만들었는데, 그러면 main.go가 REDIS_PASSWORD/
+// REDIS_TLS_ENABLED로 만든 인증·TLS 설정을 이 클라이언트가 전혀 못 받아
+// ElastiCache(TLS 필수)에 평문으로 접속을 시도하다 실패했습니다(실제로 배포
+// 중 발견된 버그) — orderapi/session.NewRedisStore(client *redis.Client, ...)가
+// 이미 쓰는 것과 같은 패턴으로 맞췄습니다. main.go가 딱 하나 만든 클라이언트를
+// 이 스토어와 backpressure.Watcher/rebalance.LoadTracker가 전부 공유합니다.
+func NewRedisStore(client *redis.Client) *RedisStore {
 	s := &RedisStore{
-		client: redis.NewClient(&redis.Options{Addr: addr}),
+		client: client,
 		queue:  make(chan engine.Snapshot, 64),
 	}
 	go s.worker()

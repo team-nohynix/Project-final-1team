@@ -145,7 +145,17 @@ func main() {
 	cfg := LoadConfig()
 	ctx := context.Background()
 
-	store := snapshotstore.NewRedisStore(cfg.RedisAddr)
+	// matching 안의 모든 Redis 사용(스냅샷 저장, 부하 추적, 백프레셔 플래그)이
+	// 이 클라이언트 하나를 공유합니다 — REDIS_PASSWORD/REDIS_TLS_ENABLED
+	// 설정을 반영하는 곳이 여기 한 군데뿐이어야, snapshotstore가 별도로
+	// 인증 없는 클라이언트를 몰래 만드는 것과 같은 버그를 구조적으로 막습니다.
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
+	if cfg.RedisTLSEnabled {
+		redisOpts.TLSConfig = &tls.Config{}
+	}
+	redisClient := redis.NewClient(redisOpts)
+
+	store := snapshotstore.NewRedisStore(redisClient)
 	producer, err := kafkaclient.NewExecutionProducer(ctx, cfg.KafkaBroker, cfg.ExecutionsTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("체결 프로듀서 생성 실패: %v", err)
@@ -158,11 +168,6 @@ func main() {
 	defer assignments.Close()
 	instanceID := newInstanceID()
 
-	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
-	if cfg.RedisTLSEnabled {
-		redisOpts.TLSConfig = &tls.Config{}
-	}
-	redisClient := redis.NewClient(redisOpts)
 	tracker, err := rebalance.NewLoadTracker(ctx, redisClient, cfg.KafkaBroker, cfg.OrdersTopic, TargetMarkets, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("부하 추적기 생성 실패: %v", err)

@@ -21,7 +21,7 @@ type LoadTracker struct {
 	redis   *redis.Client
 	broker  string
 	topic   string
-	markets []string // 인덱스 = 파티션 번호(orderapi/kafkaclient의 marketPartitioner와 동일한 순서)
+	markets []string      // 인덱스 = 파티션 번호(orderapi/kafkaclient의 marketPartitioner와 동일한 순서)
 	dialer  *kafka.Dialer // nil이면 인증 없음(로컬), 아니면 AWS_MSK_IAM+TLS(MSK) — kafkaclient/auth.go 참고
 }
 
