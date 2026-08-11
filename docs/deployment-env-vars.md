@@ -137,6 +137,8 @@ CLI 플래그:
 
 CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
 
+**`schema.sql`은 저장소를 따로 클론하지 않아도 이미지 안에서 바로 꺼낼 수 있음** (2026-08-11 추가 — 처음엔 최종 런타임 스테이지에 복사가 안 돼 있어서 이미지만 갖고 배포하는 쪽에서 파일을 못 찾는 문제가 있었음, 수정 후 재푸시됨): `docker run --rm --entrypoint cat 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest /app/schema.sql > schema.sql` 또는 `docker cp`로 꺼내면 됨.
+
 **미해결: `DATABASE_URL`의 비밀번호를 어떻게 채울지 아직 코드로 안 풀림.** `infra/irsa.tf`의 `sa-recorder` 역할에 `secretsmanager:GetSecretValue`가 RDS의 마스터 유저 시크릿 ARN으로 스코프되어 이미 붙어 있다 — RDS가 `manage_master_user_password=true`(AWS가 Secrets Manager로 비밀번호를 자동 관리)로 만들어졌기 때문이다. 그런데 `recorder/config.go`는 지금 `DATABASE_URL`을 완성된 DSN 문자열 그대로 `os.Getenv`로만 읽고, Secrets Manager를 호출하는 코드가 전혀 없다. IAM 권한이 이미 이렇게 좁게 스코프되어 있다는 건 "recorder가 직접 Secrets Manager를 호출해서 비밀번호를 가져와야 한다"는 설계를 전제한 것으로 보이는데, 그 부분이 아직 구현되지 않았다. 배포 전에 다음 중 하나를 정해야 한다: (a) `recorder`에 AWS SDK v2로 `secretsmanager:GetSecretValue`를 호출해 DSN을 완성하는 로직을 추가(예: `DB_SECRET_ARN` 환경변수 + 나머지 host/port/dbname은 별도 값), 또는 (b) 배포 파이프라인이 미리 시크릿 값을 읽어 `DATABASE_URL`을 완성된 문자열로 주입(이 경우 recorder의 IAM 권한 중 `secretsmanager:GetSecretValue`는 불필요해짐). 코드 담당 쪽 결정이 필요해서 여기 표에는 반영하지 않고 이렇게 별도로 남겨둔다.
 
 ---
