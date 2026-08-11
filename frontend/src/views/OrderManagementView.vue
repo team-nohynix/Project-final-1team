@@ -79,8 +79,32 @@ const onQuantityInput = (e) => {
   e.target.value = sanitized
 }
 
-// Recent orders for this browser session only (starts empty per requirements)
-const recentOrders = ref([])
+// Session storage key for recent orders (per-tab session scope)
+const STORAGE_KEY = 'order_mgmt_recent_orders'
+
+const loadRecentOrders = () => {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+  } catch (e) {
+    // malformed JSON or sessionStorage access denied — start with empty list
+    return []
+  }
+}
+
+const saveRecentOrders = () => {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(recentOrders.value))
+  } catch (e) {
+    // ignore storage errors (e.g., quota), keep in-memory list as source of truth
+  }
+}
+
+// Recent orders for this browser session only (restored from sessionStorage)
+const recentOrders = ref(loadRecentOrders())
 
 // UI state
 const isSubmitting = ref(false)
@@ -175,8 +199,16 @@ const submitTestOrder = async () => {
         infoMessage.value = '동일한 중복 방지 키로 기존 주문 응답이 반환되었습니다.'
       }
       // do not overwrite a canceled existing order
-      if (already.status === 'CANCELED') {
-        // keep canceled as-is
+      if (already.status !== 'CANCELED') {
+        // update existing entry with latest data
+        already.id = data.orderId
+        already.market = data.market
+        already.side = data.side
+        already.price = data.price
+        already.quantity = data.quantity
+        already.status = data.status
+        already.acceptedAt = data.acceptedAt
+        infoMessage.value = '주문이 접수되었습니다.'
       }
     } else {
       // add new order to session list
@@ -192,6 +224,8 @@ const submitTestOrder = async () => {
       })
       infoMessage.value = '주문이 접수되었습니다.'
     }
+    // persist to sessionStorage
+    saveRecentOrders()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     errorMessage.value = msg || '주문 접수 중 오류가 발생했습니다.'
@@ -229,6 +263,8 @@ const cancelOrder = async (id) => {
     o.canceledAt = data.canceledAt
     o.canceledQuantity = data.canceledQuantity
     infoMessage.value = '주문이 취소되었습니다.'
+    // persist updated status to sessionStorage
+    saveRecentOrders()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     errorMessage.value = msg || '주문 취소 중 오류가 발생했습니다.'
