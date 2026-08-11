@@ -1,0 +1,21 @@
+# job-trigger Lambda가 만드는 ai-trader Job이 envFrom으로 그대로 참조한다
+# (infra/lambda/job-trigger/index.py의 _build_ai_trader_job 참고). CLI 플래그
+# (-date/-speed/-order-bucket)는 Job 쪽에서 args로 넘기고, 여기는 trader가
+# 필요로 하는 연결 정보(URL/리전)만 담는다 — docs/deployment-env-vars.md
+# 4번 표와 1:1 대응.
+#
+# BACKEND_URL/ORDERAPI_URL: backend/orderapi의 K8s Service가 아직 안 만들어져
+# 실제 DNS 이름을 모른다 — Service가 생기면(예: backend 네임스페이스의
+# orderapi Service) 그 이름으로 바꿔야 한다. BEDROCK_MODEL_ID도 Bedrock
+# 콘솔에서 실제로 활성화한 모델 ID로 바꿔야 한다(CLAUDE.md 참고, 이 코드가
+# 추측해서 정할 값이 아님). 지금은 전부 자리표시자다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-trader-config
+  namespace: ai-trader
+data:
+  BACKEND_URL: "http://CHANGEME-backend-service-dns"
+  ORDERAPI_URL: "http://CHANGEME-orderapi-service-dns"
+  BEDROCK_REGION: "us-east-1"
+  BEDROCK_MODEL_ID: "CHANGEME-real-model-id"

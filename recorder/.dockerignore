@@ -1,0 +1,3 @@
+.env
+records/
+*_test.go

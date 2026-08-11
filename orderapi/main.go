@@ -11,6 +11,7 @@ import (
 
 	"orderapi/backpressure"
 	"orderapi/idempotency"
+	"orderapi/jobtrigger"
 	"orderapi/kafkaclient"
 	"orderapi/order"
 	"orderapi/session"
@@ -85,6 +86,19 @@ func main() {
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(sessionStore))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(sessionStore))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore))
+
+	// JOB_TRIGGER_QUEUE_URL이 없으면(로컬 개발 등) 이 라우트 자체를 등록하지
+	// 않습니다 — config.go 참고, orderapi의 핵심 기능과는 무관한 선택 기능입니다.
+	if cfg.JobTriggerQueueURL != "" {
+		jobPublisher, err := jobtrigger.NewSQSPublisher(ctx, cfg.JobTriggerQueueURL)
+		if err != nil {
+			log.Fatalf("작업 트리거 SQS 발행자 생성 실패: %v", err)
+		}
+		mux.HandleFunc("POST /v1/jobs", startJobHandler(jobPublisher))
+		log.Printf("작업 트리거 활성화 (queue=%s)", cfg.JobTriggerQueueURL)
+	} else {
+		log.Printf("JOB_TRIGGER_QUEUE_URL이 없어 POST /v1/jobs 비활성화")
+	}
 
 	addr := ":" + cfg.Port
 	log.Printf("주문 접수 API 서버 시작: %s (Kafka broker=%s, topic=%s, redis=%s)", addr, cfg.KafkaBroker, cfg.OrdersTopic, cfg.RedisAddr)

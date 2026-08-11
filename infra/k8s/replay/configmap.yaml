@@ -1,0 +1,14 @@
+# job-trigger Lambda가 만드는 replay Job이 envFrom으로 그대로 참조한다
+# (infra/lambda/job-trigger/index.py의 _build_replay_job 참고). replayengine은
+# Kafka/Redis를 직접 안 건드리고 접수 API만 호출하므로(CLAUDE.md 참고)
+# ORDERAPI_URL 하나면 된다 — docs/deployment-env-vars.md 5번 표와 1:1 대응.
+#
+# ORDERAPI_URL: orderapi의 K8s Service가 아직 안 만들어져 실제 DNS 이름을
+# 모른다 — ai-trader/configmap.yaml과 같은 이유로 자리표시자다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: replay-config
+  namespace: replay
+data:
+  ORDERAPI_URL: "http://CHANGEME-orderapi-service-dns"

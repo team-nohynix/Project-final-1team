@@ -9,14 +9,15 @@ import (
 
 // Config는 orderapi 실행에 필요한 환경변수를 담습니다.
 type Config struct {
-	Port            string
-	KafkaBroker     string
-	OrdersTopic     string
-	ExecutionsTopic string
-	KafkaUseIAMAuth bool
-	RedisAddr       string
-	RedisPassword   string
-	RedisTLSEnabled bool
+	Port               string
+	KafkaBroker        string
+	OrdersTopic        string
+	ExecutionsTopic    string
+	KafkaUseIAMAuth    bool
+	RedisAddr          string
+	RedisPassword      string
+	RedisTLSEnabled    bool
+	JobTriggerQueueURL string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -85,14 +86,23 @@ func LoadConfig() Config {
 	// AWS SDK v2 기본 체인(EC2 인스턴스 프로파일/EKS IRSA)을 그대로 씁니다.
 	kafkaUseIAMAuth := os.Getenv("KAFKA_USE_IAM_AUTH") == "true"
 
+	// JOB_TRIGGER_QUEUE_URL은 선택입니다 — 값이 있으면 POST /v1/jobs
+	// (trader/replayengine 실행 요청을 SQS로 발행, infra/job-trigger.tf의
+	// team1-sqs-job-trigger 참고)가 활성화되고, 없으면 main.go가 이 라우트
+	// 자체를 등록하지 않습니다. KAFKA_BROKER/REDIS_ADDR과 달리 orderapi의
+	// 핵심 기능(주문 접수/취소)은 이 값과 무관하게 동작하므로, 이 기능을 아직
+	// 안 쓰는 로컬 개발 환경에 억지로 값을 채우게 하지 않습니다.
+	jobTriggerQueueURL := os.Getenv("JOB_TRIGGER_QUEUE_URL")
+
 	return Config{
-		Port:            port,
-		KafkaBroker:     broker,
-		OrdersTopic:     topic,
-		ExecutionsTopic: execTopic,
-		KafkaUseIAMAuth: kafkaUseIAMAuth,
-		RedisAddr:       redisAddr,
-		RedisPassword:   redisPassword,
-		RedisTLSEnabled: redisTLSEnabled,
+		Port:               port,
+		KafkaBroker:        broker,
+		OrdersTopic:        topic,
+		ExecutionsTopic:    execTopic,
+		KafkaUseIAMAuth:    kafkaUseIAMAuth,
+		RedisAddr:          redisAddr,
+		RedisPassword:      redisPassword,
+		RedisTLSEnabled:    redisTLSEnabled,
+		JobTriggerQueueURL: jobTriggerQueueURL,
 	}
 }
