@@ -3,6 +3,8 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-11 (4차) | `orderapi`에 `POST /v1/jobs`(trader/replayengine 실행 요청을 SQS로 발행) 신설, `JOB_TRIGGER_QUEUE_URL`(선택) 환경변수 추가 — 2번 표 참고. `infra/lambda/job-trigger/index.py`의 실제 로직(K8s Job 생성) 구현, `infra/k8s/{ai-trader,replay}/configmap.yaml` 신설(CLAUDE.md "Trader/simulator launch via K8s Job" 참고) |
+| 2026-08-11 (3차) | 실제 AWS 상태를 `terraform state list`/`aws` CLI로 다시 확인(읽기 전용, 변경 없음) — 이 문서가 "아직 없음"이라고 적어둔 것 상당수가 이미 실제로 존재했다: RDS는 이미 MySQL 8.4로 적용 완료, `team1-truss-order-records`/`team1-truss-trade-results` 버킷 둘 다 생성+Terraform state 반영 완료, MSK/ElastiCache/EKS/IRSA 전부 적용 완료. 아래 표들의 "아직 미생성"/"드리프트" 표기를 실제 상태에 맞게 정정. 6개 모듈 전부 Dockerfile 작성 완료 + `team1-truss` ECR에 `{모듈}-latest` 태그로 푸시 완료 — 새 "컨테이너 이미지" 섹션 추가. `recorder`가 필요로 하는 `secretsmanager:GetSecretValue` IAM 권한이 이미 붙어 있는데(RDS가 `manage_master_user_password=true`, 즉 AWS가 관리하는 Secrets Manager 시크릿) `recorder` 코드는 아직 이 시크릿을 직접 읽어오는 로직이 없다는 것도 새로 발견 — "미해결" 섹션에 기록 |
 | 2026-08-11 | `KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD` 삭제, `KAFKA_USE_IAM_AUTH`로 교체(SCRAM→AWS_MSK_IAM 전환 — `infra/msk.tf`가 MSK **Serverless**를 쓰는데, MSK Serverless는 IAM 인증만 지원하고 SASL/SCRAM 자체를 지원하지 않는다는 걸 AWS 공식 문서로 확인함). `REDIS_TLS_ENABLED` 신설(`infra/elasticache.tf`가 `transit_encryption_enabled=true`+AUTH 토큰 없음 조합을 쓰는데, 기존 `REDIS_PASSWORD` 하나로는 이 조합을 표현할 수 없었음) |
 | 2026-08-10 (2차) | Kafka SASL/SCRAM(`KAFKA_SASL_USERNAME`/`KAFKA_SASL_PASSWORD`) + Redis AUTH(`REDIS_PASSWORD`) 환경변수 추가 — orderapi/matching/recorder 3개 모듈 전부. 기존 "코드에 인증 지원 없음" 참고 섹션은 삭제(이제 지원함). **2026-08-11에 Kafka 쪽은 다시 교체됨(위 항목 참고)** |
 | 2026-08-10 | 최초 작성 — AWS에서 6개 Go 모듈을 실제로 돌릴 때 필요한 환경변수/플래그 전체 정리 (AI 트레이더 Bedrock 연동 작업 직후) |
@@ -12,6 +14,21 @@
 - [인프라 배치 설계](infra-placement-design.md) — 이 값들이 실제로 어디(MSK/RDS/ElastiCache 등)를 가리켜야 하는지
 
 이 문서는 **각 모듈의 `config.go`/`main.go`를 직접 읽고 정리한 것**이라 CLAUDE.md의 서술형 설명보다 이 값들 자체를 빠르게 확인하고 싶을 때 쓰는 표 위주 참조 문서다. 로컬 개발용 `.env` 값(예: `localhost:9092`)이 아니라 **AWS에 배포할 때 채워야 하는 실제 값의 형태**를 기준으로 적었다.
+
+## 실제 인프라 현황 (2026-08-11 재확인, 전부 이미 적용됨)
+
+`terraform init -reconfigure`(백엔드만 다시 연결, 변경 없음) 후 `terraform state list`/`aws` CLI로 직접 확인한 값이다 — 아래 표들의 "AWS에서 채울 값"이 실제로 이 값이라고 봐도 된다.
+
+| 리소스 | 실제 값 |
+|---|---|
+| MSK 브로커(IAM) | `boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098` |
+| RDS 엔진 | MySQL 8.4.10 (`team1-truss-db`) — Postgres 아님, 이미 정정 완료 |
+| RDS 자격증명 | `manage_master_user_password=true` — Secrets Manager가 관리(아래 "미해결" 참고, `recorder` 코드가 아직 이걸 못 읽음) |
+| S3 `team1-truss-market-data` | 생성+Terraform 반영 완료 |
+| S3 `team1-truss-order-records` | 생성+Terraform 반영 완료(trader가 쓸 버킷 — 더 이상 미생성 아님) |
+| S3 `team1-truss-trade-results` | 생성+Terraform 반영 완료(예전엔 드리프트였음 — 이제 해소) |
+| ECR | `727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss`, 태그 `{모듈}-latest` — 6개 모듈 전부 푸시 완료(아래 "컨테이너 이미지" 참고) |
+| EKS | `team1-eks`, 네임스페이스 `backend`(orderapi/matching/recorder), `collector`, `ai-trader`, `replay` — 서비스 어카운트/IRSA 전부 연결 완료 |
 
 ---
 
@@ -39,6 +56,7 @@ CLI 플래그 없음 — `go run .`으로 HTTP 서버만 띄우고, `POST /v1/co
 | `KAFKA_USE_IAM_AUTH` | 선택 (2026-08-11 추가) | `false` | `true`면 AWS_MSK_IAM으로 MSK에 인증(자격증명은 SDK 기본 체인/EKS IRSA) — 6번 문서 "Kafka/Redis 인증" 참고. `false`면 인증 없이 붙음(로컬 그대로) |
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | ElastiCache AUTH 토큰. 비우면 인증 없이 붙음 |
 | `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | `true`면 Redis 연결에 TLS 사용 — ElastiCache가 `transit_encryption_enabled=true`면 반드시 켜야 함(AUTH 토큰 여부와 별개) |
+| `JOB_TRIGGER_QUEUE_URL` | 선택 (2026-08-11 추가) | 비움 | `POST /v1/jobs`가 발행할 SQS 큐 URL — `infra/outputs.tf`의 `job_trigger_queue_url`. 비우면 `main.go`가 이 라우트 자체를 등록하지 않음(로컬 개발에 강제 안 함) |
 
 CLI 플래그 없음. **주의**: `orders` 토픽은 자동 생성에 맡기면 안 되고 **정확히 20개 파티션**으로 미리 만들어둬야 함(마켓 1개=파티션 1개 전제, FR-11).
 
@@ -75,7 +93,7 @@ CLI 플래그(연결 정보가 아니라 실행 파라미터라 플래그로 유
 |---|---|---|---|
 | `-date` | **필수** | — | 재생할 날짜(YYYY-MM-DD) |
 | `-speed` | 선택 | `60` | 재생 배속 |
-| `-order-bucket` | 선택 | `""`(비우면 로컬 `./orders`) | 주문 기록(FR-17)을 저장할 S3 버킷 — `team1-truss-order-records`(아직 미생성, 5번 문서 참고) |
+| `-order-bucket` | 선택 | `""`(비우면 로컬 `./orders`) | 주문 기록(FR-17)을 저장할 S3 버킷 — `team1-truss-order-records`(생성 완료, `-order-bucket=team1-truss-order-records`로 채우면 됨) |
 
 AWS 자격증명은 SDK 기본 체인(인스턴스 프로파일/IRSA)을 그대로 씀 — 별도 액세스 키 환경변수 없음. `-order-bucket`을 채우거나 Bedrock을 실제로 호출하려면 이 실행 주체(EC2/Fargate/EKS Pod 등)에 해당 IAM 권한이 붙어 있어야 함(5번 문서 참고).
 
@@ -94,7 +112,7 @@ CLI 플래그:
 |---|---|---|---|
 | `-date` | **필수** | — | 재생할 기록의 날짜(trader가 그 날짜로 기록한 세션) |
 | `-speed` | 선택 | `60` | 재생 배속 |
-| `-order-bucket` | 선택 | `""`(비우면 로컬 `./orders`) | 주문 기록을 **읽어올** S3 버킷 — trader와 같은 버킷 |
+| `-order-bucket` | 선택 | `""`(비우면 로컬 `./orders`) | 주문 기록을 **읽어올** S3 버킷 — `team1-truss-order-records`(trader와 같은 버킷, 생성 완료) |
 | `-shard-index` | 선택 | `0` | 분산 실행 시 이 인스턴스가 담당할 샤드 번호 |
 | `-shard-count` | 선택 | `1` | 분산 실행 시 전체 인스턴스 수 |
 | `-run-id` | 선택 | `""` | 같은 리플레이 실행에 속한 여러 샤드가 공유할 식별자 — **여러 인스턴스로 분산 실행할 때는 전부 같은 값을 줘야 함**(안 그러면 세션 가드가 서로 충돌한 걸로 보고 409를 냄) |
@@ -107,19 +125,36 @@ CLI 플래그:
 | 이름 | 필수 여부 | 로컬 기본값 | AWS에서 채울 값 |
 |---|---|---|---|
 | `KAFKA_BROKER` | **필수** | — | orderapi/matching과 동일 브로커 |
-| `DATABASE_URL` | **필수** | — | `go-sql-driver/mysql` DSN 형식(**URL 아님**): `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — RDS MySQL 엔드포인트로 채움. `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐 |
+| `DATABASE_URL` | **필수** | — | `go-sql-driver/mysql` DSN 형식(**URL 아님**): `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — RDS MySQL 엔드포인트로 채움. `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐. **미해결 항목 있음 — 아래 참고** |
 | `REDIS_ADDR` | **필수** | — | orderapi/matching과 동일 Redis |
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠 |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
 | `ASSIGNMENTS_TOPIC` | 선택 | `assignments` | 그대로 둠 |
-| `ARCHIVE_BUCKET` | 선택 | `""`(비우면 로컬 `./records`) | `team1-truss-trade-results`(이미 AWS엔 있음, Terraform state엔 아직 없음 — 5번 문서 참고) |
+| `ARCHIVE_BUCKET` | 선택 | `""`(비우면 로컬 `./records`) | `team1-truss-trade-results`(생성+Terraform 반영 완료 — 예전엔 드리프트였으나 해소됨) |
 | `KAFKA_USE_IAM_AUTH` | 선택 (2026-08-11 추가) | `false` | orderapi/matching과 동일 값 — 아래 참고 |
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi/matching과 동일 값 |
 | `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | orderapi/matching과 동일 값 |
 
 CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
 
+**미해결: `DATABASE_URL`의 비밀번호를 어떻게 채울지 아직 코드로 안 풀림.** `infra/irsa.tf`의 `sa-recorder` 역할에 `secretsmanager:GetSecretValue`가 RDS의 마스터 유저 시크릿 ARN으로 스코프되어 이미 붙어 있다 — RDS가 `manage_master_user_password=true`(AWS가 Secrets Manager로 비밀번호를 자동 관리)로 만들어졌기 때문이다. 그런데 `recorder/config.go`는 지금 `DATABASE_URL`을 완성된 DSN 문자열 그대로 `os.Getenv`로만 읽고, Secrets Manager를 호출하는 코드가 전혀 없다. IAM 권한이 이미 이렇게 좁게 스코프되어 있다는 건 "recorder가 직접 Secrets Manager를 호출해서 비밀번호를 가져와야 한다"는 설계를 전제한 것으로 보이는데, 그 부분이 아직 구현되지 않았다. 배포 전에 다음 중 하나를 정해야 한다: (a) `recorder`에 AWS SDK v2로 `secretsmanager:GetSecretValue`를 호출해 DSN을 완성하는 로직을 추가(예: `DB_SECRET_ARN` 환경변수 + 나머지 host/port/dbname은 별도 값), 또는 (b) 배포 파이프라인이 미리 시크릿 값을 읽어 `DATABASE_URL`을 완성된 문자열로 주입(이 경우 recorder의 IAM 권한 중 `secretsmanager:GetSecretValue`는 불필요해짐). 코드 담당 쪽 결정이 필요해서 여기 표에는 반영하지 않고 이렇게 별도로 남겨둔다.
+
 ---
+
+## 컨테이너 이미지 (2026-08-11 추가)
+
+6개 모듈 전부 자체 `Dockerfile`(멀티스테이지: `golang:1.26-alpine` 빌드 → `alpine:3.20` 런타임)이 생겼고, `team1-truss` ECR 리포지토리(`infra/ecr.tf`)에 컴포넌트당 태그 하나로 푸시되어 있다.
+
+| 모듈 | 이미지 | 컨테이너 실행 시 필요한 것 |
+|---|---|---|
+| `backend` | `...team1-truss:backend-latest` | 위 1번 표 env — HTTP 서버, `PORT` 포트로 리슨 |
+| `trader` | `...team1-truss:trader-latest` | 위 4번 표 env + CLI 인자(`-date` 등) — **1회성 실행**(Job), 완료 후 종료 |
+| `orderapi` | `...team1-truss:orderapi-latest` | 위 2번 표 env — HTTP 서버, `PORT` 포트로 리슨 |
+| `matching` | `...team1-truss:matching-latest` | 위 3번 표 env — 포트 없음, Kafka/Redis만 |
+| `replayengine` | `...team1-truss:replayengine-latest` | 위 5번 표 env + CLI 인자 — **1회성 실행**(Job), 완료 후 종료 |
+| `recorder` | `...team1-truss:recorder-latest` | 위 6번 표 env — 포트 없음, Kafka/Redis/RDS만 |
+
+`ENTRYPOINT`가 바이너리 자체이므로(예: `ENTRYPOINT ["/app/trader"]`) CLI 플래그는 K8s manifest의 `args`로, 연결 정보는 `env`로 각각 넘기면 된다 — 이 문서의 표 구분(플래그 vs 환경변수)이 그대로 `args`/`env` 구분과 일치한다. `trader`/`replayengine`은 `Job`으로(완료 후 종료가 정상), 나머지 넷은 `Deployment`로 띄우는 게 맞다(상시 실행).
 
 ## Kafka/Redis 인증 (2026-08-10 추가, Kafka 쪽 2026-08-11 교체)
 
