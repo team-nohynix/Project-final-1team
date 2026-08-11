@@ -1,0 +1,58 @@
+# job-trigger.tf의 aws_eks_access_entry.lambda_job_trigger가 team1-lambda-job-trigger-role을
+# kubernetes_groups=["team1-job-trigger-lambda"]로 매핑해뒀다. 여기서 그 그룹에 실제 권한을
+# 준다 — create-only, ai-trader/replay 네임스페이스 한정. update/patch는 주지 않는다 —
+# Lambda가 하는 일은 "만들고, 상태를 읽고, 취소하면 지우는 것"까지다.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-creator
+  namespace: ai-trader
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-trigger-lambda-can-create-jobs
+  namespace: ai-trader
+subjects:
+  - kind: Group
+    name: team1-job-trigger-lambda
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: job-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-creator
+  namespace: replay
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-trigger-lambda-can-create-jobs
+  namespace: replay
+subjects:
+  - kind: Group
+    name: team1-job-trigger-lambda
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: job-creator
+  apiGroup: rbac.authorization.k8s.io

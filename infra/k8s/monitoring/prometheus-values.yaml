@@ -1,0 +1,47 @@
+# kube-prometheus-stack — 클러스터/노드 지표를 모아 AMP(team1-amp-truss)로 remote_write.
+# Grafana/Alertmanager는 이 차트 걸 안 쓴다: 대시보드는 AMG, 알림은 CloudWatch 알람+SNS로
+# 이미 구성돼 있어 중복 설치할 이유가 없다. 시스템 노드그룹(t3.medium x2)이 좁아서 리소스
+# 요청은 보수적으로 잡는다 — 앱이 붙으면 실측치 보고 조정.
+
+fullnameOverride: prometheus
+
+alertmanager:
+  enabled: false
+
+grafana:
+  enabled: false
+
+prometheus:
+  serviceAccount:
+    create: true
+    name: prometheus
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::727646470302:role/team1-prometheus-role
+
+  prometheusSpec:
+    retention: 6h # AMP가 진짜 저장소(150일) — 로컬은 remote_write 버퍼 용도라 짧게
+
+    remoteWrite:
+      - url: https://aps-workspaces.ap-northeast-2.amazonaws.com/workspaces/ws-3c75deb7-9cb6-4caa-ab98-81c1b901b06c/api/v1/remote_write
+        sigv4:
+          region: ap-northeast-2
+
+    resources:
+      requests:
+        cpu: 150m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi

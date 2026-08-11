@@ -1,0 +1,66 @@
+# Karpenter NodePool + EC2NodeClass — 매칭엔진/접수API/기록기(backend) 전용. c6i.large 고정:
+# 측정 대상 자체라 버스터블(t계열) 배제, compute-optimized 중 최소 사이즈. team1-ng-system
+# (t3.medium 고정 2대)과 달리 이 NodePool은 Karpenter가 pending 파드를 보고 그때그때 EC2를
+# 띄운다(karpenter.tf가 IAM만 준비).
+#
+# subnetSelectorTerms/securityGroupSelectorTerms의 karpenter.sh/discovery=team1-eks 태그는
+# karpenter.tf의 aws_ec2_tag 리소스가 붙인다. instanceProfile도 karpenter.tf에서 정적으로
+# 만든 것을 그대로 참조한다.
+
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: team1-backend
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  # instanceProfile을 쓰면 role과 동시에 설정할 수 없다(스키마상 상호 배타적) — 정적으로
+  # 미리 만든 team1-karpenter-node-profile(karpenter.tf)을 그대로 참조한다.
+  instanceProfile: team1-karpenter-node-profile
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: team1-eks
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: team1-eks
+  tags:
+    Team: team1
+    Name: team1-karpenter-backend-node
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: team1-backend
+spec:
+  template:
+    metadata:
+      labels:
+        team1.io/workload: backend
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: team1-backend
+      # 측정 대상이라 스팟 배제(온디맨드 전용).
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["c6i.large"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      # 매칭엔진/접수API/기록기 외 워크로드가 이 노드에 스케줄되지 않도록 taint.
+      # Deployment 쪽 tolerations는 backend 워크로드 매니페스트(별도)에서 짝을 맞춘다.
+      taints:
+        - key: workload
+          value: backend
+          effect: NoSchedule
+  limits:
+    cpu: "160" # c6i.large(2 vCPU) 최대 20대 상당 — 매칭엔진 상한(마켓 20개)과 정합
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
