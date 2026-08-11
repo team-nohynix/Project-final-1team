@@ -1,30 +1,56 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 
-const metrics = ref([
-  { title: '현재 투입량', value: '30.0K/s', desc: '부하 생성기 입력', color: '#3478f6' },
-  { title: '정상 접수 TPS', value: '9.98K/s', desc: '처리 목표 10K/s', color: '#2ed39a' },
-  { title: '과부하 거절(429)', value: '20.0K/s', desc: '초과 요청 즉시 거절', color: '#ff9f43' },
-  { title: '매칭 Pod', value: '8', desc: 'KEDA 4 → 8', color: '#8b5cf6' },
-])
+// Grafana dashboard URL comes from Vite environment variable
+// Do NOT hardcode credentials or secrets in frontend code.
+const grafanaEnv = (import.meta as any).env?.VITE_GRAFANA_DASHBOARD_URL || ''
+const grafanaUrl = ref<string>(grafanaEnv)
 
-// mock time-series data (25 points)
-// single-bar chart data: height in percent and color category
-const chartBars = ref(
-  Array.from({ length: 25 }).map((_, i) => ({
-    height: Math.round(20 + Math.random() * 80),
-    color: i > 18 ? 'cyan' : 'blue',
-  })),
-)
+const isAllowedUrl = (u: string) => {
+  if (!u) return false
+  try {
+    const parsed = new URL(u)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch (e) {
+    return false
+  }
+}
 
-const podList = ref([
-  { name: 'engine-01', markets: 'BTC · ETH', status: 'running' },
-  { name: 'engine-02', markets: 'XRP · SOL', status: 'running' },
-  { name: 'engine-03', markets: 'ADA · DOGE', status: 'running' },
-  { name: 'engine-04', markets: 'AVAX · LINK', status: 'starting' },
-])
+const hasValidUrl = computed(() => isAllowedUrl(grafanaUrl.value))
 
-const integrity = ref({ reorder: 0, lost: 0, dup: 0, mismatch: 0 })
+// iframe load/error state
+const iframeLoaded = ref(false)
+const iframeError = ref(false)
+const iframeLoading = ref(false)
+let loadTimeout: ReturnType<typeof setTimeout> | null = null
+
+const startIframeLoad = () => {
+  iframeLoaded.value = false
+  iframeError.value = false
+  iframeLoading.value = true
+  if (loadTimeout) clearTimeout(loadTimeout)
+  // if not loaded within 8s, consider it blocked or requiring login
+  loadTimeout = setTimeout(() => {
+    if (!iframeLoaded.value) {
+      iframeLoading.value = false
+      iframeError.value = true
+    }
+  }, 8000)
+}
+
+const onIframeLoad = () => {
+  iframeLoaded.value = true
+  iframeLoading.value = false
+  iframeError.value = false
+  if (loadTimeout) {
+    clearTimeout(loadTimeout)
+    loadTimeout = null
+  }
+}
+
+onUnmounted(() => {
+  if (loadTimeout) clearTimeout(loadTimeout)
+})
 </script>
 
 <template>
@@ -35,61 +61,48 @@ const integrity = ref({ reorder: 0, lost: 0, dup: 0, mismatch: 0 })
       <hr />
     </header>
 
-    <div class="metrics-row">
-      <div v-for="(m, i) in metrics" :key="i" class="metric-card-small">
-        <div class="metric-top">
-          <div class="metric-title">{{ m.title }}</div>
-          <div class="metric-value" :style="{ color: m.color }">{{ m.value }}</div>
-        </div>
-        <div class="metric-sub">{{ m.desc }}</div>
-      </div>
-    </div>
-
-    <div class="graph-area">
-      <div class="large-graph">
-        <div class="graph-top">
+    <div class="grafana-area">
+      <div class="grafana-card">
+        <div class="grafana-header">
           <div>
-            <div class="graph-title">입력 주문 / 정상 접수 / 429 거절 / 처리 대기 주문 / Pod 수</div>
-            <div class="graph-sub">Prometheus 15초 간격 · Grafana 동일 시각축 · KEDA 120초 내 Scale-out 검증</div>
+            <div class="grafana-title">실시간 성능 모니터링 (Grafana)</div>
+            <div class="grafana-sub">실제 Grafana 대시보드를 임베드합니다.</div>
           </div>
-          <div class="live-badge"><span class="live-dot"></span> LIVE</div>
-        </div>
-
-        <div class="chart-area">
-          <div class="chart-bars">
-            <div
-              v-for="(b, idx) in chartBars"
-              :key="idx"
-              class="chart-bar"
-              :class="b.color"
-              :style="{ height: b.height + '%' }"
-            ></div>
+          <div class="grafana-actions">
+            <template v-if="hasValidUrl">
+              <div class="grafana-status">
+                <span v-if="iframeLoading">연결 중...</span>
+                <span v-else-if="iframeLoaded">연결됨</span>
+                <span v-else-if="iframeError">차단되었거나 로그인이 필요할 수 있습니다</span>
+              </div>
+              <a :href="grafanaUrl" target="_blank" rel="noopener noreferrer" class="open-btn">새 탭에서 열기</a>
+            </template>
           </div>
         </div>
-      </div>
-    </div>
 
-    <div class="bottom-cards">
-      <div class="left-card">
-        <h4 class="card-title">매칭 엔진 Pod</h4>
-        <div class="pod-list">
-          <div v-for="(p, i) in podList" :key="i" class="pod-row">
-            <div class="pod-name">{{ p.name }}</div>
-            <div class="pod-markets">{{ p.markets }}</div>
-            <div class="pod-status" :class="{ running: p.status === 'running', starting: p.status === 'starting' }">
-              {{ p.status === 'running' ? '실행 중' : '시작 중' }}
+        <div class="grafana-body">
+          <template v-if="!hasValidUrl">
+            <div class="grafana-placeholder">
+              <h3>Grafana 대시보드 연결 준비 중</h3>
+              <p>대시보드 URL을 받으면 실제 모니터링 화면이 표시됩니다.</p>
             </div>
-          </div>
-        </div>
-      </div>
+          </template>
 
-      <div class="right-card">
-        <h4 class="card-title">데이터 정합성</h4>
-        <div class="integrity">
-          <div class="row"><div class="label">순서 역전:</div><div class="value ok">{{ integrity.reorder }}</div></div>
-          <div class="row"><div class="label">주문 유실:</div><div class="value ok">{{ integrity.lost }}</div></div>
-          <div class="row"><div class="label">중복 체결:</div><div class="value ok">{{ integrity.dup }}</div></div>
-          <div class="row"><div class="label">매수·매도 불일치:</div><div class="value ok">{{ integrity.mismatch }}</div></div>
+          <template v-else>
+            <div class="grafana-embed">
+              <div v-if="iframeLoading" class="iframe-loading">Grafana 로딩 중...</div>
+              <iframe
+                :src="grafanaUrl"
+                class="grafana-iframe"
+                @load="onIframeLoad"
+                ref="grafanaIframe"
+              ></iframe>
+              <!-- always allow open-in-new-tab button for blocked/login cases -->
+              <div class="iframe-overlay">
+                <a :href="grafanaUrl" target="_blank" rel="noopener noreferrer" class="open-btn large">새 탭에서 열기</a>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -160,4 +173,21 @@ const integrity = ref({ reorder: 0, lost: 0, dup: 0, mismatch: 0 })
   .metrics-row { grid-template-columns: repeat(2, 1fr) }
   .bottom-cards { grid-template-columns: 1fr }
 }
+
+/* Grafana embed styles */
+.grafana-area { margin-top: 12px }
+.grafana-card { background:#071826; border:1px solid #163247; border-radius:10px; padding:16px }
+.grafana-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px }
+.grafana-title { font-weight:700 }
+.grafana-sub { color:#9fb0c2; font-size:13px }
+.grafana-actions { display:flex; gap:12px; align-items:center }
+.grafana-status { color:#9fb0c2 }
+.open-btn { background:#0e2b32; color:#bfe8db; padding:8px 12px; border-radius:8px; text-decoration:none; border:1px solid #18464d }
+.open-btn.large { padding:10px 16px; font-weight:700 }
+.grafana-body { min-height:360px }
+.grafana-placeholder { color:#9fb0c2; padding:36px; text-align:center }
+.grafana-embed { position:relative; height:600px; background:#000; border-radius:8px; overflow:hidden }
+.grafana-iframe { width:100%; height:100%; border:0 }
+.iframe-loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#9fb0c2; background:linear-gradient(180deg, rgba(7,24,38,0.4), rgba(7,24,38,0.4)); z-index:5 }
+.iframe-overlay { position:absolute; right:12px; top:12px; z-index:10 }
 </style>
