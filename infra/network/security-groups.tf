@@ -120,14 +120,16 @@ resource "aws_security_group" "team1_sg_msk" {
 }
 
 resource "aws_security_group" "team1_sg_rds" {
-  name        = "team1-sg-rds"
+  name = "team1-sg-rds"
+  # description은 SG를 ForceNew(전체 교체)시키는 필드라 엔진명이 바뀌어도 여기선 안 건드린다
+  # — RDS가 이 SG에 이미 붙어 있으면 ENI 분리 권한 문제로 교체 자체가 실패한다.
   description = "team1 RDS (PostgreSQL) - backend node group (recorder) only"
   vpc_id      = aws_vpc.team1_vpc.id
 
   ingress {
     description     = "recorder to RDS write"
-    from_port       = 5432
-    to_port         = 5432
+    from_port       = 3306
+    to_port         = 3306
     protocol        = "tcp"
     security_groups = [aws_security_group.team1_sg_eks_backend.id]
   }
