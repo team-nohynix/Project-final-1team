@@ -11,6 +11,7 @@ import (
 type Config struct {
 	Env      string // "dev" 또는 "prod"
 	S3Bucket string
+	Port     string // HTTP 서버 포트, 기본값 "8080"
 }
 
 // Load는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -31,9 +32,15 @@ func Load() Config {
 		log.Fatalf("APP_ENV 환경변수가 올바르지 않습니다 (현재 값: %q). \"dev\" 또는 \"prod\"로 설정해야 합니다.", env)
 	}
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	cfg := Config{
 		Env:      env,
 		S3Bucket: os.Getenv("S3_BUCKET"),
+		Port:     port,
 	}
 
 	if cfg.Env == "prod" && cfg.S3Bucket == "" {

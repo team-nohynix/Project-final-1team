@@ -50,10 +50,14 @@ func BuildStream(market string, start, end time.Time, seconds, minutes []upbit.C
 	}
 }
 
+// toRange는 start/end를 KST로 표시합니다 — 날짜 경계 자체가 KST 기준이라
+// (server.go의 parseDate), 파일명(formatFileTime)과 일치하도록 range 필드도
+// 동일하게 KST로 표시합니다. RFC3339에 KST 오프셋(+09:00)이 그대로 붙어
+// 나오므로 여전히 명확하고 파싱 가능한 형식입니다.
 func toRange(start, end time.Time) Range {
 	return Range{
-		Start: start.UTC().Format(time.RFC3339),
-		End:   end.UTC().Format(time.RFC3339),
+		Start: start.In(upbit.KST).Format(time.RFC3339),
+		End:   end.In(upbit.KST).Format(time.RFC3339),
 	}
 }
 

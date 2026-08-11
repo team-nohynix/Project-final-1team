@@ -35,6 +35,7 @@
 | `Content-Type` | Y | `application/json` |
 | `Idempotency-Key` | 주문 접수 시 필수 | 클라이언트가 발급하는 고유 키. 동일 키로 재요청 시 최초 응답을 그대로 반환(FR-02) |
 | `X-Request-Id` | 선택 | 요청 추적용 UUID. 미전달 시 서버가 발급하며 응답 헤더로 반환(FR-21 구간별 소요 시간 추적과 연계) |
+| `X-Order-Mode` | 선택 | `PAPER_TRADING`(기본값) 또는 `REPLAY`. 이 주문이 페이퍼 트레이딩(AI 트레이더)인지 리플레이(시뮬레이터)인지 구분 — "기록기"가 `TRADE_ORDER.mode`(erd.md)를 채우는 데 씀. 미전달·알 수 없는 값은 처리 정합성에 영향 없이 `PAPER_TRADING`으로 기본 처리(경고 로그만 남김) — `Idempotency-Key`와 달리 라벨링용이라 필수로 강제하지 않음 |
 
 ---
 
@@ -52,6 +53,7 @@
 | `side` | string | Y | `BUY` \| `SELL` |
 | `price` | string | Y | 주문 가격(KRW). 마켓별 호가 단위(tick size)의 배수여야 함 |
 | `quantity` | string | Y | 주문 수량. 0보다 커야 함 |
+| `sourceOrderId` | string | N | 리플레이 주문만 사용 — 재생 중인 원본 페이퍼 트레이딩 주문의 `orderId`. 검증에는 관여하지 않고 그대로 Kafka `orders` 토픽에 실려 "기록기"가 `TRADE_ORDER.source_order_id`(docs/erd.md)를 채우는 데만 쓰인다. 신규(페이퍼 트레이딩) 주문은 이 필드를 보내지 않는다 |
 
 ```json
 {
