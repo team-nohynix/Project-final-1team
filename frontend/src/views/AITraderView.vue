@@ -37,6 +37,9 @@ const collectedData = ref(null)
 // Job ID returned by POST /v1/collect (used for polling)
 const collectJobId = ref('')
 
+// The date that was requested for collection (set at POST time). This is preserved while collecting/completed.
+const requestedCollectDate = ref('')
+
 // polling control
 let pollTimerId = null
 let pollInFlight = false
@@ -59,6 +62,7 @@ function saveStateToSession() {
       // collection
       collectJobId: collectJobId.value,
       collectionStatus: collectionStatus.value,
+      requestedCollectDate: requestedCollectDate.value,
       collectedData: collectedData.value,
       // execution / paper trading
       executionStatus: executionStatus.value,
@@ -122,6 +126,25 @@ const collectionButtonDisabled = computed(() => {
   return !canRequestCollection.value
 })
 
+const collectionTargetDate = computed(() => {
+  // Prefer server-provided date in collectedData when available, otherwise the requestedCollectDate
+  return (collectedData.value && collectedData.value.date) || requestedCollectDate.value || ''
+})
+
+const collectionRangeDisplay = computed(() => {
+  const date = collectionTargetDate.value
+  if (!date) return '-'
+  try {
+    const d = new Date(`${date}T00:00:00+09:00`)
+    const next = new Date(d.getTime() + 24 * 60 * 60 * 1000)
+    const pad = (n) => String(n).padStart(2, '0')
+    const fmt = (dt) => `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+    return `${fmt(d)} ~ ${fmt(next)} KST`
+  } catch (e) {
+    return '-'
+  }
+})
+
 const targetThroughput = computed(() => {
   const secs = Number(generationTime.value) || 0
   const total = Number(totalOrders.value) || 0
@@ -174,6 +197,10 @@ const requestMarketData = async () => {
 
   try {
     const payload = { date: selectedDate.value }
+    // remember the requested date immediately (do not clear selectedDate)
+    requestedCollectDate.value = selectedDate.value
+    // persist immediately
+    saveStateToSession()
     const res = await fetch('/v1/collect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -259,6 +286,10 @@ async function pollOnce() {
 
     const data = await res.json()
     const status = data?.status
+    // If backend provides a date in the response, prefer it for display; otherwise keep requestedCollectDate
+    if (data?.date) {
+      requestedCollectDate.value = data.date
+    }
     if (status === 'IN_PROGRESS') {
       collectionStatus.value = 'collecting'
       // schedule next poll in 3s
@@ -372,6 +403,7 @@ const startPaperTrading = async () => {
 const reset = () => {
   scenarioName.value = defaultScenarioName
   selectedDate.value = ''
+  requestedCollectDate.value = ''
   totalOrders.value = defaultTotalOrders
   generationTime.value = defaultGenerationTime
   infoMessage.value = ''
@@ -400,6 +432,7 @@ watch(
     executionStatus,
     paperTradingResult,
     executionError,
+    requestedCollectDate,
   ],
   () => {
     if (restoringFromStorage) return
@@ -430,6 +463,7 @@ onMounted(async () => {
       collectJobId.value = stored.collectJobId ?? collectJobId.value
       collectionStatus.value = stored.collectionStatus ?? collectionStatus.value
       collectedData.value = stored.collectedData ?? collectedData.value
+      requestedCollectDate.value = stored.requestedCollectDate ?? requestedCollectDate.value
 
       // If collection was in progress, resume polling using existing jobId (do not re-POST)
       if (collectionStatus.value === 'collecting' && collectJobId.value) {
@@ -498,6 +532,16 @@ onMounted(async () => {
           </div>
 
           <div class="collection-data">
+            <div v-if="collectionStatus !== 'idle'" style="margin-bottom:8px">
+              <div class="collection-data-row">
+                <span class="collection-data-key">수집 대상 날짜</span>
+                <span class="collection-data-value">{{ collectionTargetDate || '-' }}</span>
+              </div>
+              <div class="collection-data-row">
+                <span class="collection-data-key">수집 범위</span>
+                <span class="collection-data-value">{{ collectionRangeDisplay }}</span>
+              </div>
+            </div>
             <template v-if="collectionStatus === 'idle'">수집된 시세 데이터 없음</template>
             <template v-else-if="collectionStatus === 'collecting'">시세 수집 중...</template>
             <template v-else-if="collectionStatus === 'failed'">시세 수집 실패: {{ errorMessage || '다시 요청해주세요.' }}</template>
