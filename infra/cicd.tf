@@ -20,10 +20,17 @@ data "aws_iam_policy_document" "github_actions_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # prod 브랜치 push로 전체 CI/CD(프론트 S3, 이미지 ECR, k8s 롤아웃 재시작)를 돌린다 —
+    # main은 예전 backend 전용 워크플로 흔적, 새 워크플로는 prod만 쓰지만 트러스트는
+    # 굳이 좁히지 않고 남겨둔다(레포에 남아있는 워크플로 파일 자체가 실제 방아쇠라
+    # 여기 조건 하나만으로 뭐가 도는지 결정되지 않음).
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:KimDJ7105/Project-final-1team:ref:refs/heads/main"]
+      values = [
+        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/main",
+        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
+      ]
     }
   }
 }
@@ -76,6 +83,52 @@ resource "aws_iam_role_policy" "github_actions_lambda_deploy" {
   name   = "team1-github-actions-lambda-deploy-policy"
   role   = aws_iam_role.github_actions_ecr_push.id
   policy = data.aws_iam_policy_document.github_actions_lambda_deploy_policy.json
+}
+
+# 프론트 배포(S3 동기화 + CloudFront 무효화) — infra/edge.tf의 team1-truss-frontend
+# 버킷과 그 CloudFront 배포에만 스코프.
+data "aws_iam_policy_document" "github_actions_frontend_deploy_policy" {
+  statement {
+    actions   = ["s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    resources = [aws_s3_bucket.frontend.arn, "${aws_s3_bucket.frontend.arn}/*"]
+  }
+  statement {
+    actions   = ["cloudfront:CreateInvalidation"]
+    resources = [aws_cloudfront_distribution.frontend.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_frontend_deploy" {
+  name   = "team1-github-actions-frontend-deploy-policy"
+  role   = aws_iam_role.github_actions_ecr_push.id
+  policy = data.aws_iam_policy_document.github_actions_frontend_deploy_policy.json
+}
+
+# kubectl rollout restart용 — EKS API 접근 자체는 DescribeCluster(엔드포인트/CA 조회)만
+# IAM으로 필요하고, 실제 k8s 권한은 access entry+RBAC(아래 aws_eks_access_entry.github_actions,
+# k8s/ci-deploy-rbac.yaml)가 준다.
+data "aws_iam_policy_document" "github_actions_eks_describe_policy" {
+  statement {
+    actions   = ["eks:DescribeCluster"]
+    resources = [aws_eks_cluster.team1.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_eks_describe" {
+  name   = "team1-github-actions-eks-describe-policy"
+  role   = aws_iam_role.github_actions_ecr_push.id
+  policy = data.aws_iam_policy_document.github_actions_eks_describe_policy.json
+}
+
+# CI가 만든 새 이미지(backend/orderapi/matching/recorder — Deployment로 상시 실행되는
+# 4개만. trader/replayengine은 Job으로 그때그때 뜨므로 :latest를 다음 실행 때 자연히
+# 받아서 재시작이 필요 없다)를 즉시 반영하려면 rollout restart 권한이 필요하다 —
+# job-trigger Lambda와 같은 패턴(access entry로 k8s 그룹 매핑, 실제 권한은 RBAC).
+resource "aws_eks_access_entry" "github_actions" {
+  cluster_name      = aws_eks_cluster.team1.name
+  principal_arn     = aws_iam_role.github_actions_ecr_push.arn
+  type              = "STANDARD"
+  kubernetes_groups = ["team1-github-actions-deploy"]
 }
 
 output "github_actions_role_arn" {

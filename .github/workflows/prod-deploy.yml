@@ -1,0 +1,326 @@
+name: Prod Deploy
+
+# prod 브랜치에 push되면: 바뀐 경로만 골라(dorny/paths-filter) 프론트는 S3+CloudFront,
+# 6개 Go 모듈은 이미지 빌드해서 ECR push(+Deployment 4개는 즉시 rollout restart),
+# infra/는 terraform plan을 자동으로 돌리고 apply는 GitHub Environment(infra-apply)
+# 승인이 있어야 실행된다 — 이 저장소는 여러 팀이 공유하는 AWS 계정을 쓰므로 실제
+# 인프라를 바꾸는 apply만큼은 사람이 봐야 한다는 팀 결정. Environment에 필수
+# 리뷰어를 설정하는 건 저장소 Settings에서 별도로 해야 한다(README/커밋 메시지 참고).
+
+on:
+  push:
+    branches: [prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: team1-truss
+  EKS_CLUSTER: team1-eks
+  ECR_PUSH_ROLE: arn:aws:iam::727646470302:role/team1-github-actions-ecr-push
+  TF_PLAN_ROLE: arn:aws:iam::727646470302:role/team1-github-actions-tf-plan
+  TF_APPLY_ROLE: arn:aws:iam::727646470302:role/team1-github-actions-tf-apply
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      backend: ${{ steps.filter.outputs.backend }}
+      orderapi: ${{ steps.filter.outputs.orderapi }}
+      matching: ${{ steps.filter.outputs.matching }}
+      recorder: ${{ steps.filter.outputs.recorder }}
+      trader: ${{ steps.filter.outputs.trader }}
+      replayengine: ${{ steps.filter.outputs.replayengine }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend: ['frontend/**']
+            backend: ['backend/**']
+            orderapi: ['orderapi/**']
+            matching: ['matching/**']
+            recorder: ['recorder/**']
+            trader: ['trader/**']
+            replayengine: ['replayengine/**']
+            infra: ['infra/**']
+
+  # --- 프론트 (S3 + CloudFront) ------------------------------------------
+
+  deploy-frontend:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npm run build
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws s3 sync frontend/dist/ s3://team1-truss-frontend/ --delete
+      - run: |
+          DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?Origins.Items[0].DomainName=='team1-truss-frontend.s3.ap-northeast-2.amazonaws.com'].Id" --output text)
+          aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*"
+
+  # --- 시세 수집기(backend) — Deployment "backend", namespace collector ---
+
+  build-push-backend:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:backend-${{ github.sha }}" -t "$IMAGE:backend-latest" .
+          docker push "$IMAGE:backend-${{ github.sha }}"
+          docker push "$IMAGE:backend-latest"
+      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      - run: |
+          kubectl rollout restart deployment/backend -n collector
+          kubectl rollout status deployment/backend -n collector --timeout=180s
+
+  # --- 접수 API(orderapi) — Deployment "orderapi", namespace backend ------
+
+  build-push-orderapi:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.orderapi == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orderapi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: orderapi/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:orderapi-${{ github.sha }}" -t "$IMAGE:orderapi-latest" .
+          docker push "$IMAGE:orderapi-${{ github.sha }}"
+          docker push "$IMAGE:orderapi-latest"
+      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      - run: |
+          kubectl rollout restart deployment/orderapi -n backend
+          kubectl rollout status deployment/orderapi -n backend --timeout=180s
+
+  # --- 매칭 엔진(matching) — Deployment "matching-engine", namespace backend
+
+  build-push-matching:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.matching == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: matching
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: matching/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:matching-${{ github.sha }}" -t "$IMAGE:matching-latest" .
+          docker push "$IMAGE:matching-${{ github.sha }}"
+          docker push "$IMAGE:matching-latest"
+      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      - run: |
+          kubectl rollout restart deployment/matching-engine -n backend
+          kubectl rollout status deployment/matching-engine -n backend --timeout=180s
+
+  # --- 기록기(recorder) — Deployment "recorder", namespace backend --------
+
+  build-push-recorder:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.recorder == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: recorder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: recorder/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:recorder-${{ github.sha }}" -t "$IMAGE:recorder-latest" .
+          docker push "$IMAGE:recorder-${{ github.sha }}"
+          docker push "$IMAGE:recorder-latest"
+      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      - run: |
+          kubectl rollout restart deployment/recorder -n backend
+          kubectl rollout status deployment/recorder -n backend --timeout=180s
+
+  # --- AI 트레이더(trader) — Job이라 재시작 불필요, 다음 실행 때 :latest를 그냥 받음
+
+  build-push-trader:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.trader == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: trader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: trader/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:trader-${{ github.sha }}" -t "$IMAGE:trader-latest" .
+          docker push "$IMAGE:trader-${{ github.sha }}"
+          docker push "$IMAGE:trader-latest"
+
+  # --- 리플레이 엔진(replayengine) — Job이라 재시작 불필요 -------------------
+
+  build-push-replayengine:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.replayengine == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: replayengine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: replayengine/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+      - env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:replayengine-${{ github.sha }}" -t "$IMAGE:replayengine-latest" .
+          docker push "$IMAGE:replayengine-${{ github.sha }}"
+          docker push "$IMAGE:replayengine-latest"
+
+  # --- 인프라 — plan은 자동, apply는 infra-apply environment 승인 필요 ------
+
+  terraform-plan:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TF_PLAN_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: network stack plan
+        working-directory: infra/network
+        run: |
+          terraform init -input=false
+          terraform plan -no-color | tee "$GITHUB_STEP_SUMMARY"
+      - name: root stack plan
+        working-directory: infra
+        run: |
+          terraform init -input=false
+          terraform plan -no-color | tee -a "$GITHUB_STEP_SUMMARY"
+
+  terraform-apply:
+    needs: [detect-changes, terraform-plan]
+    if: needs.detect-changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    environment: infra-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TF_APPLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: network stack apply
+        working-directory: infra/network
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+      - name: root stack apply
+        working-directory: infra
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
