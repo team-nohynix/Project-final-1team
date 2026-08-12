@@ -213,15 +213,14 @@ resource "aws_security_group" "team1_sg_alb_public" {
   }
 }
 
-# 포트 8080은 설계 문서 11장의 placeholder — 접수 API 실제 포트 확정 시 갱신.
 resource "aws_security_group_rule" "team1_backend_from_alb" {
   type                     = "ingress"
   security_group_id        = aws_security_group.team1_sg_eks_backend.id
   source_security_group_id = aws_security_group.team1_sg_alb_public.id
-  from_port                = 8080
-  to_port                  = 8080
+  from_port                = 8081
+  to_port                  = 8081
   protocol                 = "tcp"
-  description              = "Public ALB to ingest API pod (port is a placeholder, see design doc section 11)"
+  description              = "Public ALB to ingest API pod (real orderapi PORT, confirmed from orderapi/config.go default and k8s Deployment)"
 }
 
 # Job 트리거 Lambda(team1-lambda-job-trigger, root 스택 job-trigger.tf) — SQS를 소비해
