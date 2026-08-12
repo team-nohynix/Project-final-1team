@@ -1,0 +1,53 @@
+# 시세 수집기(backend, CLAUDE.md의 backend/) — 앱 담당자가 전달한 deployment-env-vars.md 1번 표 기준.
+# Fargate profile "collector"가 namespace만으로 선택하므로 nodeSelector/toleration 불필요.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: collector
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: sa-collector
+      containers:
+        - name: backend
+          image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:backend-latest
+          # 태그가 "backend-latest"라 K8s 기본 imagePullPolicy가 IfNotPresent —
+          # matching-engine에서 재배포해도 캐시된 예전 이미지를 쓰는 걸 실측으로
+          # 발견해서 여기도 같이 맞춘다.
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: "prod"
+            - name: S3_BUCKET
+              value: "team1-truss-market-data"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: collector
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080

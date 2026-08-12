@@ -1,7 +1,12 @@
 # kube-prometheus-stack — 클러스터/노드 지표를 모아 AMP(team1-amp-truss)로 remote_write.
-# Grafana/Alertmanager는 이 차트 걸 안 쓴다: 대시보드는 AMG, 알림은 CloudWatch 알람+SNS로
-# 이미 구성돼 있어 중복 설치할 이유가 없다. 시스템 노드그룹(t3.medium x2)이 좁아서 리소스
-# 요청은 보수적으로 잡는다 — 앱이 붙으면 실측치 보고 조정.
+# Alertmanager는 이 차트 걸 안 쓴다: 알림은 CloudWatch 알람+SNS로 이미 구성돼 있어 중복 설치할
+# 이유가 없다. 시스템 노드그룹(t3.medium x2)이 좁아서 리소스 요청은 보수적으로 잡는다 —
+# 앱이 붙으면 실측치 보고 조정.
+#
+# Grafana는 AMG(Amazon Managed Grafana) 대신 이 차트에 번들된 걸 켠다 — AMG는 IAM Identity
+# Center Organization 인스턴스가 필요한데, 그게 이 계정이 속한 조직(데이원컴퍼니)의 것이라
+# 우리가 사용자를 추가할 권한이 없다(구조적으로 막힘, 재시도로 안 풀림). 자체 호스팅 Grafana는
+# 로컬 Prometheus를 데이터소스로 써서 AWS 인증이 아예 필요 없다.
 
 fullnameOverride: prometheus
 
@@ -9,7 +14,31 @@ alertmanager:
   enabled: false
 
 grafana:
-  enabled: false
+  enabled: true
+
+  # Admin 계정은 Helm이 자동 생성한 시크릿으로 — 콘솔에서 `kubectl get secret prometheus-grafana
+  # -o jsonpath='{.data.admin-password}' | base64 -d`로 확인.
+  adminUser: admin
+
+  # 프론트엔드에 iframe으로 끼워넣을 때 로그인 없이 보이도록 익명 Viewer 접근을 켠다.
+  # Admin 화면(설정 변경 등)은 계속 admin 계정 로그인이 필요하다 — Viewer 권한만 공개.
+  "grafana.ini":
+    auth.anonymous:
+      enabled: true
+      org_name: Main Org.
+      org_role: Viewer
+    security:
+      allow_embedding: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # 데이터소스는 이 차트가 자동으로 같이 뜨는 Prometheus로 잡아준다(기본값) — AMP는 안 거친다.
 
 prometheus:
   serviceAccount:

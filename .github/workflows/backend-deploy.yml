@@ -1,0 +1,68 @@
+name: Backend Build & Deploy
+
+# ECR push는 main에서만 — team1-github-actions-ecr-push 역할의 트러스트 정책이 이 브랜치로
+# 고정돼 있다(infra/cicd.tf). 다른 브랜치/PR은 빌드·테스트만 돈다.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-deploy.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: team1-truss
+  IMAGE_TAG_PREFIX: collector
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+
+  push-image:
+    needs: build-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::727646470302:role/team1-github-actions-ecr-push
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        working-directory: backend
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:$IMAGE_TAG_PREFIX-${{ github.sha }}" -t "$IMAGE:$IMAGE_TAG_PREFIX-latest" .
+          docker push "$IMAGE:$IMAGE_TAG_PREFIX-${{ github.sha }}"
+          docker push "$IMAGE:$IMAGE_TAG_PREFIX-latest"
