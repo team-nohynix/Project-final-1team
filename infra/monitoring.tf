@@ -142,10 +142,18 @@ resource "aws_cloudwatch_metric_alarm" "msk_health" {
   tags = { Team = "team1", Name = "team1-alarm-msk-health" }
 }
 
-# ALB는 Ingress가 생성하므로 이름이 배포 후에야 정해진다 — 여기서는 계정 전체 5xx를 우선
-# 잡고, ALB 생성 후 차원(dimension)을 좁혀도 된다.
+# 2026-08-11 작성 당시엔 ALB가 Ingress로 배포 후에야 생기는 리소스라 차원(dimension)
+# 없이 계정 전체를 잡아뒀었는데, dimension이 아예 없으면 ALB 지표(항상 LoadBalancer
+# 차원으로 나옴)에는 매칭되는 데이터포인트가 없어서 이 알람이 사실상 한 번도 안
+# 울리는 상태였다 — 2026-08-12에 실제 ALB 2개(접수 API, 시세수집기, edge.tf의
+# data.aws_lb.orderapi/collector)가 생긴 뒤 각각 차원을 좁혀 진짜 동작하게 정정.
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
-  alarm_name          = "team1-alarm-alb-5xx"
+  for_each = {
+    orderapi  = data.aws_lb.orderapi.arn_suffix
+    collector = data.aws_lb.collector.arn_suffix
+  }
+
+  alarm_name          = "team1-alarm-alb-5xx-${each.key}"
   namespace           = "AWS/ApplicationELB"
   metric_name         = "HTTPCode_Target_5XX_Count"
   statistic           = "Sum"
@@ -153,11 +161,12 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   evaluation_periods  = 5
   threshold           = 50
   comparison_operator = "GreaterThanThreshold"
+  dimensions          = { LoadBalancer = each.value }
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
 
-  tags = { Team = "team1", Name = "team1-alarm-alb-5xx" }
+  tags = { Team = "team1", Name = "team1-alarm-alb-5xx-${each.key}" }
 }
 
 resource "aws_cloudwatch_metric_alarm" "nodegroup_health" {
