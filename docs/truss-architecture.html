@@ -875,8 +875,9 @@
         <table>
           <thead><tr><th class="name">소스</th><th class="name">대상</th><th>포트</th></tr></thead>
           <tbody>
-            <tr><td class="name">sg-eks-backend</td><td class="name">sg-rds</td><td>5432</td></tr>
+            <tr><td class="name">sg-eks-backend</td><td class="name">sg-rds</td><td>3306</td></tr>
             <tr><td class="name">sg-eks-backend</td><td class="name">sg-redis</td><td>6379</td></tr>
+            <tr><td class="name">sg-eks-backend</td><td class="name">sg-msk</td><td>9098 (IAM)</td></tr>
             <tr><td class="name">sg-alb-public</td><td class="name">sg-eks-backend</td><td>접수API 포트</td></tr>
             <tr><td class="name">sg-eks-collector</td><td class="name">0.0.0.0/0 (NAT 경유)</td><td>443 (업비트 API)</td></tr>
             <tr><td class="name">sg-lambda-job-trigger</td><td class="name">EKS 프라이빗 엔드포인트</td><td>443 (K8s API)</td></tr>
@@ -927,7 +928,7 @@
       <table>
         <thead><tr><th>리소스</th><th class="name">클래스</th><th>근거</th></tr></thead>
         <tbody>
-          <tr><td>EKS 백엔드 노드그룹</td><td class="name">c6i.large · AZ당 min 2 / max 8(합산 min 4 / max 16)</td><td>NFR-01/02(초당 1만 건) 측정 대상 자체라 버스터블(t계열) 배제 — 크레딧 고갈 패턴이 아니라 실제 시스템 성능을 측정해야 함. compute-optimized 중 최소 사이즈. Cluster Autoscaler 전제 수치 — Karpenter 전환 시 재조정 필요(11장)</td></tr>
+          <tr><td>EKS 백엔드 컴퓨트</td><td class="name">시스템 노드그룹(t3.medium 고정 2대, CoreDNS 등 상주) + Karpenter NodePool(c6i.large, On-Demand 전용, CPU 합산 상한 160)</td><td>NFR-01/02(초당 1만 건) 측정 대상 자체라 버스터블(t계열) 배제 — 크레딧 고갈 패턴이 아니라 실제 시스템 성능을 측정해야 함. compute-optimized 중 최소 사이즈. Cluster Autoscaler 대신 Karpenter로 전환 완료(11장) — 미리 정한 min/max 대신 실제 파드 리소스 요청 기준으로 노드를 즉시 프로비저닝/정리</td></tr>
           <tr><td>RDS</td><td class="name">db.m6gd.large</td><td>Multi-AZ DB 클러스터는 로컬 NVMe "d" 계열에서만 지원(AWS CLI로 확인) — 애초 검토했던 db.r6g.large는 클러스터 배포 자체를 지원하지 않음. "d" 계열 중 가장 저렴한 클래스로 시작, 부족하면 db.r8gd.large로 상향</td></tr>
           <tr><td>ElastiCache Redis</td><td class="name">cache.t4g.medium</td><td>20개 마켓 호가창은 데이터량이 작아 메모리 최적화·샤딩 불필요 — 범용 거쳐 버스터블까지 하향. 트레이드오프: 크레딧 소진 시 지연 튈 수 있어 리플레이 고배속 구간에서 CPU 크레딧 사용률을 부하 시험으로 관찰 예정</td></tr>
         </tbody>
@@ -986,10 +987,9 @@
         <tbody>
           <tr><td>Bedrock 모델의 ap-northeast-2 가용 여부</td><td>미확인 — 크로스 리전 추론 프로파일 필요 시 IRSA 정책 ARN도 같이 확정</td></tr>
           <tr><td>분산 트레이싱(X-Ray 등)</td><td>미결 — FR-21 구간별 소요 시간 추적에 AMP/Grafana만으론 부족할 수 있음</td></tr>
-          <tr><td>노드그룹 min/max, RDS/ElastiCache 최종 클래스</td><td>1차 부하 시험 결과로 확정 예정(현재는 시작값)</td></tr>
+          <tr><td>Karpenter NodePool CPU 상한, RDS/ElastiCache 최종 클래스</td><td>1차 부하 시험 결과로 확정 예정(현재는 시작값)</td></tr>
           <tr><td>리플레이 엔진 마켓 단위 병렬 실행</td><td>논의 중 — 매칭엔진 호가창이 마켓별 독립이라 마켓 단위 병렬 Job이 자연스러운 경계. 락 키를 세션 단위에서 세션+마켓 단위로 바꾸는 안 검토 중</td></tr>
           <tr><td>주문 기록 파일 병합/분할 책임</td><td>미정 — 현재는 파드(봇 인스턴스) 단위 시간순 파일. 마켓 단위 병렬 리플레이를 하려면 마켓별 재그룹핑이 필요, 트레이더가 세션 종료 시 할지 리플레이 엔진이 읽을 때 할지 미확정</td></tr>
-          <tr><td>Karpenter 도입에 따른 Terraform 리팩터링</td><td>미착수 — 현재 Terraform은 Cluster Autoscaler 전제(노드그룹 min/max 값도 그 기준). 관리형 노드그룹을 최소 구성으로 축소하고 NodePool/EC2NodeClass 추가, min/max 재조정 필요</td></tr>
           <tr><td>ACM 인증서 발급/도메인 확정</td><td>진행 중 — team1-acm-cloudfront(CloudFront용, us-east-1), team1-acm-alb(접수API ALB용, ap-northeast-2) 명명만 확정, 실제 발급·다이어그램 표기는 미완료</td></tr>
         </tbody>
       </table>

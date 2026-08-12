@@ -1,5 +1,7 @@
 # AWS 리소스 · 권한 · 계정 정리 (인프라 팀원 전달용)
 
+> **이 문서는 2026-08-10~11 시점의 스냅샷이다 — "1. 현재 상태" 표를 포함해 아래 내용 상당수는 실제 인프라가 만들어지기 전에 "무엇을 프로비저닝해야 하는지" 정리한 핸드오프 문서로 작성됐다.** 그 이후 EKS(단일 클러스터)/MSK/RDS(MySQL, Multi-AZ)/ElastiCache/CloudFront가 전부 실제로 적용됐다 — 지금 실제 인프라 상태는 [`../CLAUDE.md`](../CLAUDE.md)의 "Infra (Terraform)" 절이 더 정확하다. 이 문서는 그때의 요구사항/판단 기록으로만 참고할 것.
+
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
@@ -8,12 +10,13 @@
 | 2026-08-10 (2차) | 최초 작성 후 발견: RoundTripper 인터페이스에 nil 포인터를 담아 넘기면(콘크리트 타입 nil→인터페이스 nil 아님) 인증 없는 로컬 환경에서 오히려 패닉이 나는 버그를 실제로 겪고 고침(코드 쪽 이슈, 이 문서엔 직접 영향 없음) |
 | 2026-08-10 | 최초 작성 — 현재 실제 구현(Go 6개 모듈, MySQL로 전환된 recorder, 2026-08-10 추가된 Bedrock 연동)을 기준으로 필요한 AWS 리소스/권한을 정리. 기존 설계 문서와의 불일치 2건 발견 — 같은 날 `ai-trader-design.md`의 Python 표기는 Go로 정정했음(아래 1번은 해결됨). `infra-placement-design.md`의 RDS 엔진 표기(2번)는 아직 안 고침 |
 
-## 먼저 확인해줄 것 — 기존 설계 문서와 실제 구현이 다른 부분
+## 먼저 확인해줄 것 — 기존 설계 문서와 실제 구현이 다른 부분 (당시 기준, 지금은 모두 해결됨)
 
-1. ~~`ai-trader-design.md`는 Python 스택을 전제로 쓰여 있었는데~~ — **2026-08-10에 Go로 정정 완료.** 이제 이 문서를 봐도 됨.
-2. **`infra-placement-design.md` 4.1절은 아직 RDS를 PostgreSQL로 설계해뒀는데, 팀이 2026-08-07에 MySQL로 결정을 바꿨고 `recorder`도 실제로 MySQL(`go-sql-driver/mysql`)로 구현돼 있다.** RDS 엔진은 MySQL로 만들어야 한다 — 이 문서는 아직 안 고쳐져 있으니 4.1절을 볼 때는 엔진만 MySQL로 읽어달라.
+1. ~~`ai-trader-design.md`는 Python 스택을 전제로 쓰여 있었는데~~ — **2026-08-10에 Go로 정정 완료.**
+2. ~~설계 문서가 RDS를 PostgreSQL로 설계해뒀던 것~~ — **RDS는 MySQL(Multi-AZ DB 클러스터)로 적용 완료.**
+3. ~~설계 문서가 EKS를 역할별 3개 클러스터로 분리해뒀던 것~~ — 멘토링 반려 후 **단일 EKS 클러스터**(관리형 노드그룹 + Fargate Profile 3종으로 워크로드만 격리)로 재설계·적용 완료.
 
-나머지 설계(네트워크 배치, EKS 3클러스터 분리, MSK/ElastiCache 배치, 보안 그룹 등)는 이 두 가지 외에는 실제 구현과 크게 배치되지 않는 것으로 보인다 — 다만 **지금 이 순간 실제로 존재하는 AWS 리소스는 VPC(퍼블릭 서브넷 1개)와 S3 버킷 2개, IAM 역할 1개뿐**이다(아래 "현재 상태" 참고). `infra-placement-design.md`가 그리는 EKS 3클러스터/MSK/RDS/ElastiCache/CloudFront는 전부 아직 없는, 앞으로 만들어야 할 목표 상태다.
+이 문서 작성 시점엔 **VPC(퍼블릭 서브넷 1개)와 S3 버킷 2개, IAM 역할 1개뿐**이었지만(아래 "현재 상태" 표는 그 시점 기록), 지금은 EKS/MSK/RDS/ElastiCache/CloudFront가 전부 실제로 적용돼 있다 — 위 안내 배너와 [`../CLAUDE.md`](../CLAUDE.md) 참고.
 
 ---
 
@@ -84,14 +87,11 @@
 - 엔진: **MySQL 8+**.
 - `recorder`가 `DATABASE_URL`로 받는 값은 URL이 아니라 `go-sql-driver/mysql`의 DSN 형식: `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC`.
 - 스키마 자동 마이그레이션 없음 — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함.
-- `infra-placement-design.md`의 나머지 판단(Single-AZ로 시작, 인스턴스 클래스 등)은 그대로 유효.
+- **적용된 실제 구성은 Single-AZ가 아니라 Multi-AZ DB 클러스터**(라이터 1 + 리더 2) — 인스턴스 클래스는 `db.m6gd.large`(로컬 NVMe "d" 계열, Multi-AZ 클러스터가 요구).
 
 ## 8. 네트워크 / 컴퓨트
 
-`infra-placement-design.md` 1~2장(서브넷 구성, EKS 3클러스터 분리, NAT/S3 Gateway Endpoint)은 그대로 참고하면 된다 — 이 문서에서 새로 뒤집는 내용 없음. 다만:
-
-- 지금은 그중 어느 것도 실제로 만들어져 있지 않다(1번 "현재 상태" 참고) — 처음부터 구축해야 한다.
-- 컴퓨트를 EKS로 갈지, `backend`처럼 EC2로 갈지, 아니면 CLAUDE.md의 "Lambda→K8s Job 트리거" 설계(아직 미구현)를 따라갈지는 별도로 정해야 한다. 어느 쪽이든 이 문서가 정리한 환경변수/IAM/S3/Bedrock 요구사항 자체는 동일하게 적용됨.
+컴퓨트는 EKS **단일 클러스터**로 확정·적용됨 — 역할별로 클러스터를 나누는 대신, 관리형 노드그룹(백엔드: 접수API·매칭엔진·기록기)과 Fargate Profile 3종(시세수집기/AI트레이더/리플레이, 네임스페이스로 격리)으로 워크로드만 분리한다(당초 역할별 3-클러스터 설계는 멘토링에서 반려됨). 이 문서가 정리한 환경변수/IAM/S3/Bedrock 요구사항 자체는 이 결정과 무관하게 동일하게 적용된다.
 - 이미지 베이스: Go 바이너리라 정적 컴파일된 단일 실행 파일 배포가 가능함(Python처럼 런타임+의존성 설치가 필요 없음) — 컨테이너화한다면 `scratch`/`alpine` 같은 매우 가벼운 베이스로 충분.
 
 ## 9. 아직 정해지지 않은 것 (확인 후 알려주면 반영)
