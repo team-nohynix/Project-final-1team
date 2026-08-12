@@ -1,0 +1,59 @@
+# cicd.tf의 aws_eks_access_entry.github_actions가 GitHub Actions 역할을
+# kubernetes_groups=["team1-github-actions-deploy"]로 매핑해뒀다. 여기서 그
+# 그룹에 실제 권한을 준다 — CI가 이미지 새로 푸시한 뒤 `kubectl rollout restart`로
+# 즉시 반영하는 용도뿐이라 deployments/replicasets patch + 상태 확인용 get/list/watch만
+# 준다(생성/삭제 권한 없음 — 매니페스트 자체는 이 저장소에서 사람이 리뷰해서
+# kubectl apply하는 걸 전제로 한다).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deploy
+  namespace: backend
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-actions-can-restart-deployments
+  namespace: backend
+subjects:
+  - kind: Group
+    name: team1-github-actions-deploy
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: ci-deploy
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deploy
+  namespace: collector
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-actions-can-restart-deployments
+  namespace: collector
+subjects:
+  - kind: Group
+    name: team1-github-actions-deploy
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: ci-deploy
+  apiGroup: rbac.authorization.k8s.io
