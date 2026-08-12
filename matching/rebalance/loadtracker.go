@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -48,34 +49,74 @@ func readingKey(market string) string {
 // Loads는 마켓별 최근 처리량 추정치를 반환합니다. 처음 측정하는 마켓(이전 기록이
 // 없음)은 0으로 보고합니다 — 콜드 스타트를 "가볍다"고 가정하는 게, 알지도 못하는
 // 값으로 잘못 추정해 배정을 왜곡하는 것보다 안전한 기본값입니다.
+//
+// 마켓 20개를 병렬로 측정합니다 — 원래는 순차 for문이었는데, readLastOffset이
+// 마켓마다 매번 새로 브로커에 다이얼합니다(AWS_MSK_IAM이면 TLS+SASL 핸드셰이크까지
+// 매번 새로). 이게 AssignGroups(리더가 리밸런스 중 동기 호출) 안에서 20번 순차로
+// 일어나면 실측 약 2초가 걸렸고, 이 블로킹이 그룹 리밸런스 자체를 지연시켜
+// 코디네이터가 리밸런스가 멈췄다고 보고 다시 리밸런스를 트리거 — 그 안에서
+// Loads()가 다시 20번 순차 다이얼을 반복하는 자기유발 루프가 됐습니다(실측:
+// 제너레이션이 몇 초마다 계속 바뀌고 모든 마켓의 Acquire가 "generation has
+// ended"로 실패). 병렬화하면 전체 소요시간이 "가장 느린 다이얼 1개" 수준으로
+// 줄어 이 타이밍 압박이 사라집니다.
 func (t *LoadTracker) Loads(ctx context.Context) ([]Load, error) {
 	now := time.Now()
-	loads := make([]Load, 0, len(t.markets))
+	loads := make([]Load, len(t.markets))
 
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		firstErr error
+	)
 	for partition, market := range t.markets {
-		offset, err := t.readLastOffset(ctx, partition)
-		if err != nil {
-			return nil, fmt.Errorf("파티션 %d(마켓 %s) 오프셋 조회 실패: %w", partition, market, err)
-		}
+		wg.Add(1)
+		go func(partition int, market string) {
+			defer wg.Done()
 
-		load := 0.0
-		prev, ok, err := t.loadReading(ctx, market)
-		if err != nil {
-			return nil, fmt.Errorf("마켓 %s 이전 측정값 조회 실패: %w", market, err)
-		}
-		if ok {
-			elapsed := now.Sub(time.Unix(0, prev.AtUnix)).Seconds()
-			if elapsed > 0 && offset > prev.Offset {
-				load = float64(offset-prev.Offset) / elapsed
+			load, err := t.marketLoad(ctx, partition, market, now)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
 			}
-		}
-		loads = append(loads, Load{Market: market, Value: load})
+			loads[partition] = load
+		}(partition, market)
+	}
+	wg.Wait()
 
-		if err := t.saveReading(ctx, market, reading{Offset: offset, AtUnix: now.UnixNano()}); err != nil {
-			return nil, fmt.Errorf("마켓 %s 측정값 저장 실패: %w", market, err)
-		}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return loads, nil
+}
+
+// marketLoad는 마켓 하나의 최근 처리량을 측정합니다 — Loads()가 마켓마다
+// 고루틴으로 병렬 호출합니다.
+func (t *LoadTracker) marketLoad(ctx context.Context, partition int, market string, now time.Time) (Load, error) {
+	offset, err := t.readLastOffset(ctx, partition)
+	if err != nil {
+		return Load{}, fmt.Errorf("파티션 %d(마켓 %s) 오프셋 조회 실패: %w", partition, market, err)
+	}
+
+	load := 0.0
+	prev, ok, err := t.loadReading(ctx, market)
+	if err != nil {
+		return Load{}, fmt.Errorf("마켓 %s 이전 측정값 조회 실패: %w", market, err)
+	}
+	if ok {
+		elapsed := now.Sub(time.Unix(0, prev.AtUnix)).Seconds()
+		if elapsed > 0 && offset > prev.Offset {
+			load = float64(offset-prev.Offset) / elapsed
+		}
+	}
+
+	if err := t.saveReading(ctx, market, reading{Offset: offset, AtUnix: now.UnixNano()}); err != nil {
+		return Load{}, fmt.Errorf("마켓 %s 측정값 저장 실패: %w", market, err)
+	}
+	return Load{Market: market, Value: load}, nil
 }
 
 func (t *LoadTracker) readLastOffset(ctx context.Context, partition int) (int64, error) {
