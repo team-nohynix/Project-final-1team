@@ -47,7 +47,12 @@ spec:
                 secretKeyRef:
                   name: recorder-db-secret
                   key: DATABASE_URL
-            - name: S3_TRADE_RESULTS_BUCKET
+            # 실제 코드(recorder/config.go)가 읽는 이름은 ARCHIVE_BUCKET이다 —
+            # S3_TRADE_RESULTS_BUCKET은 존재하지 않는 변수라 recorder가 계속 빈 값으로
+            # 인식해 로컬 ./records로 폴백했고, 컨테이너 안에서 mkdir 권한이 없어
+            # "아카이브 저장 실패" 로그만 남기고 있었다(2026-08-12 실사용 중 발견).
+            # RDS 저장 경로는 이 버그와 무관 — 원본 아카이빙(S3)만 계속 실패해온 것.
+            - name: ARCHIVE_BUCKET
               value: "team1-truss-trade-results"
           resources:
             requests:
