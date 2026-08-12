@@ -228,7 +228,12 @@ resource "aws_iam_role" "sa_collector" {
 
 data "aws_iam_policy_document" "sa_collector_policy" {
   statement {
-    actions   = ["s3:PutObject"]
+    # GetObject — backend/server.go의 fileHandler가 캐시 히트 시 직접 읽어서
+    # 서빙한다(HeadObject 존재 확인 후 미스일 때만 새로 수집). PutObject만 주고
+    # GetObject를 안 줬더니 이미 캐시된 데이터 조회조차 403으로 실패하는 걸
+    # 라이브로 확인했다 — collector가 쓰기 전용이라는 원래 가정이 실제 구현과
+    # 안 맞았다.
+    actions   = ["s3:GetObject", "s3:PutObject"]
     resources = ["${aws_s3_bucket.market_data.arn}/*"]
   }
   statement {
@@ -299,17 +304,37 @@ resource "aws_iam_role_policy" "sa_ai_trader" {
 }
 
 variable "bedrock_model_region" {
-  description = "Bedrock 모델을 실제로 호출하는 리전 — ap-northeast-2 가용 여부 확인 전까지는 us-east-1 기본값"
+  description = "Bedrock 모델을 실제로 호출하는 리전 — ap-northeast-2에서 실제 InvokeModel 성공 확인함(2026-08-12), 크로스 리전 프로파일 불필요"
   type        = string
-  default     = "us-east-1"
+  default     = "ap-northeast-2"
+}
+
+# 2026-08-12에 실측: anthropic.claude-haiku-4-5-20251001-v1:0을 raw model ID로 바로
+# 호출하면 "on-demand throughput isn't supported, use an inference profile"로 거부됨
+# — 이 계정에서 쓸 수 있는 최신 모델들은 온디맨드 직접 호출이 아니라 추론 프로파일을
+# 통해서만 호출 가능하다. apac.anthropic.claude-3-haiku-20240307-v1:0(APAC 추론
+# 프로파일)로 실제 InvokeModel 성공 확인함 — "가장 저렴한 모델" 팀 결정에 부합.
+# 추론 프로파일은 등록된 여러 리전의 파운데이션 모델로 라우팅되므로(aws bedrock
+# get-inference-profile로 실제 확인한 5개 APAC 리전), 프로파일 ARN뿐 아니라 그
+# 리전들의 foundation-model ARN에도 권한이 있어야 한다.
+locals {
+  bedrock_inference_profile_id = "apac.anthropic.claude-3-haiku-20240307-v1:0"
+  bedrock_underlying_model_id  = "anthropic.claude-3-haiku-20240307-v1:0"
+  bedrock_apac_regions = [
+    "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2", "ap-south-1",
+  ]
 }
 
 data "aws_iam_policy_document" "sa_ai_trader_bedrock_policy" {
   statement {
+    actions   = ["bedrock:InvokeModel"]
+    resources = ["arn:aws:bedrock:${var.bedrock_model_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${local.bedrock_inference_profile_id}"]
+  }
+  statement {
     actions = ["bedrock:InvokeModel"]
     resources = [
-      "arn:aws:bedrock:${var.bedrock_model_region}::foundation-model/anthropic.claude-sonnet-5*",
-      "arn:aws:bedrock:${var.bedrock_model_region}::foundation-model/anthropic.claude-haiku-4-5*",
+      for region in local.bedrock_apac_regions :
+      "arn:aws:bedrock:${region}::foundation-model/${local.bedrock_underlying_model_id}"
     ]
   }
 }
