@@ -2,39 +2,19 @@
 import { ref } from 'vue'
 
 const release = ref({
-  version: 'v0.8.4',
-  commit: '8f21a0d',
-  flow: 'dev → staging → production',
-  status: '배포 중',
+  version: '--',
+  commit: '--',
+  flow: '--',
+  status: '상태 확인 전',
 })
 
-const stages = ref([
-  { name: '규격 검사', status: '통과', state: 'done' },
-  { name: '자동 테스트', status: '통과', state: 'done' },
-  { name: '이미지 빌드', status: '통과', state: 'done' },
-  { name: '배포', status: '실행 중', state: 'active' },
-  { name: '배포 검증', status: '대기', state: 'pending' },
-])
+const stages = ref([])
 
-const schemaChecks = ref([
-  { name: 'OpenAPI response schema', result: '통과' },
-  { name: 'Kafka order schema', result: '통과' },
-  { name: 'Kafka execution schema', result: '통과' },
-  { name: 'Replay file schema', result: '통과' },
-  { name: 'Breaking change detection', result: '0 changes' },
-])
+const schemaChecks = ref([])
 
-const environments = ref([
-  { name: 'DEV', cluster: 'truss-dev', pods: '3 pods', color: '#20c8e8' },
-  { name: 'STAGING', cluster: 'truss-stg', pods: '6 pods', color: '#ff9f43' },
-  { name: 'PRODUCTION', cluster: 'truss-prod', pods: '12 pods', color: '#2ed39a' },
-])
+const environments = ref([])
 
-const rollouts = ref([
-  { name: 'matching-engine v0.8.3', progress: '6 pods', status: '종료 준비', state: 'warn' },
-  { name: 'matching-engine v0.8.4', progress: '6 / 12 pods', status: '시작 중', state: 'active' },
-  { name: 'order-api v0.8.4', progress: '4 / 4 pods', status: '정상', state: 'ok' },
-])
+const rollouts = ref([])
 </script>
 
 <template>

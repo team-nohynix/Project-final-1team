@@ -1,35 +1,27 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
-const recordFile = ref('burst-market-20-v3.jsonl')
-const throughput = ref('30000')
-const speed = ref('100×')
-const market = ref('20 KRW markets')
-const pods = ref('4 pods')
+// user-selectable run date (KST day)
+const selectedDate = ref('') // YYYY-MM-DD
 
-const speedOptions = ['1×', '10×', '50×', '100×']
-const marketOptions = ['5 KRW markets', '10 KRW markets', '20 KRW markets']
-const podOptions = ['1 pod', '2 pods', '4 pods', '8 pods']
+// target speed multiplier (numeric)
+const speed = ref(100)
+const speedOptions = [1, 10, 50, 100]
+
+// shardCount replaces pod selection: number of replay shards (1..20)
+const shardCount = ref(1)
 
 const precheckMessage = ref('')
 const startMessage = ref('')
 const errorMessage = ref('')
 
-const graphBars = [8, 12, 18, 22, 26, 24, 30, 28, 32, 34, 30, 26, 24, 20, 18, 22, 26, 28, 30, 34]
-
-const botRatios = [
-  { name: '마켓메이커', value: 52, color: '#3478f6' },
-  { name: '모멘텀 추종', value: 14, color: '#20c8e8' },
-  { name: '평균회귀', value: 13, color: '#2ed39a' },
-  { name: '노이즈', value: 16, color: '#8b5cf6' },
-  { name: '대량 주문자', value: 5, color: '#fbbf24' },
-]
+const graphBars = ref([])
 
 const validate = () => {
   errorMessage.value = ''
-  if (!recordFile.value) return '주문 기록 파일을 입력해주세요'
-  const t = Number(throughput.value)
-  if (!t || Number.isNaN(t) || t <= 0) return '목표 주문 처리량을 올바르게 설정해주세요'
+  if (!selectedDate.value) return '재생할 날짜를 선택해주세요'
+  const sc = Number(shardCount.value)
+  if (!sc || Number.isNaN(sc) || sc < 1 || sc > 20) return '샤드 수는 1~20 사이여야 합니다'
   return ''
 }
 
@@ -42,7 +34,7 @@ const onPrecheck = () => {
     return
   }
   errorMessage.value = ''
-  precheckMessage.value = '사전 점검 완료'
+  precheckMessage.value = '사전 점검 준비 완료 (백엔드 연동 전)'
 }
 
 const onStart = () => {
@@ -54,7 +46,7 @@ const onStart = () => {
     startMessage.value = ''
     return
   }
-  startMessage.value = '더미 재생 요청이 생성되었습니다'
+  startMessage.value = '재생 시작 요청 준비됨 (백엔드 연동 전)'
 }
 </script>
 
@@ -72,34 +64,21 @@ const onStart = () => {
         <p class="panel-sub">성능 비교를 위한 결정적 주문 재생</p>
 
         <div class="form-field">
-          <label>주문 기록 파일</label>
-          <input v-model="recordFile" type="text" />
+          <label>재생 날짜</label>
+          <input v-model="selectedDate" type="date" />
         </div>
 
         <div class="form-field">
-          <label>목표 주문 처리량</label>
-          <input v-model.number="throughput" type="number" />
-        </div>
-
-        <div class="form-field">
-          <label>재생 배속</label>
-          <select v-model="speed">
-            <option v-for="s in speedOptions" :key="s">{{ s }}</option>
+          <label>재생 배속 (속도)</label>
+          <select v-model.number="speed">
+            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
           </select>
         </div>
 
         <div class="form-field">
-          <label>대상 마켓</label>
-          <select v-model="market">
-            <option v-for="m in marketOptions" :key="m">{{ m }}</option>
-          </select>
-        </div>
-
-        <div class="form-field">
-          <label>분산 재생기</label>
-          <select v-model="pods">
-            <option v-for="p in podOptions" :key="p">{{ p }}</option>
-          </select>
+          <label>샤드 수 (shardCount)</label>
+          <input v-model.number="shardCount" type="number" min="1" max="20" />
+          <p class="date-hint">샤드 수는 1~20 사이의 정수입니다. 백엔드 연동 시 shardCount로 전달됩니다.</p>
         </div>
 
         <div class="actions">
@@ -118,35 +97,19 @@ const onStart = () => {
         <h3 class="panel-title">부하 시나리오 미리보기</h3>
         <p class="panel-sub">예상 부하 분포와 검증 기준</p>
 
-        <div class="bar-chart">
-          <div class="bars">
-            <div
-              v-for="(v, idx) in graphBars"
-              :key="idx"
-              class="bar"
-              :class="{ teal: idx >= graphBars.length - 4 }"
-              :style="{ height: v * 3 + 'px' }"
-            ></div>
-          </div>
-        </div>
-
-        <h4 class="section-title">봇별 주문 비율</h4>
-        <div class="ratios">
-          <div v-for="(b, i) in botRatios" :key="i" class="ratio-row">
-            <div class="ratio-label">{{ b.name }}</div>
-            <div class="ratio-bar">
-              <div class="ratio-fill" :style="{ width: b.value + '%', background: b.color }"></div>
-            </div>
-            <div class="ratio-value">{{ b.value }}%</div>
+        <div class="bar-chart placeholder">
+          <div class="empty-center">
+            <strong>시나리오 미리보기: 데이터 연동 예정</strong>
+            <div class="empty-sub">백엔드 연동 전에는 샘플 미리보기만 표시됩니다.</div>
           </div>
         </div>
 
         <div class="status-box">
           <div class="status-left">
             <span class="status-dot"></span>
-            <span>준비 완료</span>
+            <span>상태 확인 전</span>
           </div>
-          <div class="status-right">입력 파일 검증 완료 · 1,800,000 orders</div>
+          <div class="status-right">데이터 연동 예정</div>
         </div>
       </aside>
     </div>

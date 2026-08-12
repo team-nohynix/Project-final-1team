@@ -3,13 +3,17 @@ import { ref, computed, watch } from 'vue'
 
 // Defaults
 const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
-const defaultTotalOrders = 1800000
+// Do not surface large example numbers in the UI; keep sensible internal defaults but show placeholders where appropriate
+const defaultTotalOrders = 0
 const defaultGenerationTime = 60 // seconds
 
 const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 const totalOrders = ref(defaultTotalOrders)
 const generationTime = ref(defaultGenerationTime)
+// 재생 배속 옵션 (프론트에서 선택만 제공)
+const speed = ref(100)
+const speedOptions = [1, 10, 50, 100]
 
 // 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
 const formatDateYYYYMMDD = (date: Date) => {
@@ -61,8 +65,9 @@ const collectionButtonDisabled = computed(() => {
 })
 
 const targetThroughput = computed(() => {
-  const secs = Number(generationTime.value) || 1
+  const secs = Number(generationTime.value) || 0
   const total = Number(totalOrders.value) || 0
+  if (total <= 0 || secs <= 0) return '--'
   const val = Math.round(total / secs)
   return `${val.toLocaleString()} orders/sec`
 })
@@ -77,9 +82,9 @@ const canCreate = computed(() => {
   return true
 })
 
-// 페이퍼 트레이딩 시작 버튼 활성화 조건: 시세 수집 완료 + 필수 입력값 충족
+// 페이퍼 트레이딩 시작 버튼 활성화 조건: 시세 수집 완료 + 날짜 선택
 const canStartPaperTrading = computed(() => {
-  return collectionStatus.value === 'completed' && canCreate.value
+  return collectionStatus.value === 'completed' && !!selectedDate.value
 })
 
 // Types for collect API response
@@ -316,11 +321,11 @@ const reset = () => {
         <div class="form-field two-cols">
           <div>
             <label>목표 주문 수</label>
-            <input v-model.number="totalOrders" type="number" />
+            <div class="readonly-input">--</div>
           </div>
           <div>
             <label>생성 시간 (sec)</label>
-            <input v-model.number="generationTime" type="number" />
+            <div class="readonly-input">--</div>
           </div>
         </div>
 

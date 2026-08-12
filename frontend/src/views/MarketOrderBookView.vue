@@ -280,7 +280,7 @@ const apiBadgeClass = computed(() => {
           </div>
 
           <div class="trades-list">
-            <div class="empty-trades">최근 체결 API 연동 예정</div>
+            <div class="empty-trades">데이터 없음</div>
           </div>
           
         </div>

@@ -3,35 +3,17 @@ import { ref } from 'vue'
 
 const info = ref({ title: '통제된 장애 주입 시험', desc: '실험 환경에서만 장애를 주입하며 데이터 유실·중복·순서 역전을 함께 검사합니다.' })
 
-const faults = ref([
-  { id: 'pod', name: '매칭 엔진 Pod', action: 'pod kill', nfr: 'NFR-11 ≤ 60s', color: '#ff5c5c' },
-  { id: 'node', name: 'Worker Node', action: 'node drain', nfr: 'NFR-12 no loss', color: '#ff9f43' },
-  { id: 'broker', name: 'Kafka 브로커', action: 'broker stop', nfr: 'NFR-12 no loss', color: '#8b5cf6' },
-])
+const faults = ref([])
 
 const activeFault = ref(null as string | null)
 const running = ref(false)
-const progress = ref([
-  { t: 0, name: 'Pod terminated', color: '#ff5c5c' },
-  { t: 8, name: 'K8s reschedule', color: '#ff9f43' },
-  { t: 21, name: 'Replay started', color: '#20c8e8' },
-  { t: 38, name: 'Processing resumed', color: '#2ed39a' },
-])
+const progress = ref([])
 
-const recent = ref([
-  { name: 'Pod kill', result: '38.2 sec', status: '통과' },
-  { name: 'Node drain', result: '51.4 sec', status: '통과' },
-  { name: 'Kafka broker stop', result: '0 loss', status: '통과' },
-])
+const recent = ref([])
 
 const inject = (f: any) => {
-  if (running.value) return
-  const ok = window.confirm('실제 장애를 주입하지 않습니다. 프론트엔드 모의 시험을 실행하시겠습니까?')
-  if (!ok) return
-  activeFault.value = f.id
-  running.value = true
-  // simulate timeline progression
-  setTimeout(() => { running.value = false; recent.value.unshift({ name: f.name, result: '38.0 sec', status: '통과' }); if (recent.value.length>10) recent.value.pop() }, 2000)
+  // disabled: do not run frontend simulations
+  window.alert('실제 장애 주입 시뮬레이션은 비활성화되어 있습니다.')
 }
 </script>
 
@@ -52,7 +34,10 @@ const inject = (f: any) => {
     </div>
 
     <div class="fault-grid">
-      <div v-for="(f,i) in faults" :key="i" class="fault-card">
+      <template v-if="faults.length === 0">
+        <div class="fault-empty">데이터 없음</div>
+      </template>
+      <div v-else v-for="(f,i) in faults" :key="i" class="fault-card">
         <div class="fault-card-head">
           <span class="fault-dot" :style="{ background: f.color }"></span>
           <span class="fault-name">{{ f.name }}</span>
@@ -73,33 +58,39 @@ const inject = (f: any) => {
     <div class="fault-middle">
       <div class="fault-timeline-card">
         <h4 class="card-title">복구 진행 과정</h4>
-        <div class="fault-timeline">
-          <div v-for="(p,i) in progress" :key="i" class="fault-tl-step">
-            <div class="fault-tl-circle" :style="{ background: p.color }">{{ i + 1 }}</div>
-            <div class="fault-tl-time">{{ p.t }}s</div>
-            <div class="fault-tl-name">{{ p.name }}</div>
+          <div class="fault-timeline">
+            <div v-if="progress.length === 0" class="center-msg">데이터 없음</div>
+            <div v-else>
+              <div v-for="(p,i) in progress" :key="i" class="fault-tl-step">
+                <div class="fault-tl-circle" :style="{ background: p.color }">{{ i + 1 }}</div>
+                <div class="fault-tl-time">{{ p.t }}s</div>
+                <div class="fault-tl-name">{{ p.name }}</div>
+              </div>
+            </div>
           </div>
-        </div>
       </div>
 
       <div class="fault-check-card">
         <h4 class="card-title">데이터 정합성 검사</h4>
-        <div class="fault-check-list">
-          <div class="fault-check-row"><div class="fault-check-label">주문 유실</div><div class="fault-check-val ok">0</div></div>
-          <div class="fault-check-row"><div class="fault-check-label">중복 체결</div><div class="fault-check-val ok">0</div></div>
-          <div class="fault-check-row"><div class="fault-check-label">순서 역전</div><div class="fault-check-val ok">0</div></div>
-          <div class="fault-check-row"><div class="fault-check-label">매수·매도 총량 불일치</div><div class="fault-check-val ok">0</div></div>
-        </div>
+          <div class="fault-check-list">
+            <div class="fault-check-row"><div class="fault-check-label">주문 유실</div><div class="fault-check-val">--</div></div>
+            <div class="fault-check-row"><div class="fault-check-label">중복 체결</div><div class="fault-check-val">--</div></div>
+            <div class="fault-check-row"><div class="fault-check-label">순서 역전</div><div class="fault-check-val">--</div></div>
+            <div class="fault-check-row"><div class="fault-check-label">매수·매도 총량 불일치</div><div class="fault-check-val">--</div></div>
+          </div>
       </div>
     </div>
 
-    <div class="fault-recent-card">
+      <div class="fault-recent-card">
       <h4 class="card-title">최근 장애 시험 결과</h4>
-      <div v-for="(r,i) in recent" :key="i" class="fault-recent-row">
-        <div class="fault-recent-name">{{ r.name }}</div>
-        <div class="fault-recent-res">{{ r.result }}</div>
-        <div class="fault-recent-badge"><span class="dot"></span>{{ r.status }}</div>
-      </div>
+        <div v-if="recent.length === 0" class="center-msg">데이터 없음</div>
+        <div v-else>
+          <div v-for="(r,i) in recent" :key="i" class="fault-recent-row">
+            <div class="fault-recent-name">{{ r.name }}</div>
+            <div class="fault-recent-res">{{ r.result }}</div>
+            <div class="fault-recent-badge"><span class="dot"></span>{{ r.status }}</div>
+          </div>
+        </div>
     </div>
   </div>
 </template>
