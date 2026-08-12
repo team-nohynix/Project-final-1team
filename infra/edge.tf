@@ -147,6 +147,21 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
+  # 접수 API ALB — truss-api.jhyang.click로 오리진 도메인을 잡아야 ALB 리스너의
+  # 와일드카드 인증서(*.jhyang.click)로 TLS 검증이 통과한다(ALB의 원 도메인인
+  # *.elb.amazonaws.com으로 잡으면 인증서 불일치로 오리진 커넥션이 실패한다).
+  origin {
+    domain_name = aws_route53_record.api.fqdn
+    origin_id   = "team1-orderapi-alb"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
   default_cache_behavior {
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
@@ -159,19 +174,30 @@ resource "aws_cloudfront_distribution" "frontend" {
         forward = "none"
       }
     }
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_fallback.arn
+    }
   }
 
-  # SPA 새로고침 시 404 대신 index.html로 — 프론트가 클라이언트 라우팅을 쓰는 걸 전제.
-  custom_error_response {
-    error_code         = 403
-    response_code      = 200
-    response_page_path = "/index.html"
-  }
+  # 프론트가 /order-api/*로 부르는 걸 접수 API ALB로 프록시(실제 fetch 호출 확인함) —
+  # 동적 API라 캐시 안 함(CachingDisabled), Idempotency-Key/X-Order-Mode 등 커스텀
+  # 헤더를 다 넘겨야 해서 오리진 요청 정책은 AllViewer(전부 전달)를 쓴다.
+  ordered_cache_behavior {
+    path_pattern           = "/order-api/*"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "team1-orderapi-alb"
+    viewer_protocol_policy = "https-only"
 
-  custom_error_response {
-    error_code         = 404
-    response_code      = 200
-    response_page_path = "/index.html"
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed-CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed-AllViewer
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.strip_order_api_prefix.arn
+    }
   }
 
   restrictions {
@@ -225,6 +251,77 @@ data "aws_iam_policy_document" "frontend_oac" {
 resource "aws_s3_bucket_policy" "frontend" {
   bucket = aws_s3_bucket.frontend.id
   policy = data.aws_iam_policy_document.frontend_oac.json
+}
+
+# --- 접수 API ALB 연결 (Ingress로 이미 만들어진 ALB를 태그로 조회) ----------
+# ALB는 Terraform이 아니라 ALB Controller가 k8s/backend/orderapi-ingress.yaml
+# 적용 시 만든다 — 여기서는 그 ALB를 태그(Ingress의 alb.ingress.kubernetes.io/tags
+# 어노테이션과 값이 같아야 함)로 찾아서 DNS/CloudFront 배관만 잇는다. 프론트가
+# 상대경로 /order-api/*로 호출하므로(frontend/src/views/OrderManagementView.vue 등,
+# 실제 소스 확인함) CloudFront가 그 경로를 이 ALB로 프록시해야 한다 — CloudFront
+# Function으로 /order-api 접두사를 벗겨서 넘긴다.
+
+data "aws_lb" "orderapi" {
+  tags = {
+    Name = "team1-alb-orderapi"
+  }
+}
+
+locals {
+  api_domain = "truss-api.${var.domain_name}"
+}
+
+resource "aws_route53_record" "api" {
+  zone_id = data.aws_route53_zone.team1.zone_id
+  name    = local.api_domain
+  type    = "A"
+
+  alias {
+    name                   = data.aws_lb.orderapi.dns_name
+    zone_id                = data.aws_lb.orderapi.zone_id
+    evaluate_target_health = true
+  }
+}
+
+
+# SPA 클라이언트 라우팅 폴백 — custom_error_response(403/404->200 index.html)
+# 대신 이걸 쓴다. custom_error_response는 배포 전체에 걸려서 어떤 오리진이
+# 낸 404든 다 index.html로 덮어써버리는데, 실제로 /order-api/*의 진짜 404
+# 응답(예: DELETE 존재하지 않는 주문)까지 index.html로 뒤집어씌우는 걸 라이브
+# 테스트로 확인했다 — API 에러 처리가 통째로 깨지는 문제. 오리진에 요청을
+# 보내기 전에 뷰어 요청 단계에서 "정적 파일처럼 안 보이면 index.html로"
+# 미리 재작성하는 방식으로 바꿔서, default_cache_behavior(S3)에만 붙이고
+# /order-api/* 쪽 ordered_cache_behavior는 이 로직을 아예 안 거치게 한다.
+resource "aws_cloudfront_function" "spa_fallback" {
+  name    = "team1-spa-fallback"
+  runtime = "cloudfront-js-2.0"
+  comment = "확장자 없는 경로는 index.html로 (S3 오리진 behavior 전용, API 쪽엔 안 붙임)"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+      var lastSegment = uri.split("/").pop();
+      if (!lastSegment.includes(".")) {
+        request.uri = "/index.html";
+      }
+      return request;
+    }
+  EOT
+}
+
+resource "aws_cloudfront_function" "strip_order_api_prefix" {
+  name    = "team1-strip-order-api-prefix"
+  runtime = "cloudfront-js-2.0"
+  comment = "/order-api/xxx -> /xxx (orderapi 자체 라우트엔 /order-api 접두사가 없음)"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      request.uri = request.uri.replace(/^\/order-api/, "") || "/";
+      return request;
+    }
+  EOT
 }
 
 output "waf_alb_web_acl_arn" {
