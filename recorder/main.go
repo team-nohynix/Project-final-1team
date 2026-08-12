@@ -125,6 +125,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/trace/{orderId}", traceHandler(querier))
 	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
+	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier))
 	go func() {
 		addr := ":" + cfg.Port
 		log.Printf("기록기 조회 API 시작: %s", addr)
