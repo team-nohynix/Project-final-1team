@@ -92,11 +92,16 @@ resource "aws_sns_topic" "alerts" {
   }
 }
 
+# 2026-08-12 실사용 중 발견: RDS는 Aurora가 아닌 Multi-AZ DB 클러스터라 CPUUtilization이
+# DBClusterIdentifier 차원으로는 전혀 발행되지 않고 인스턴스별(DBInstanceIdentifier)로만
+# 나온다 — alb_5xx와 같은 클래스의 버그. cluster_members로 실제 인스턴스 ID를 순회한다.
 resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
-  alarm_name          = "team1-alarm-rds-cpu"
+  for_each = toset(aws_rds_cluster.team1_truss.cluster_members)
+
+  alarm_name          = "team1-alarm-rds-cpu-${each.value}"
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
-  dimensions          = { DBClusterIdentifier = aws_rds_cluster.team1_truss.cluster_identifier }
+  dimensions          = { DBInstanceIdentifier = each.value }
   statistic           = "Average"
   period              = 60
   evaluation_periods  = 5
@@ -105,14 +110,18 @@ resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
 
-  tags = { Team = "team1", Name = "team1-alarm-rds-cpu" }
+  tags = { Team = "team1", Name = "team1-alarm-rds-cpu-${each.value}" }
 }
 
+# 같은 이유: EngineCPUUtilization은 ReplicationGroupId가 아니라 노드 단위
+# CacheClusterId 차원으로 발행된다. member_clusters로 실제 노드 ID를 순회한다.
 resource "aws_cloudwatch_metric_alarm" "redis_cpu" {
-  alarm_name          = "team1-alarm-redis-cpu"
+  for_each = toset(aws_elasticache_replication_group.team1_redis.member_clusters)
+
+  alarm_name          = "team1-alarm-redis-cpu-${each.value}"
   namespace           = "AWS/ElastiCache"
   metric_name         = "EngineCPUUtilization"
-  dimensions          = { ReplicationGroupId = aws_elasticache_replication_group.team1_redis.replication_group_id }
+  dimensions          = { CacheClusterId = each.value }
   statistic           = "Average"
   period              = 60
   evaluation_periods  = 5
@@ -121,7 +130,7 @@ resource "aws_cloudwatch_metric_alarm" "redis_cpu" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
 
-  tags = { Team = "team1", Name = "team1-alarm-redis-cpu" }
+  tags = { Team = "team1", Name = "team1-alarm-redis-cpu-${each.value}" }
 }
 
 # MSK Serverless는 브로커 단위 지표가 없어 클러스터 단위 컨슈머 그룹 랙으로 건강도를 본다.
