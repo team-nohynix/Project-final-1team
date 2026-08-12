@@ -1,0 +1,35 @@
+# 시세 수집기(backend, CLAUDE.md의 backend/) 퍼블릭 노출 — 프론트가 /order-api
+# 접두사 없이 /v1/collect, /v1/markets/*를 그대로(같은 오리진 루트로) 호출하는 걸
+# 실제 소스(AITraderView.vue, MarketStreamView.vue)로 확인해서, orderapi와는
+# 별도 ALB로 만든다(이미 정상 동작 중인 orderapi Ingress를 IngressGroup으로
+# 합치면서 건드리는 리스크를 피함). 헬스체크는 backend에 전용 헬스엔드포인트가
+# 없어서, 인증 없이 200을 주는 실제 GET /v1/markets/data?date=... 를 쓴다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: backend
+  namespace: collector
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/security-groups: sg-086268e229a37b879
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:727646470302:certificate/9085e196-5c96-4d18-9214-315810d902e6
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-northeast-2:727646470302:regional/webacl/team1-waf-alb/afea7efb-02c0-4262-a373-564cd1c565a4
+    alb.ingress.kubernetes.io/healthcheck-path: /v1/markets/data?date=2026-08-11
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/tags: Team=team1,Name=team1-alb-collector
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
