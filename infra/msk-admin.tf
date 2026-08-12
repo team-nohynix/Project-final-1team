@@ -38,6 +38,9 @@ data "aws_iam_policy_document" "sa_kafka_admin_policy" {
       "kafka-cluster:CreateTopic",
       "kafka-cluster:DescribeTopic",
       "kafka-cluster:AlterTopic",
+      # DeleteTopic — 배포 초기 진단용 더미 메시지를 넣은 토픽을 지우고 재생성하는 데 필요
+      # (운영 중 데이터 있는 토픽엔 쓰지 않을 것).
+      "kafka-cluster:DeleteTopic",
     ]
     resources = ["${local.msk_topic_arn_prefix}/*"]
   }

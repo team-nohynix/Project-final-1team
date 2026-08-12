@@ -39,12 +39,25 @@ resource "aws_iam_role" "sa_ingest_api" {
 
 data "aws_iam_policy_document" "sa_ingest_api_policy" {
   statement {
-    actions   = ["kafka-cluster:Connect"]
+    # WriteDataIdempotently — Kafka 3.0+ 클라이언트는 기본으로 producer idempotence를 켜는데,
+    # 이 경우 MSK IAM은 토픽 단위 WriteData와 별개로 클러스터 단위 이 권한을 요구한다
+    # (실제로 없으면 ClusterAuthorizationException, 클라이언트 쪽엔 EOF로 나타남 — 실행해보고 발견).
+    actions   = ["kafka-cluster:Connect", "kafka-cluster:WriteDataIdempotently"]
     resources = [aws_msk_serverless_cluster.team1_truss.arn]
   }
   statement {
     actions   = ["kafka-cluster:WriteData", "kafka-cluster:DescribeTopic"]
     resources = ["${local.msk_topic_arn_prefix}/orders"]
+  }
+  statement {
+    # executions — 체결 결과를 접수 API가 되읽어 응답에 반영하는 걸 실제 구동 로그로 발견
+    # (문서엔 "발행만"으로 적혀 있었으나 컨슈머 그룹도 붙는다).
+    actions   = ["kafka-cluster:ReadData", "kafka-cluster:DescribeTopic"]
+    resources = ["${local.msk_topic_arn_prefix}/executions"]
+  }
+  statement {
+    actions   = ["kafka-cluster:AlterGroup", "kafka-cluster:DescribeGroup"]
+    resources = ["${local.msk_group_arn_prefix}/*"]
   }
   statement {
     actions   = ["sqs:SendMessage"]
@@ -89,7 +102,8 @@ resource "aws_iam_role" "sa_matching_engine" {
 
 data "aws_iam_policy_document" "sa_matching_engine_policy" {
   statement {
-    actions   = ["kafka-cluster:Connect"]
+    # WriteDataIdempotently — 위 sa_ingest_api와 동일한 이유 (Kafka 3.0+ 기본 idempotent producer).
+    actions   = ["kafka-cluster:Connect", "kafka-cluster:WriteDataIdempotently"]
     resources = [aws_msk_serverless_cluster.team1_truss.arn]
   }
   statement {
@@ -97,6 +111,9 @@ data "aws_iam_policy_document" "sa_matching_engine_policy" {
     resources = [
       "${local.msk_topic_arn_prefix}/orders",
       "${local.msk_topic_arn_prefix}/executions",
+      # assignments — 마켓 재분배 조율용, 매칭 엔진 실제 구동 로그로 확인된 세 번째 토픽
+      # (문서엔 없었음, 실행해보고 발견).
+      "${local.msk_topic_arn_prefix}/assignments",
     ]
   }
   statement {
@@ -147,8 +164,14 @@ data "aws_iam_policy_document" "sa_recorder_policy" {
     resources = [aws_msk_serverless_cluster.team1_truss.arn]
   }
   statement {
-    actions   = ["kafka-cluster:ReadData", "kafka-cluster:DescribeTopic"]
-    resources = ["${local.msk_topic_arn_prefix}/executions"]
+    actions = ["kafka-cluster:ReadData", "kafka-cluster:DescribeTopic"]
+    resources = [
+      "${local.msk_topic_arn_prefix}/executions",
+      # orders, assignments — recorder 실제 구동 로그로 확인됨 (executions 하나로 부족,
+      # 세 토픽 모두 구독한다).
+      "${local.msk_topic_arn_prefix}/orders",
+      "${local.msk_topic_arn_prefix}/assignments",
+    ]
   }
   statement {
     actions   = ["kafka-cluster:AlterGroup", "kafka-cluster:DescribeGroup"]

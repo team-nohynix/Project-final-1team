@@ -273,6 +273,18 @@ resource "aws_security_group" "team1_sg_vpc_endpoints" {
     ]
   }
 
+  ingress {
+    # Fargate 파드는 우리가 만든 team1_sg_eks_cluster가 아니라 EKS가 자동 생성하는
+    # 클러스터 SG(eks-cluster-sg-team1-eks-*)를 쓴다 — root 스택 리소스라 여기(network 스택)서
+    # SG ID로 참조하면 순환 의존이 생겨서, VPC 전체 CIDR로 대신 허용한다(실제 ECR 이미지 pull
+    # i/o timeout으로 발견).
+    description = "whole VPC CIDR (covers Fargate pods, which use the EKS auto-created cluster SG)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.team1_vpc.cidr_block]
+  }
+
   egress {
     description = "allow all outbound"
     from_port   = 0
