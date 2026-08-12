@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"log"
+	"net/http"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -14,6 +15,7 @@ import (
 	"recorder/backpressure"
 	"recorder/events"
 	rkafka "recorder/kafka"
+	"recorder/query"
 	"recorder/store"
 )
 
@@ -115,6 +117,19 @@ func main() {
 		CheckInterval: backpressureCheckInterval,
 	}
 	go watcher.Run(ctx)
+
+	// 조회 전용 HTTP 서버(2026-08-12 추가, docs/frontend-backend-integration.md
+	// 참고) — 기록기가 이미 RDS에 쌓아둔 데이터를 읽기만 하고, Kafka 컨슈머
+	// 루프와는 완전히 독립적으로 별도 고루틴에서 돕니다.
+	querier := query.NewMySQLQuerier(db)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/trace/{orderId}", traceHandler(querier))
+	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
+	go func() {
+		addr := ":" + cfg.Port
+		log.Printf("기록기 조회 API 시작: %s", addr)
+		log.Fatal(http.ListenAndServe(addr, mux))
+	}()
 
 	archiveDest := cfg.ArchiveBucket
 	if archiveDest == "" {

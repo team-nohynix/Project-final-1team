@@ -9,6 +9,7 @@ import (
 
 // Config는 기록기 실행에 필요한 환경변수를 담습니다.
 type Config struct {
+	Port             string
 	KafkaBroker      string
 	OrdersTopic      string
 	ExecutionsTopic  string
@@ -32,6 +33,14 @@ type Config struct {
 func LoadConfig() Config {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("'.env' 파일을 찾지 못했습니다 (prod 환경이라면 정상): %v", err)
+	}
+
+	// PORT는 조회 전용 HTTP 서버(GET /v1/trace/{orderId}, GET /v1/matching/engines
+	// — 2026-08-12 추가, docs/frontend-backend-integration.md 참고)가 리슨할
+	// 포트입니다. backend(8080)/orderapi(8081)와 겹치지 않는 값을 기본값으로 둡니다.
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8082"
 	}
 
 	broker := os.Getenv("KAFKA_BROKER")
@@ -74,6 +83,7 @@ func LoadConfig() Config {
 	kafkaUseIAMAuth := os.Getenv("KAFKA_USE_IAM_AUTH") == "true"
 
 	return Config{
+		Port:             port,
 		KafkaBroker:      broker,
 		OrdersTopic:      ordersTopic,
 		ExecutionsTopic:  executionsTopic,

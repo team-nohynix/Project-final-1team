@@ -16,4 +16,5 @@ COPY --from=build /out/recorder /app/recorder
 # 이나 `docker cp`로 꺼내 바로 적용할 수 있게 하기 위함입니다.
 COPY --from=build /src/schema.sql /app/schema.sql
 USER appuser
+EXPOSE 8082
 ENTRYPOINT ["/app/recorder"]
