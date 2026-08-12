@@ -114,6 +114,13 @@ func NewMySQLStore(db *sql.DB) *MySQLStore {
 // 이미 있는 행은(재전달 등) INSERT IGNORE가 그 행만 조용히 무시합니다 —
 // 여러 행을 한 문장에 묶어도 IGNORE는 행 단위로 적용되므로 한 건이 중복이라고
 // 나머지 건까지 실패하지 않습니다.
+//
+// INSERT 직후 reconcilePreexistingFills를 항상 호출합니다(2026-08-12 실사용
+// 검증 중 발견한 버그 수정) — orders/executions를 독립된 배치로 소비하다 보니
+// 이 주문에 대한 체결이 이 INSERT보다 먼저 recorder에 도착해 있을 수 있는데,
+// 그때 updateFill은 order_id를 못 찾아(found=false) 그냥 넘어가고, execution
+// 행 자체는 저장되지만 trade_order 쪽엔 그 체결의 효과가 영영 반영되지
+// 않았습니다. 아래 함수 주석 참고.
 func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) error {
 	if len(orders) == 0 {
 		return nil
@@ -124,6 +131,7 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) e
 		(order_id, client_request_id, market_code, side, price, quantity, remaining_quantity, status, mode, submitted_at, source_order_id)
 		VALUES `)
 	args := make([]any, 0, len(orders)*10)
+	orderIDs := make([]string, len(orders))
 	for i, o := range orders {
 		if i > 0 {
 			sb.WriteString(",")
@@ -135,14 +143,104 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) e
 			return fmt.Errorf("주문 일괄 저장 실패 (orderId=%s): %w", o.OrderID, err)
 		}
 		args = append(args, o.OrderID, nullIfEmpty(o.ClientRequestID), o.Market, o.Side, o.Price, o.Quantity, o.Quantity, o.Mode, submittedAt, nullIfEmpty(o.SourceOrderID))
+		orderIDs[i] = o.OrderID
 	}
 
 	return withRetryOnDeadlock(func() error {
-		if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("주문 일괄 저장 실패: %w", err)
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
 			return fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(orders), err)
+		}
+		if err := reconcilePreexistingFills(ctx, tx, orderIDs); err != nil {
+			return fmt.Errorf("선도착 체결 반영 실패: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("주문 일괄 저장 실패 (커밋): %w", err)
 		}
 		return nil
 	})
+}
+
+// reconcilePreexistingFills는 이 배치의 order_id들에 대해 execution 테이블에
+// 이미 쌓여 있는 체결이 있으면 그 총량을 trade_order에 반영합니다.
+//
+// 왜 이게 안전한가(멱등) — execution 테이블은 updateFill이 order_id를
+// 찾았는지와 무관하게 항상 그 행을 저장합니다(ApplyExecutionsBatch,
+// FR-09 검증 기준 "발행 건수와 저장 건수가 일치"). 그래서
+// quantity - SUM(이 주문이 buy_order_id 또는 sell_order_id인 execution.quantity)
+// 는 그 주문의 remaining_quantity가 실제로 얼마여야 하는지에 대한 절대값이자
+// 유일하게 진실인 값입니다 — updateFill이 이미 정확히 반영해둔 주문을 다시
+// 계산해도 같은 값이 나오므로, 매 InsertOrdersBatch 호출마다(주문이 실제로
+// 새로 INSERT됐든 INSERT IGNORE로 스킵된 재전달이든) 무조건 호출해도
+// 안전합니다. 한 주문은 항상 한쪽 side로만 고정되므로(BUY 주문이 나중에
+// sell_order_id로 나타날 수 없음) 두 IN 목록에 같은 주문이 동시에 매치되는
+// 경우는 없습니다.
+//
+// status/canceled_at 갱신 로직은 updateFill과 동일한 우선순위를 씁니다 —
+// 이번 반영으로 완전 체결이 확정되면 기존 CANCELED를 정정하고, 아니면 기존
+// CANCELED를 보존합니다(주석 위치는 updateFill 정의부 참고).
+func reconcilePreexistingFills(ctx context.Context, tx *sql.Tx, orderIDs []string) error {
+	if len(orderIDs) == 0 {
+		return nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(orderIDs)), ",")
+	args := make([]any, 0, len(orderIDs)*2)
+	for _, id := range orderIDs {
+		args = append(args, id)
+	}
+	args = append(args, args...) // 아래 두 IN(...) 절 각각에 같은 목록이 필요
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT order_id, SUM(qty) FROM (
+			SELECT buy_order_id AS order_id, quantity AS qty FROM execution WHERE buy_order_id IN (%s)
+			UNION ALL
+			SELECT sell_order_id AS order_id, quantity AS qty FROM execution WHERE sell_order_id IN (%s)
+		) matched
+		GROUP BY order_id
+	`, placeholders, placeholders), args...)
+	if err != nil {
+		return fmt.Errorf("선도착 체결 조회 실패: %w", err)
+	}
+
+	type fill struct{ orderID, total string }
+	var fills []fill
+	for rows.Next() {
+		var f fill
+		if err := rows.Scan(&f.orderID, &f.total); err != nil {
+			rows.Close()
+			return fmt.Errorf("선도착 체결 조회 실패: %w", err)
+		}
+		fills = append(fills, f)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("선도착 체결 조회 실패: %w", err)
+	}
+	rows.Close()
+
+	for _, f := range fills {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE trade_order
+			SET remaining_quantity = quantity - ?,
+			    status = CASE
+			        WHEN quantity - ? <= 0 THEN 'FILLED'
+			        WHEN status = 'CANCELED' THEN 'CANCELED'
+			        ELSE 'PARTIALLY_FILLED'
+			    END,
+			    canceled_at = CASE WHEN quantity - ? <= 0 THEN NULL ELSE canceled_at END
+			WHERE order_id = ?
+		`, f.total, f.total, f.total, f.orderID); err != nil {
+			return fmt.Errorf("선도착 체결 반영 실패 (orderId=%s): %w", f.orderID, err)
+		}
+	}
+	return nil
 }
 
 // CancelOrdersBatch는 취소 여러 건을 한 트랜잭션(=한 번의 커밋) 안에서
