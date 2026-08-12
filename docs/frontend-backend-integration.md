@@ -14,7 +14,6 @@
 
 | 프론트 화면 | 프론트가 보내는 요청 | 실제 백엔드 | 확인 결과 |
 |---|---|---|---|
-| `AITraderView.vue` (시세 수집) | `POST /v1/collect` `{date}` | `backend`의 `POST /v1/collect` | 응답 필드(`date`,`range`,`results[].market/status/batchPath/streamPath/error`)까지 정확히 일치 |
 | `MarketStreamView.vue` | `GET /v1/markets/data?date=` | `backend`의 `GET /v1/markets/data` | 필드 일치 (`markets[].market/batchUrl/streamUrl`) |
 | `MarketStreamView.vue` | `GET /v1/markets/{market}/batch?date=` | `backend`의 `GET /v1/markets/{market}/{kind}` | 필드 일치 |
 | `MarketStreamView.vue` | `GET /v1/markets/{market}/stream?date=` | 〃 | 필드 일치 |
@@ -45,6 +44,14 @@
 **막는 문제 — 이 폼엔 `date` 필드 자체가 없다.** 실제 재생 API는 `date`(YYYY-MM-DD)로 그날 `trader`가 기록해둔 주문 파일을 찾는데, 지금 `recordFile`/`throughput`/`market` 필드 중 날짜에 대응하는 게 없다. **이 폼에 날짜 선택 필드를 추가하지 않으면 진짜 요청 자체를 완성할 수 없다** — 단순 필드 매핑 문제가 아니라 누락된 입력 하나를 새로 추가해야 하는 문제다.
 
 **`pods`(1/2/4/8) 선택지는 백엔드 제약이 아니라 프론트에서 임의로 고른 값이다.** `replayengine`의 샤딩 로직(`i % shardCount == shardIndex`, 대상 마켓 20개)은 1 이상이면 전부 유효하다 — 1~20 사이 어떤 정수든 된다. 20을 넘기면 21번째부터는 담당할 마켓이 안 남아서 그 파드는 그냥 아무 일도 안 하고 끝난다(에러는 아니고 낭비). 그러니 실질적으로 의미 있는 범위는 **1~20**이고, `pods` 드롭다운을 1/2/4/8 네 개로 제한할 이유는 백엔드 쪽엔 없다 — 자유 입력(1~20)으로 바꿔도 무방하다.
+
+### 2.4 `POST /v1/collect` (시세 수집) — **2026-08-12에 응답 방식이 바뀜, 프론트 쪽 수정 필요**
+원래는 요청 하나로 20개 마켓 전체를 다 수집하고 끝나면 200으로 결과를 바로 돌려주는 구조였다. 그런데 실제 배포 환경에서 하루치 수집이 193초 걸리는 게 확인됐고, CloudFront의 오리진 응답 대기 한계(180초, 늘릴 수 없는 값)를 넘겨서 504가 났다(팀원이 실제로 재현). 그래서 응답 패턴을 바꿨다:
+
+- `POST /v1/collect`가 이제 **202**를 즉시 돌려준다: `{"jobId": "...", "date": "...", "range": {...}, "status": "IN_PROGRESS"}` — 예전처럼 `results`가 바로 오지 않는다.
+- 실제 수집은 백그라운드에서 진행되고, `GET /v1/collect/{jobId}`로 상태를 조회해야 한다 — 완료되면 `status: "COMPLETED"`와 함께 예전에 동기 응답으로 주던 것과 같은 `results` 배열이 온다.
+
+**`AITraderView.vue`가 지금 하는 방식(요청 보내고 응답이 오면 바로 결과 처리)은 더 이상 안 맞는다** — 이 화면은 폴링 로직으로 바꿔야 한다(예: `setInterval`로 몇 초마다 `GET /v1/collect/{jobId}`를 불러서 `status`가 `COMPLETED`가 될 때까지 기다림). 이번 세션에서는 사용자 요청으로 **서버 쪽만 고쳤고 프론트는 그대로 뒀다** — 4.5에 실제 요청/응답 예시를 남겨뒀으니 그걸 보고 프론트 쪽을 고치면 된다.
 
 ## 3. 아예 없는 것 — 백엔드에 새로 만들어야 함
 
@@ -186,10 +193,45 @@ GET /v1/trace/ord_20260812_0000001
 ```
 지금 담당 중인(`released_at IS NULL`) 배정만 나온다 — 매칭 엔진이 없으면(아직 아무 마켓도 안 배정됐거나 전부 반납됐으면) `engines`가 빈 배열로 온다. 이 역시 실제 로컬 환경으로 확인함. 매칭 단계/오더북 복구 진행률/체결 내역은 이 엔드포인트에 없다 — 3.3 참고.
 
+### 4.5 시세 수집(비동기) — `POST /v1/collect` + `GET /v1/collect/{jobId}` (2026-08-12 응답 방식 변경)
+
+```bash
+curl -X POST http://<backend>/v1/collect -H "Content-Type: application/json" -d '{"date":"2026-07-27"}'
+```
+```json
+{
+  "jobId": "job_5872688b79c4b6070671fc5a486aea34",
+  "date": "2026-07-27",
+  "range": { "start": "2026-07-27T00:00:00+09:00", "end": "2026-07-28T00:00:00+09:00" },
+  "status": "IN_PROGRESS"
+}
+```
+(202 Accepted, 즉시 응답 — 실측 0.4초 이내. 이 응답엔 `results`가 없다.)
+
+```bash
+curl http://<backend>/v1/collect/job_5872688b79c4b6070671fc5a486aea34
+```
+진행 중이면:
+```json
+{ "jobId": "job_...", "date": "2026-07-27", "range": {...}, "status": "IN_PROGRESS" }
+```
+끝나면(`results`가 예전 동기 응답과 같은 모양으로 채워짐):
+```json
+{
+  "jobId": "job_...", "date": "2026-07-27", "range": {...}, "status": "COMPLETED",
+  "results": [
+    { "market": "KRW-BTC", "status": "ok", "batchPath": "...", "streamPath": "..." },
+    { "market": "KRW-USDT", "status": "error", "error": "..." }
+  ]
+}
+```
+모르는 `jobId`면 404. **프론트는 202를 받으면 `jobId`를 저장해두고, `status`가 `COMPLETED`가 될 때까지 몇 초 간격으로 이 상태 조회 엔드포인트를 폴링해야 한다** — 예전처럼 `POST /v1/collect`의 응답 자체에서 결과를 바로 꺼내 쓰면 안 된다(2.4 참고). job 상태는 메모리에만 있어서 `backend`가 재시작되면 사라진다 — 재시작 중에 폴링하던 요청은 404를 받게 되니, 프론트 쪽에서 이 경우도 처리해두면 좋다.
+
 ## 요약
 
-- **바로 연결 가능**: 시세 수집/조회, 호가창 조회, 주문 접수/취소 (6개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
+- **바로 연결 가능**: 시세 조회, 호가창 조회, 주문 접수/취소 (5개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
 - **필드만 고치면 됨**: 페이퍼 트레이딩 시작, 재생 시작 (실제 시작 엔드포인트는 이미 있음 — `POST /v1/jobs`)
+- **응답 방식이 바뀜, 프론트 수정 필요**: 시세 수집(`POST /v1/collect`) — 동기 200에서 비동기 202+폴링으로 바뀜(2.4/4.5 참고), 서버 쪽은 이미 반영됨
 - **2026-08-12에 새로 생김**: 트레이스 조회(`GET /v1/trace/{orderId}`), 매칭 엔진 목록(`GET /v1/matching/engines`) — 둘 다 `recorder`, 응답 모양은 프론트 목업과 다르니 화면 쪽 재설계 필요(4.3/4.4 참고)
 - **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
 - **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성

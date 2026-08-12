@@ -12,8 +12,11 @@ func main() {
 	cfg := config.Load()
 	storage := newStorage(cfg)
 
+	jobs := newCollectJobStore()
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/collect", collectHandler(storage))
+	mux.HandleFunc("POST /v1/collect", collectHandler(storage, jobs, collectAllMarkets))
+	mux.HandleFunc("GET /v1/collect/{jobId}", collectStatusHandler(jobs))
 	mux.HandleFunc("GET /v1/markets/data", manifestHandler())
 	mux.HandleFunc("GET /v1/markets/{market}/{kind}", fileHandler(storage))
 
