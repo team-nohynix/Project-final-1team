@@ -42,6 +42,15 @@ spec:
                 name: recorder
                 port:
                   number: 8082
+          # 대시보드 실시간 지표(docs/frontend-backend-integration.md 3.1,
+          # GET /v1/metrics/dashboard) — 2026-08-12 추가, 위 두 경로와 같은 이유.
+          - path: /v1/metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
           - path: /
             pathType: Prefix
             backend:
