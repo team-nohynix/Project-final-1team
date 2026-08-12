@@ -14,9 +14,13 @@ import (
 	"recorder/idgen"
 )
 
-// isoLayout은 이 repo 전체가 쓰는 ISO-8601 UTC ms-정밀도 시각 형식입니다
+// ISOLayout은 이 repo 전체가 쓰는 ISO-8601 UTC ms-정밀도 시각 형식입니다
 // (orderapi/server.go의 nowISO(), matching/kafkaclient/assignment_producer.go).
-const isoLayout = "2006-01-02T15:04:05.000Z"
+// query 패키지도 DB에서 읽은 time.Time을 같은 형식의 문자열로 되돌릴 때 이 값을
+// 그대로 씁니다 — recorder 모듈 안에서는 굳이 같은 상수를 또 선언하지 않습니다
+// (모듈 간 재선언 원칙은 이 repo의 서로 다른 Go 모듈 사이에만 적용되는 것이고,
+// 같은 모듈의 두 패키지가 상수 하나를 공유하는 건 평범한 Go 관례입니다).
+const ISOLayout = "2006-01-02T15:04:05.000Z"
 
 // parseTimestamp는 위 형식의 문자열을 time.Time으로 바꿉니다 — go-sql-driver/mysql은
 // DATETIME 컬럼에 문자열을 그대로 바인딩하면 안 됩니다(MySQL 자체 DATETIME
@@ -24,7 +28,7 @@ const isoLayout = "2006-01-02T15:04:05.000Z"
 // 넘기면 "Incorrect datetime value" 에러가 납니다, 실제 검증 중 발견). time.Time
 // 값으로 바인딩하면 드라이버가 올바르게 변환해줍니다.
 func parseTimestamp(s string) (time.Time, error) {
-	t, err := time.Parse(isoLayout, s)
+	t, err := time.Parse(ISOLayout, s)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("시각 파싱 실패 (%q): %w", s, err)
 	}

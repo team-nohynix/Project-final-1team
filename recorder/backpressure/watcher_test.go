@@ -57,4 +57,3 @@ func TestMaxLagNoSourcesIsZero(t *testing.T) {
 		t.Errorf("maxLag() = %d, want 0", got)
 	}
 }
-
