@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"backend/dataset"
+	"backend/upbit"
 )
 
 func newCollectStatusRequest(jobID string) *http.Request {
@@ -26,8 +27,9 @@ func TestCollectHandlerAsyncFlow(t *testing.T) {
 	proceed := make(chan struct{})
 	fakeResults := []CollectResult{{Market: "KRW-BTC", Status: "ok", BatchPath: "fake://batch"}}
 
-	fakeCollect := func(storage dataset.Storage, start, end time.Time) []CollectResult {
+	fakeCollect := func(storage dataset.Storage, start, end time.Time, onProgress func()) []CollectResult {
 		<-proceed
+		onProgress()
 		return fakeResults
 	}
 
@@ -51,8 +53,12 @@ func TestCollectHandlerAsyncFlow(t *testing.T) {
 	if accepted.Date != "2026-07-27" {
 		t.Errorf("date = %q, want 2026-07-27", accepted.Date)
 	}
+	if accepted.Total != len(upbit.TargetMarkets) {
+		t.Errorf("total = %d, want %d", accepted.Total, len(upbit.TargetMarkets))
+	}
 
-	// collect가 아직 채널에서 막혀 있으므로, 이 시점에 조회하면 반드시 IN_PROGRESS다.
+	// collect가 아직 채널에서 막혀 있으므로, 이 시점에 조회하면 반드시 IN_PROGRESS고
+	// 아직 onProgress도 안 불렸으므로 completed는 0이다.
 	statusRec := httptest.NewRecorder()
 	collectStatusHandler(jobs)(statusRec, newCollectStatusRequest(accepted.JobID))
 	var polled collectJob
@@ -61,6 +67,9 @@ func TestCollectHandlerAsyncFlow(t *testing.T) {
 	}
 	if polled.Status != collectStatusInProgress {
 		t.Fatalf("완료 전 폴링 status = %q, want %q", polled.Status, collectStatusInProgress)
+	}
+	if polled.Completed != 0 {
+		t.Fatalf("완료 전인데 completed = %d, want 0", polled.Completed)
 	}
 	if len(polled.Results) != 0 {
 		t.Fatalf("완료 전인데 results가 채워짐: %+v", polled.Results)
@@ -87,11 +96,14 @@ func TestCollectHandlerAsyncFlow(t *testing.T) {
 	if len(final.Results) != 1 || final.Results[0].Market != "KRW-BTC" {
 		t.Fatalf("unexpected results: %+v", final.Results)
 	}
+	if final.Completed != 1 {
+		t.Fatalf("completed = %d, want 1", final.Completed)
+	}
 }
 
 func TestCollectHandlerRejectsInvalidDate(t *testing.T) {
 	jobs := newCollectJobStore()
-	fakeCollect := func(storage dataset.Storage, start, end time.Time) []CollectResult { return nil }
+	fakeCollect := func(storage dataset.Storage, start, end time.Time, onProgress func()) []CollectResult { return nil }
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/collect", strings.NewReader(`{"date":"invalid"}`))
 	rec := httptest.NewRecorder()
