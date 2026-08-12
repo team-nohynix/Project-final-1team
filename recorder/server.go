@@ -62,3 +62,20 @@ func enginesHandler(q query.Querier) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, map[string][]query.EngineAssignment{"engines": engines})
 	}
 }
+
+// dashboardMetricsHandler는 GET /v1/metrics/dashboard를 처리합니다 — 프론트
+// DashboardView의 실시간 지표(docs/frontend-backend-integration.md 3.1: 접수
+// TPS/체결 TPS/처리 대기 주문/전체 처리 P99/실행 중인 Pod 수/처리량 라인
+// 차트)를 지원합니다. 계산 방식과 근사치의 한계는 query.DashboardMetrics의
+// 타입 주석 참고.
+func dashboardMetricsHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		metrics, err := q.DashboardMetrics(r.Context())
+		if err != nil {
+			log.Printf("대시보드 지표 조회 실패: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "대시보드 지표 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, metrics)
+	}
+}
