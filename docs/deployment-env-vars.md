@@ -12,7 +12,7 @@
 
 ## 관련 문서
 - [CLAUDE.md](../CLAUDE.md) — 각 모듈의 Commands/Architecture 섹션에 있는 원본 설명
-- [인프라 배치 설계](infra-placement-design.md) — 이 값들이 실제로 어디(MSK/RDS/ElastiCache 등)를 가리켜야 하는지
+- [truss-architecture.html](truss-architecture.html) — 이 값들이 실제로 어디(MSK/RDS/ElastiCache 등)를 가리켜야 하는지, 전체 아키텍처
 
 이 문서는 **각 모듈의 `config.go`/`main.go`를 직접 읽고 정리한 것**이라 CLAUDE.md의 서술형 설명보다 이 값들 자체를 빠르게 확인하고 싶을 때 쓰는 표 위주 참조 문서다. 로컬 개발용 `.env` 값(예: `localhost:9092`)이 아니라 **AWS에 배포할 때 채워야 하는 실제 값의 형태**를 기준으로 적었다.
 
@@ -86,7 +86,7 @@ CLI 플래그 없음. 인스턴스를 몇 개 띄우든(FR-11) 전부 같은 값
 |---|---|---|---|
 | `BACKEND_URL` | **필수** | — | 시세 수집기(`backend`) 엔드포인트 |
 | `ORDERAPI_URL` | **필수** | — | `orderapi` 엔드포인트 |
-| `BEDROCK_REGION` | **필수** (2026-08-10 추가) | — | Bedrock을 실제로 호출할 리전 — `ap-northeast-2`가 될지 크로스 리전 프로파일이 필요해 다른 리전이 될지 인프라 쪽에서 확인 필요([인프라 배치 설계 7장](infra-placement-design.md) 참고 |
+| `BEDROCK_REGION` | **필수** (2026-08-10 추가) | — | Bedrock을 실제로 호출할 리전 — `ap-northeast-2`가 될지 크로스 리전 프로파일이 필요해 다른 리전이 될지 인프라 쪽에서 확인 필요 |
 | `BEDROCK_MODEL_ID` | **필수** (2026-08-10 추가) | — | Bedrock 콘솔에서 실제로 활성화한 모델 ID(또는 추론 프로파일 ID). 코드에 하드코딩 안 함 — 모델을 바꿔도 이 값만 바꾸면 됨 |
 
 CLI 플래그(연결 정보가 아니라 실행 파라미터라 플래그로 유지):
