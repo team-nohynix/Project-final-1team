@@ -12,7 +12,6 @@ const updateOpenMenu = () => {
   if (p === '/' || p === '') openMenu.value = 'overview'
   else if (p.startsWith('/load-test')) openMenu.value = 'loadtest'
   else if (
-    p.startsWith('/orders') ||
     p.startsWith('/matching-engine') ||
     p.startsWith('/market-orderbook')
   )
@@ -71,16 +70,6 @@ const isActive = (path) => route.path === path
         </button>
 
         <div v-if="openMenu === 'trading'" class="submenu">
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/orders') }"
-            type="button"
-            @click.prevent="go('/orders')"
-          >
-            <span class="menu-dot"></span>
-            주문 API 검증
-          </button>
-
           <button
             class="submenu-item"
             :class="{ selected: isActive('/matching-engine') }"
