@@ -17,6 +17,7 @@ type Config struct {
 	RedisAddr        string
 	RedisPassword    string
 	RedisTLSEnabled  bool
+	MetricsPort      string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -64,6 +65,16 @@ func LoadConfig() Config {
 	// 이유(2026-08-11, SCRAM에서 IAM으로 교체 — CLAUDE.md 참고).
 	kafkaUseIAMAuth := os.Getenv("KAFKA_USE_IAM_AUTH") == "true"
 
+	// METRICS_PORT는 선택 — /metrics(Prometheus 텍스트 노출 포맷)가 이 인스턴스가
+	// 담당 중인 파티션들의 컨슈머 랙 합계(GroupConsumer.Lag, 백프레셔 플래그와 같은
+	// 값)를 그대로 노출합니다. KEDA가 이 값을 보고 replicas를 늘리는 데 씁니다 —
+	// CPU는 랙이 실제로 밀려도 안 오를 수 있어서(부하가 CPU가 아니라 처리 속도
+	// 자체에 걸리는 경우) 정확한 스케일링 기준이 못 됩니다(2026-08-12 결정).
+	metricsPort := os.Getenv("METRICS_PORT")
+	if metricsPort == "" {
+		metricsPort = "9090"
+	}
+
 	return Config{
 		KafkaBroker:      broker,
 		OrdersTopic:      ordersTopic,
@@ -73,5 +84,6 @@ func LoadConfig() Config {
 		RedisAddr:        redisAddr,
 		RedisPassword:    redisPassword,
 		RedisTLSEnabled:  redisTLSEnabled,
+		MetricsPort:      metricsPort,
 	}
 }
