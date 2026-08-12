@@ -223,6 +223,20 @@ resource "aws_security_group_rule" "team1_backend_from_alb" {
   description              = "Public ALB to ingest API pod (real orderapi PORT, confirmed from orderapi/config.go default and k8s Deployment)"
 }
 
+# recorder 조회 API(:8082, GET /v1/trace/{orderId} 등) — orderapi Ingress와 ALB를
+# 공유하도록 2026-08-12에 붙였는데, 이 규칙이 8081 하나로만 좁혀져 있어서 recorder
+# 타겟그룹이 Target.Timeout으로 계속 unhealthy였다(예전 Fargate SG 갭과 같은 클래스의
+# "포트/SG가 좁게 스코프돼 새 백엔드가 조용히 막히는" 패턴).
+resource "aws_security_group_rule" "team1_backend_from_alb_recorder" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_backend.id
+  source_security_group_id = aws_security_group.team1_sg_alb_public.id
+  from_port                = 8082
+  to_port                  = 8082
+  protocol                 = "tcp"
+  description              = "Public ALB to recorder query API pod (recorder/config.go default QUERY_PORT 8082)"
+}
+
 # 시세 수집기(backend, collector 네임스페이스)는 Fargate라 전용 SG가 없고
 # team1_sg_eks_cluster를 쓴다(컨트롤플레인 + Fargate 파드 전부 공유) — 프론트가
 # /v1/collect, /v1/markets/*를 직접 호출하는 걸 확인해서 이 경로도 ALB로 노출.
