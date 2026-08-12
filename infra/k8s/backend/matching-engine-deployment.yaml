@@ -1,8 +1,9 @@
 # 매칭 엔진 — 앱 팀원이 올린 matching-latest 이미지. 환경변수는 앱 팀원이 전달한
 # "AWS 리소스·권한·계정 정리" 문서(2026-08-11) 기준 — Kafka는 KAFKA_USE_IAM_AUTH=true
 # 하나로 IAM 인증을 켜고(KAFKA_SECURITY_PROTOCOL/SASL_MECHANISM은 앱이 안 읽음), Redis는
-# TLS만 필수(AUTH 토큰 없음)라 REDIS_TLS_ENABLED=true만 준다. replicas는 우선 1로 고정,
-# KEDA는 이게 뜨는 거 확인한 뒤에 붙인다.
+# TLS만 필수(AUTH 토큰 없음)라 REDIS_TLS_ENABLED=true만 준다. replicas는 KEDA
+# ScaledObject(keda-scaledobjects.yaml)가 컨슈머 랙 기준으로 조절 — 여기 값은
+# minReplicaCount와 맞춰야 한다(지금 1).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,6 +46,9 @@ spec:
               value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
             - name: REDIS_TLS_ENABLED
               value: "true"
+          ports:
+            - name: metrics
+              containerPort: 9090
           resources:
             requests:
               cpu: 250m
@@ -52,3 +56,18 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matching-engine
+  namespace: backend
+  labels:
+    app: matching-engine
+spec:
+  selector:
+    app: matching-engine
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090

@@ -196,6 +196,8 @@ func main() {
 	}
 	go matchingWatcher.Run(ctx)
 
+	startMetricsServer(cfg.MetricsPort, consumer.Lag)
+
 	log.Printf("매칭 엔진 시작 (instanceId=%s, Kafka broker=%s, orders=%s, executions=%s, assignments=%s, redis=%s, 마켓 %d개, group=%s)",
 		instanceID, cfg.KafkaBroker, cfg.OrdersTopic, cfg.ExecutionsTopic, cfg.AssignmentsTopic, cfg.RedisAddr, len(TargetMarkets), consumerGroupID)
 

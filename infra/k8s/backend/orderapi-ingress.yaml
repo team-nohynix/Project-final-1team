@@ -25,6 +25,23 @@ spec:
   rules:
     - http:
         paths:
+          # recorder 조회 API(:8082) — orderapi 자체 라우트와 안 겹쳐서 같은 ALB를
+          # 공유한다. ALB Controller는 Ingress 안 paths 목록 순서대로 규칙 우선순위를
+          # 매기므로, 반드시 아래 catch-all "/" 보다 먼저 와야 한다(2026-08-12 추가).
+          - path: /v1/trace
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
+          - path: /v1/matching
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
           - path: /
             pathType: Prefix
             backend:
