@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted } from 'vue'
 
 // Defaults
 const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
@@ -36,10 +36,75 @@ const collectedData = ref(null)
 
 // Job ID returned by POST /v1/collect (used for polling)
 const collectJobId = ref('')
+// 진행률 — GET /v1/collect/{jobId} 응답의 completed/total(2026-08-12 백엔드에
+// 추가됨)을 그대로 보관. 폴링 전이거나 아직 한 마켓도 안 끝났으면 0/0.
+const collectCompleted = ref(0)
+const collectTotal = ref(0)
+const collectProgressPercent = computed(() => {
+  if (!collectTotal.value) return 0
+  return Math.round((collectCompleted.value / collectTotal.value) * 100)
+})
 
 // polling control
 let pollTimerId = null
 let pollInFlight = false
+
+// SessionStorage key
+const STORAGE_KEY = 'truss:aiTrader:v1'
+
+// Save/restore guards
+let restoringFromStorage = false
+
+// Persist relevant state to sessionStorage
+function saveStateToSession() {
+  try {
+    const payload = {
+      scenarioName: scenarioName.value,
+      selectedDate: selectedDate.value,
+      totalOrders: totalOrders.value,
+      generationTime: generationTime.value,
+      speed: speed.value,
+      // collection
+      collectJobId: collectJobId.value,
+      collectionStatus: collectionStatus.value,
+      collectedData: collectedData.value,
+      collectCompleted: collectCompleted.value,
+      collectTotal: collectTotal.value,
+      // execution / paper trading
+      executionStatus: executionStatus.value,
+      paperTradingResult: paperTradingResult.value,
+      executionError: executionError.value,
+      // timestamp to help debugging
+      savedAt: new Date().toISOString(),
+    }
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  } catch (e) {
+    // ignore storage errors
+    console.warn('Failed to save AITrader state to sessionStorage', e)
+  }
+}
+
+function clearSessionStorage() {
+  try {
+    sessionStorage.removeItem(STORAGE_KEY)
+  } catch (e) {
+    console.warn('Failed to clear sessionStorage', e)
+  }
+}
+
+function loadStateFromSession() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed
+  } catch (e) {
+    // corrupted JSON — clear and return null
+    console.warn('Failed to parse stored AITrader state, clearing', e)
+    try { sessionStorage.removeItem(STORAGE_KEY) } catch (_) {}
+    return null
+  }
+}
 
 const collectionStatusInfo = computed(() => {
   const statusMap = {
@@ -113,6 +178,8 @@ const requestMarketData = async () => {
   stopPolling()
   collectedData.value = null
   collectJobId.value = ''
+  collectCompleted.value = 0
+  collectTotal.value = 0
   errorMessage.value = ''
 
   collectionStatus.value = 'collecting'
@@ -178,8 +245,12 @@ async function pollOnce() {
     const res = await fetch(`/v1/collect/${collectJobId.value}`)
 
     if (res.status === 404) {
-      errorMessage.value = '수집 작업 정보를 찾을 수 없습니다. 백엔드가 재시작되었을 수 있습니다.'
-      collectionStatus.value = 'failed'
+      // If backend no longer knows about this job, clear stored state and show initial screen
+      // Per requirements: do not surface an error; just reset stored session state.
+      clearSessionStorage()
+      resetCollection()
+      infoMessage.value = ''
+      errorMessage.value = ''
       stopPolling()
       return
     }
@@ -200,6 +271,9 @@ async function pollOnce() {
 
     const data = await res.json()
     const status = data?.status
+    collectCompleted.value = data?.completed ?? collectCompleted.value
+    collectTotal.value = data?.total ?? collectTotal.value
+
     if (status === 'IN_PROGRESS') {
       collectionStatus.value = 'collecting'
       // schedule next poll in 3s
@@ -265,6 +339,8 @@ const handleCollectionError = (error: Error | any) => {
 const resetCollection = () => {
   collectionStatus.value = 'idle'
   collectedData.value = null
+  collectCompleted.value = 0
+  collectTotal.value = 0
 }
 
 // 수집 날짜가 변경되면 기존 시세 수집 상태(수집 데이터/상태 배지/페이퍼 트레이딩 버튼)를 초기화
@@ -320,6 +396,82 @@ const reset = () => {
   resetCollection()
   resetExecution()
 }
+
+// When user clicks reset, also clear persisted session data
+const userReset = () => {
+  reset()
+  clearSessionStorage()
+}
+
+// Save state on relevant changes (debounced by browser automatically)
+watch(
+  [
+    scenarioName,
+    selectedDate,
+    totalOrders,
+    generationTime,
+    speed,
+    collectJobId,
+    collectionStatus,
+    collectedData,
+    collectCompleted,
+    collectTotal,
+    executionStatus,
+    paperTradingResult,
+    executionError,
+  ],
+  () => {
+    if (restoringFromStorage) return
+    saveStateToSession()
+  },
+  { deep: true }
+)
+
+// Restore persisted state when component mounts
+onMounted(async () => {
+  restoringFromStorage = true
+  try {
+    const stored = loadStateFromSession()
+    if (stored) {
+      // Restore UI fields
+      scenarioName.value = stored.scenarioName ?? scenarioName.value
+      selectedDate.value = stored.selectedDate ?? selectedDate.value
+      totalOrders.value = stored.totalOrders ?? totalOrders.value
+      generationTime.value = stored.generationTime ?? generationTime.value
+      speed.value = stored.speed ?? speed.value
+
+      // Execution state
+      executionStatus.value = stored.executionStatus ?? executionStatus.value
+      paperTradingResult.value = stored.paperTradingResult ?? paperTradingResult.value
+      executionError.value = stored.executionError ?? executionError.value
+
+      // Collection state
+      collectJobId.value = stored.collectJobId ?? collectJobId.value
+      collectionStatus.value = stored.collectionStatus ?? collectionStatus.value
+      collectedData.value = stored.collectedData ?? collectedData.value
+      collectCompleted.value = stored.collectCompleted ?? collectCompleted.value
+      collectTotal.value = stored.collectTotal ?? collectTotal.value
+
+      // If collection was in progress, resume polling using existing jobId (do not re-POST)
+      if (collectionStatus.value === 'collecting' && collectJobId.value) {
+        // Do one immediate poll to get up-to-date status, then schedule further polling via pollOnce()
+        await pollOnce()
+        // If still in progress (pollOnce scheduled next), nothing else needed; otherwise polling stopped.
+      } else if (collectionStatus.value === 'completed' && collectJobId.value) {
+        // Display results immediately; try a single GET to refresh current status if possible
+        try {
+          await pollOnce()
+        } catch (e) {
+          // ignore errors from this single refresh; if job was removed pollOnce handles clearing storage
+        }
+      }
+    }
+  } finally {
+    restoringFromStorage = false
+    // ensure current state saved (normalize any defaults)
+    saveStateToSession()
+  }
+})
 </script>
 
 <template>
@@ -368,7 +520,15 @@ const reset = () => {
 
           <div class="collection-data">
             <template v-if="collectionStatus === 'idle'">수집된 시세 데이터 없음</template>
-            <template v-else-if="collectionStatus === 'collecting'">시세 수집 중...</template>
+            <template v-else-if="collectionStatus === 'collecting'">
+              <div class="progress-info">
+                <span>{{ selectedDate }} 시세 수집 중...</span>
+                <span class="progress-count">{{ collectCompleted }}/{{ collectTotal || 20 }} 마켓 ({{ collectProgressPercent }}%)</span>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" :style="{ width: collectProgressPercent + '%' }"></div>
+              </div>
+            </template>
             <template v-else-if="collectionStatus === 'failed'">시세 수집 실패: {{ errorMessage || '다시 요청해주세요.' }}</template>
             <template v-else-if="collectionStatus === 'completed'">
               <div class="collection-data-list">
@@ -438,7 +598,7 @@ const reset = () => {
           <button class="btn-primary" :disabled="!canStartPaperTrading" @click="startPaperTrading">
             페이퍼 트레이딩 시작
           </button>
-          <button class="btn-dark" @click="reset">초기화</button>
+          <button class="btn-dark" @click="userReset">초기화</button>
         </div>
 
         <div v-if="errorMessage" class="error-note">{{ errorMessage }}</div>
@@ -712,6 +872,30 @@ const reset = () => {
 .collection-request-btn {
   width: 100%;
   margin-top: 12px;
+}
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.progress-count {
+  color: #7fb2ff;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.progress-bar-track {
+  width: 100%;
+  height: 8px;
+  background: #0f2636;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #3f86ff;
+  border-radius: 999px;
+  transition: width 0.4s ease;
 }
 
 @media (max-width: 900px) {

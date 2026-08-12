@@ -18,6 +18,8 @@ type fakeQuerier struct {
 	traceErr   error
 	engines    []query.EngineAssignment
 	enginesErr error
+	metrics    query.DashboardMetrics
+	metricsErr error
 }
 
 func (f *fakeQuerier) TraceOrder(ctx context.Context, orderID string) (query.OrderTrace, bool, error) {
@@ -26,6 +28,10 @@ func (f *fakeQuerier) TraceOrder(ctx context.Context, orderID string) (query.Ord
 
 func (f *fakeQuerier) ListEngines(ctx context.Context) ([]query.EngineAssignment, error) {
 	return f.engines, f.enginesErr
+}
+
+func (f *fakeQuerier) DashboardMetrics(ctx context.Context) (query.DashboardMetrics, error) {
+	return f.metrics, f.metricsErr
 }
 
 func newTraceRequest(orderID string) *http.Request {
@@ -103,6 +109,43 @@ func TestEnginesHandler(t *testing.T) {
 		q := &fakeQuerier{enginesErr: context.DeadlineExceeded}
 		w := httptest.NewRecorder()
 		enginesHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/matching/engines", nil))
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+	})
+}
+
+func TestDashboardMetricsHandler(t *testing.T) {
+	t.Run("returns metrics", func(t *testing.T) {
+		q := &fakeQuerier{metrics: query.DashboardMetrics{
+			OrderAcceptTps:    12.3,
+			ExecutionTps:      8.7,
+			PendingOrders:     42,
+			E2EP99Ms:          1230.5,
+			E2EP99SampleCount: 57,
+			RunningEnginePods: 1,
+			Series:            []query.MetricsBucket{{BucketStart: "2026-08-12T06:10:00Z", Orders: 120, Executions: 95}},
+		}}
+		w := httptest.NewRecorder()
+		dashboardMetricsHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var got query.DashboardMetrics
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("response not JSON: %v", err)
+		}
+		if got.PendingOrders != 42 || got.RunningEnginePods != 1 || len(got.Series) != 1 {
+			t.Fatalf("unexpected metrics: %+v", got)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		q := &fakeQuerier{metricsErr: context.DeadlineExceeded}
+		w := httptest.NewRecorder()
+		dashboardMetricsHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)

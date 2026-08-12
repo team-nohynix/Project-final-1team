@@ -39,7 +39,7 @@ func parseDate(s string) (time.Time, error) {
 // 만들어서, 테스트에서는 네트워크 없이 즉시 끝나는 가짜 함수를 넣을 수
 // 있습니다(collectAllMarkets/collectMarket 자체는 여전히 주입 불가능한
 // 상태지만, 이 핸들러가 그걸 직접 부르지 않게 한 단계 분리했습니다).
-func collectHandler(storage dataset.Storage, jobs *collectJobStore, collect func(dataset.Storage, time.Time, time.Time) []CollectResult) http.HandlerFunc {
+func collectHandler(storage dataset.Storage, jobs *collectJobStore, collect func(dataset.Storage, time.Time, time.Time, func()) []CollectResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req collectRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -57,10 +57,10 @@ func collectHandler(storage dataset.Storage, jobs *collectJobStore, collect func
 		job := jobs.create(req.Date, dataset.Range{
 			Start: start.Format(time.RFC3339),
 			End:   end.Format(time.RFC3339),
-		})
+		}, len(upbit.TargetMarkets))
 
 		go func() {
-			results := collect(storage, start, end)
+			results := collect(storage, start, end, func() { jobs.progress(job.JobID) })
 			jobs.complete(job.JobID, results)
 			log.Printf("수집 완료 (jobId=%s, date=%s)", job.JobID, req.Date)
 		}()
