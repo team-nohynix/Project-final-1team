@@ -179,7 +179,7 @@ const isActive = (path) => route.path === path
             @click.prevent="go('/market-stream')"
           >
             <span class="menu-dot"></span>
-            시세 처리
+            시세 조회
           </button>
 
           <button
@@ -201,7 +201,13 @@ const isActive = (path) => route.path === path
     </aside>
 
     <main class="main-content">
-      <router-view />
+      <router-view v-slot="{ Component, route }">
+        <keep-alive>
+          <component :is="Component" v-if="route.meta && route.meta.keepAlive" :key="route.name" />
+        </keep-alive>
+
+        <component :is="Component" v-if="!(route.meta && route.meta.keepAlive)" :key="route.name" />
+      </router-view>
     </main>
   </div>
 </template>

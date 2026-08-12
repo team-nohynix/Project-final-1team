@@ -1,54 +1,125 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 
-const markets = ['BTC/KRW', 'ETH/KRW', 'XRP/KRW']
+// Use the canonical 20 KRW markets defined in backend/upbit/markets.go
+const markets = [
+  'KRW-USDT',
+  'KRW-BTC',
+  'KRW-XRP',
+  'KRW-ETH',
+  'KRW-ONDO',
+  'KRW-LA',
+  'KRW-SHIB',
+  'KRW-RE',
+  'KRW-DOGE',
+  'KRW-SLX',
+  'KRW-KAITO',
+  'KRW-SOL',
+  'KRW-XLM',
+  'KRW-WLD',
+  'KRW-MIRA',
+  'KRW-ERA',
+  'KRW-ADA',
+  'KRW-AI',
+  'KRW-NEAR',
+  'KRW-ARX',
+]
 
 const form = ref({
   market: markets[0],
   side: 'BUY',
-  type: 'LIMIT',
-  price: 50000000,
-  quantity: 0.001,
+  price: '',
+  quantity: '',
   idempotencyKey: '',
 })
 
-// Dummy recent orders
-const recentOrders = ref([
-  {
-    id: 'ORD-1001',
-    market: 'BTC/KRW',
-    side: 'BUY',
-    type: 'LIMIT',
-    price: 48500000,
-    quantity: 0.002,
-    idempotencyKey: 'abc-123',
-    status: 'ACCEPTED',
-    partition: 1,
-    offset: 124,
-  },
-  {
-    id: 'ORD-1002',
-    market: 'BTC/KRW',
-    side: 'SELL',
-    type: 'LIMIT',
-    price: 49000000,
-    quantity: 0.0015,
-    idempotencyKey: 'def-456',
-    status: 'OPEN',
-    partition: 2,
-    offset: 128,
-  },
-])
+// displayPrice holds the formatted string shown in the input (with commas)
+import { ref as _ref } from 'vue'
+const displayPrice = ref('')
+
+const addCommas = (s) => {
+  if (!s) return ''
+  return s.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+const onPriceInput = (e) => {
+  const v = e.target.value
+  // remove any non-digit characters
+  const digits = String(v).replace(/[^0-9]/g, '')
+  form.value.price = digits
+  displayPrice.value = digits ? addCommas(digits) : ''
+}
+
+const priceLabel = computed(() => (form.value.side === 'BUY' ? '매수 가격 (KRW)' : '매도 가격 (KRW)'))
+const pricePlaceholder = computed(() => (form.value.side === 'BUY' ? '매수 희망 가격을 입력하세요' : '매도 희망 가격을 입력하세요'))
+
+const quantityUnit = computed(() => {
+  try {
+    const m = String(form.value.market || '')
+    const parts = m.split('-')
+    return parts.length > 1 ? parts[1] : ''
+  } catch (e) {
+    return ''
+  }
+})
+
+const quantityLabel = computed(() => `수량${quantityUnit.value ? ` (${quantityUnit.value})` : ''}`)
+const quantityPlaceholder = ref('주문 수량을 입력하세요')
+
+const onQuantityInput = (e) => {
+  const v = e.target.value
+  // allow digits and at most one decimal point
+  let sanitized = String(v).replace(/[^0-9.]/g, '')
+  const parts = sanitized.split('.')
+  if (parts.length > 2) {
+    sanitized = parts[0] + '.' + parts.slice(1).join('')
+  }
+  form.value.quantity = sanitized
+  // ensure the input shows the sanitized value
+  e.target.value = sanitized
+}
+
+// Session storage key for recent orders (per-tab session scope)
+const STORAGE_KEY = 'order_mgmt_recent_orders'
+
+const loadRecentOrders = () => {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+  } catch (e) {
+    // malformed JSON or sessionStorage access denied — start with empty list
+    return []
+  }
+}
+
+const saveRecentOrders = () => {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(recentOrders.value))
+  } catch (e) {
+    // ignore storage errors (e.g., quota), keep in-memory list as source of truth
+  }
+}
+
+// Recent orders for this browser session only (restored from sessionStorage)
+const recentOrders = ref(loadRecentOrders())
+
+// UI state
+const isSubmitting = ref(false)
+const infoMessage = ref('')
+const errorMessage = ref('')
 
 const statusColor = (s) => {
   switch (s) {
     case 'ACCEPTED':
       return '#2ed39a'
-    case 'PARTIAL':
+    case 'PARTIALLY_FILLED':
       return '#ffb84d'
-    case 'OPEN':
+    case 'FILLED':
       return '#3478f6'
-    case 'CANCELLED':
+    case 'CANCELED':
       return '#ff6b6b'
     case 'DUPLICATE':
       return '#9b7bff'
@@ -63,49 +134,141 @@ const validate = () => {
   const errs = []
   if (!form.value.idempotencyKey || form.value.idempotencyKey.trim() === '')
     errs.push('Idempotency Key required')
-  if (!form.value.price || form.value.price <= 0) errs.push('Price must be > 0')
-  if (!form.value.quantity || form.value.quantity <= 0) errs.push('Quantity must be > 0')
+  if (!form.value.price || Number(form.value.price) <= 0) errs.push('Price must be > 0')
+  if (!form.value.quantity || Number(form.value.quantity) <= 0) errs.push('Quantity must be > 0')
   validation.value.errors = errs
   validation.value.valid = errs.length === 0
   return validation.value.valid
 }
 
-const generateId = () => `ORD-${Math.floor(1000 + Math.random() * 9000)}`
-
-// keep existing business logic intact
-const submitTestOrder = () => {
+// Submit a real order to backend via proxy /order-api/v1/orders
+const submitTestOrder = async () => {
+  infoMessage.value = ''
+  errorMessage.value = ''
   if (!validate()) return
+  if (isSubmitting.value) return
 
-  // Idempotency: if a matching idempotencyKey exists, return same response
-  const existing = recentOrders.value.find((o) => o.idempotencyKey === form.value.idempotencyKey)
+  // ensure form values normalized
+  const idemp = String(form.value.idempotencyKey).trim()
+  const market = String(form.value.market)
+
+  const side = form.value.side === 'BUY' ? 'BUY' : 'SELL'
+
+  // price/quantity: ensure string, remove any commas
+  const priceStr = String(form.value.price).replace(/,/g, '')
+  const qtyStr = String(form.value.quantity).replace(/,/g, '')
+
+  // Idempotency check: if we already have an entry with same key, do not re-add duplicate
+  const existing = recentOrders.value.find((o) => o.idempotencyKey === idemp)
   if (existing) {
-    // mark duplicate visually
-    existing.status = 'DUPLICATE'
+    // If existing is canceled, do not revert it; show info and return
+    infoMessage.value = '동일한 중복 방지 키로 기존 주문 응답이 반환되었습니다.'
     return
   }
 
-  const order = {
-    id: generateId(),
-    market: form.value.market,
-    side: form.value.side,
-    type: form.value.type,
-    price: Number(form.value.price),
-    quantity: Number(form.value.quantity),
-    idempotencyKey: form.value.idempotencyKey,
-    status: 'ACCEPTED',
-    partition: Math.floor(Math.random() * 3),
-    offset: Math.floor(Math.random() * 1000),
-  }
+  isSubmitting.value = true
 
-  recentOrders.value.unshift(order)
+  try {
+    const resp = await fetch('/order-api/v1/orders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idemp,
+        'X-Order-Mode': 'PAPER_TRADING',
+      },
+      body: JSON.stringify({ market, side, price: priceStr, quantity: qtyStr }),
+    })
+
+    if (!resp.ok) {
+      let bodyText = ''
+      try {
+        const j = await resp.json()
+        bodyText = j?.error || JSON.stringify(j)
+      } catch (e) {
+        bodyText = resp.statusText || `HTTP ${resp.status}`
+      }
+      throw new Error(bodyText)
+    }
+
+    const data = await resp.json()
+
+    // If an existing order with same idempotencyKey exists, consider duplicate handling
+    const already = recentOrders.value.find((o) => o.idempotencyKey === idemp)
+    if (already) {
+      if (already.id === data.orderId) {
+        infoMessage.value = '동일한 중복 방지 키로 기존 주문 응답이 반환되었습니다.'
+      }
+      // do not overwrite a canceled existing order
+      if (already.status !== 'CANCELED') {
+        // update existing entry with latest data
+        already.id = data.orderId
+        already.market = data.market
+        already.side = data.side
+        already.price = data.price
+        already.quantity = data.quantity
+        already.status = data.status
+        already.acceptedAt = data.acceptedAt
+        infoMessage.value = '주문이 접수되었습니다.'
+      }
+    } else {
+      // add new order to session list
+      recentOrders.value.unshift({
+        id: data.orderId,
+        market: data.market,
+        side: data.side,
+        price: data.price,
+        quantity: data.quantity,
+        idempotencyKey: idemp,
+        status: data.status,
+        acceptedAt: data.acceptedAt,
+      })
+      infoMessage.value = '주문이 접수되었습니다.'
+    }
+    // persist to sessionStorage
+    saveRecentOrders()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    errorMessage.value = msg || '주문 접수 중 오류가 발생했습니다.'
+  } finally {
+    isSubmitting.value = false
+  }
 }
 
-const cancelOrder = (id) => {
+const cancelOrder = async (id) => {
+  errorMessage.value = ''
+  infoMessage.value = ''
   const o = recentOrders.value.find((r) => r.id === id)
   if (!o) return
-  o.status = 'CANCELLED'
-  if (o.partition === undefined) o.partition = 0
-  if (o.offset === undefined) o.offset = Math.floor(Math.random() * 1000)
+  if (!confirm('정말로 주문을 취소하시겠습니까?')) return
+
+  try {
+    const resp = await fetch(`/order-api/v1/orders/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+
+    if (!resp.ok) {
+      let bodyText = ''
+      try {
+        const j = await resp.json()
+        bodyText = j?.error || JSON.stringify(j)
+      } catch (e) {
+        bodyText = resp.statusText || `HTTP ${resp.status}`
+      }
+      throw new Error(bodyText)
+    }
+
+    const data = await resp.json()
+    // update order entry
+    o.status = data.status || 'CANCELED'
+    o.canceledAt = data.canceledAt
+    o.canceledQuantity = data.canceledQuantity
+    infoMessage.value = '주문이 취소되었습니다.'
+    // persist updated status to sessionStorage
+    saveRecentOrders()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    errorMessage.value = msg || '주문 취소 중 오류가 발생했습니다.'
+  }
 }
 
 // UI helpers
@@ -113,8 +276,9 @@ const isFormReady = computed(() => {
   return (
     form.value.idempotencyKey &&
     form.value.idempotencyKey.trim() !== '' &&
-    form.value.price > 0 &&
-    form.value.quantity > 0
+    Number(form.value.price) > 0 &&
+    Number(form.value.quantity) > 0 &&
+    !isSubmitting.value
   )
 })
 
@@ -131,9 +295,42 @@ watch(
 
 // helper to determine whether an order can be cancelled
 const canCancel = (o) => {
-  // show cancel only for ACCEPTED, OPEN, PARTIAL
-  const cancelable = ['ACCEPTED', 'OPEN', 'PARTIAL']
+  // cancel allowed for ACCEPTED or PARTIALLY_FILLED
+  const cancelable = ['ACCEPTED', 'PARTIALLY_FILLED']
   return cancelable.includes(o.status)
+}
+
+// Presentation helpers (only affect UI display)
+const formatPrice = (v) => {
+  try {
+    if (v === null || v === undefined || v === '') return '-'
+    const n = Number(String(v).replace(/,/g, ''))
+    if (!Number.isFinite(n)) return String(v)
+    return n.toLocaleString('ko-KR') + ' KRW'
+  } catch (e) {
+    return String(v)
+  }
+}
+
+const formatKst = (iso) => {
+  try {
+    if (!iso) return '-'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return '-'
+    const s = d.toLocaleString('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+    return `${s} KST`
+  } catch (e) {
+    return iso || '-'
+  }
 }
 </script>
 
@@ -169,19 +366,28 @@ const canCancel = (o) => {
             </select>
           </label>
 
+
+
           <label class="field">
-            <span class="field-label">주문 유형</span>
-            <input class="field-input" readonly value="LIMIT" />
+            <span class="field-label">{{ priceLabel }}</span>
+            <input
+              class="field-input"
+              type="text"
+              v-model="displayPrice"
+              @input="onPriceInput"
+              :placeholder="pricePlaceholder"
+            />
           </label>
 
           <label class="field">
-            <span class="field-label">가격</span>
-            <input class="field-input" type="number" v-model.number="form.price" />
-          </label>
-
-          <label class="field">
-            <span class="field-label">수량</span>
-            <input class="field-input" type="number" step="0.0001" v-model.number="form.quantity" />
+            <span class="field-label">{{ quantityLabel }}</span>
+            <input
+              class="field-input"
+              type="text"
+              v-model="form.quantity"
+              @input="onQuantityInput"
+              :placeholder="quantityPlaceholder"
+            />
           </label>
 
           <label class="field">
@@ -196,7 +402,8 @@ const canCancel = (o) => {
               :class="{ 'btn-enabled': isFormReady, 'btn-disabled': !isFormReady }"
               @click="submitTestOrder"
             >
-              단건 테스트 주문 전송
+              <span v-if="!isSubmitting">단건 테스트 주문 전송</span>
+              <span v-else>전송 중...</span>
             </button>
           </div>
 
@@ -206,27 +413,31 @@ const canCancel = (o) => {
             </div>
             <div v-else-if="validation.valid" class="ok">입력값 검증 완료</div>
           </div>
+
+          <div v-if="errorMessage" class="errors">{{ errorMessage }}</div>
+          <div v-if="infoMessage" class="ok">{{ infoMessage }}</div>
         </div>
       </article>
 
       <article class="panel right-panel status-panel">
         <h3>최근 접수 주문</h3>
 
+        <div class="note">현재 브라우저 세션에서 접수한 주문</div>
         <div class="recent-list">
           <div v-for="o in recentOrders" :key="o.id" class="order-card">
             <div class="order-left">
               <div class="order-id">{{ o.id }}</div>
               <div class="order-meta">{{ o.market }} • {{ o.side }}</div>
               <div class="order-idemp">Idempotency: {{ o.idempotencyKey || '-' }}</div>
+              <div class="order-meta">가격: {{ formatPrice(o.price) }} · 수량: {{ o.quantity }}</div>
+              <div class="order-meta">접수시각: {{ formatKst(o.acceptedAt) }}</div>
+              <div v-if="o.status === 'CANCELED'" class="order-meta">취소시각: {{ formatKst(o.canceledAt) }} · 취소수량: {{ o.canceledQuantity }}</div>
             </div>
 
             <div class="order-right">
               <div class="status-value">
                 <i :style="{ backgroundColor: statusColor(o.status) }" class="status-dot"></i>
                 <span>{{ o.status }}</span>
-              </div>
-              <div class="order-offset">
-                PK {{ o.partition ?? '-' }} · Off {{ o.offset ?? '-' }}
               </div>
               <div>
                 <button v-if="canCancel(o)" @click="cancelOrder(o.id)" class="cancel-small">
@@ -237,9 +448,11 @@ const canCancel = (o) => {
           </div>
         </div>
 
-        <!-- removed dedicated cancel card per requirements -->
-
-        <div class="idempotent-card">동일 주문 번호는 같은 응답을 반환합니다 (Idempotent)</div>
+        <div class="idempotent-card">
+          동일한 중복 방지 키로 재요청하면 Redis에 저장된 기존 주문 응답이 반환됩니다.
+          <br />
+          최근 주문 목록은 현재 브라우저 세션에서만 유지됩니다.
+        </div>
       </article>
     </section>
   </div>
@@ -297,6 +510,10 @@ const canCancel = (o) => {
   border: 1px solid #20344b;
   background: #071624;
   color: #f3f7fc;
+}
+
+.field-input::placeholder {
+  color: #71869c;
 }
 
 .actions {

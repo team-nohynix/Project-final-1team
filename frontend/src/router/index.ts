@@ -26,7 +26,7 @@ const routes = [
       { path: 'monitoring', name: 'monitoring', component: RealtimeMonitoringView },
       { path: 'test-results', name: 'test-results', component: TestResultTrackingView },
       { path: 'fault-recovery', name: 'fault-recovery', component: FaultRecoveryView },
-      { path: 'market-stream', name: 'market-stream', component: MarketStreamView },
+      { path: 'market-stream', name: 'market-stream', component: MarketStreamView, meta: { keepAlive: true } },
       { path: 'deployment-ops', name: 'deployment-ops', component: DeploymentOpsView },
     ],
   },
