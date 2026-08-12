@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted } from 'vue'
 
 // Defaults
 const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
@@ -40,6 +40,61 @@ const collectJobId = ref('')
 // polling control
 let pollTimerId = null
 let pollInFlight = false
+
+// SessionStorage key
+const STORAGE_KEY = 'truss:aiTrader:v1'
+
+// Save/restore guards
+let restoringFromStorage = false
+
+// Persist relevant state to sessionStorage
+function saveStateToSession() {
+  try {
+    const payload = {
+      scenarioName: scenarioName.value,
+      selectedDate: selectedDate.value,
+      totalOrders: totalOrders.value,
+      generationTime: generationTime.value,
+      speed: speed.value,
+      // collection
+      collectJobId: collectJobId.value,
+      collectionStatus: collectionStatus.value,
+      collectedData: collectedData.value,
+      // execution / paper trading
+      executionStatus: executionStatus.value,
+      paperTradingResult: paperTradingResult.value,
+      executionError: executionError.value,
+      // timestamp to help debugging
+      savedAt: new Date().toISOString(),
+    }
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  } catch (e) {
+    // ignore storage errors
+    console.warn('Failed to save AITrader state to sessionStorage', e)
+  }
+}
+
+function clearSessionStorage() {
+  try {
+    sessionStorage.removeItem(STORAGE_KEY)
+  } catch (e) {
+    console.warn('Failed to clear sessionStorage', e)
+  }
+}
+
+function loadStateFromSession() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed
+  } catch (e) {
+    // corrupted JSON — clear and return null
+    console.warn('Failed to parse stored AITrader state, clearing', e)
+    try { sessionStorage.removeItem(STORAGE_KEY) } catch (_) {}
+    return null
+  }
+}
 
 const collectionStatusInfo = computed(() => {
   const statusMap = {
@@ -178,8 +233,12 @@ async function pollOnce() {
     const res = await fetch(`/v1/collect/${collectJobId.value}`)
 
     if (res.status === 404) {
-      errorMessage.value = '수집 작업 정보를 찾을 수 없습니다. 백엔드가 재시작되었을 수 있습니다.'
-      collectionStatus.value = 'failed'
+      // If backend no longer knows about this job, clear stored state and show initial screen
+      // Per requirements: do not surface an error; just reset stored session state.
+      clearSessionStorage()
+      resetCollection()
+      infoMessage.value = ''
+      errorMessage.value = ''
       stopPolling()
       return
     }
@@ -320,6 +379,78 @@ const reset = () => {
   resetCollection()
   resetExecution()
 }
+
+// When user clicks reset, also clear persisted session data
+const userReset = () => {
+  reset()
+  clearSessionStorage()
+}
+
+// Save state on relevant changes (debounced by browser automatically)
+watch(
+  [
+    scenarioName,
+    selectedDate,
+    totalOrders,
+    generationTime,
+    speed,
+    collectJobId,
+    collectionStatus,
+    collectedData,
+    executionStatus,
+    paperTradingResult,
+    executionError,
+  ],
+  () => {
+    if (restoringFromStorage) return
+    saveStateToSession()
+  },
+  { deep: true }
+)
+
+// Restore persisted state when component mounts
+onMounted(async () => {
+  restoringFromStorage = true
+  try {
+    const stored = loadStateFromSession()
+    if (stored) {
+      // Restore UI fields
+      scenarioName.value = stored.scenarioName ?? scenarioName.value
+      selectedDate.value = stored.selectedDate ?? selectedDate.value
+      totalOrders.value = stored.totalOrders ?? totalOrders.value
+      generationTime.value = stored.generationTime ?? generationTime.value
+      speed.value = stored.speed ?? speed.value
+
+      // Execution state
+      executionStatus.value = stored.executionStatus ?? executionStatus.value
+      paperTradingResult.value = stored.paperTradingResult ?? paperTradingResult.value
+      executionError.value = stored.executionError ?? executionError.value
+
+      // Collection state
+      collectJobId.value = stored.collectJobId ?? collectJobId.value
+      collectionStatus.value = stored.collectionStatus ?? collectionStatus.value
+      collectedData.value = stored.collectedData ?? collectedData.value
+
+      // If collection was in progress, resume polling using existing jobId (do not re-POST)
+      if (collectionStatus.value === 'collecting' && collectJobId.value) {
+        // Do one immediate poll to get up-to-date status, then schedule further polling via pollOnce()
+        await pollOnce()
+        // If still in progress (pollOnce scheduled next), nothing else needed; otherwise polling stopped.
+      } else if (collectionStatus.value === 'completed' && collectJobId.value) {
+        // Display results immediately; try a single GET to refresh current status if possible
+        try {
+          await pollOnce()
+        } catch (e) {
+          // ignore errors from this single refresh; if job was removed pollOnce handles clearing storage
+        }
+      }
+    }
+  } finally {
+    restoringFromStorage = false
+    // ensure current state saved (normalize any defaults)
+    saveStateToSession()
+  }
+})
 </script>
 
 <template>
@@ -438,7 +569,7 @@ const reset = () => {
           <button class="btn-primary" :disabled="!canStartPaperTrading" @click="startPaperTrading">
             페이퍼 트레이딩 시작
           </button>
-          <button class="btn-dark" @click="reset">초기화</button>
+          <button class="btn-dark" @click="userReset">초기화</button>
         </div>
 
         <div v-if="errorMessage" class="error-note">{{ errorMessage }}</div>
