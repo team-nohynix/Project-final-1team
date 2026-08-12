@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 
 // Defaults
 const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
@@ -31,12 +31,15 @@ const errorMessage = ref('')
 // 과거 시세 수집 상태 (백엔드 API 미확정 — 프론트 상태만 준비)
 const collectionStatus = ref('idle') // 'idle' | 'collecting' | 'completed' | 'failed'
 // 백엔드 응답 예정 필드: 수집 날짜 / 수집 마켓 수 / 수집 성공 마켓 수 / 수집 실패 마켓 수
-const collectedData = ref<{
-  date?: string
-  marketCount?: number
-  successCount?: number
-  failCount?: number
-} | null>(null)
+// collectedData will also hold the raw results array when completed
+const collectedData = ref(null)
+
+// Job ID returned by POST /v1/collect (used for polling)
+const collectJobId = ref('')
+
+// polling control
+let pollTimerId = null
+let pollInFlight = false
 
 const collectionStatusInfo = computed(() => {
   const statusMap = {
@@ -102,13 +105,17 @@ type CollectResponse = {
   results: CollectResult[]
 }
 
-// 시세 수집 요청 시작
+// 시세 수집 요청 시작 (비동기 API: POST returns 202 + jobId, then poll GET /v1/collect/{jobId})
 const requestMarketData = async () => {
   if (!canRequestCollection.value || collectionStatus.value === 'collecting') return
 
-  collectionStatus.value = 'collecting'
+  // clear previous polling and data
+  stopPolling()
   collectedData.value = null
+  collectJobId.value = ''
   errorMessage.value = ''
+
+  collectionStatus.value = 'collecting'
 
   try {
     const payload = { date: selectedDate.value }
@@ -118,8 +125,66 @@ const requestMarketData = async () => {
       body: JSON.stringify(payload),
     })
 
+    // Expecting HTTP 202 with jobId
+    if (res.status === 202) {
+      const json = await res.json()
+      const jobId = json?.jobId
+      if (!jobId) {
+        throw new Error('백엔드가 jobId를 반환하지 않았습니다.')
+      }
+      collectJobId.value = jobId
+      // start polling after 3s
+      scheduleNextPoll(3000)
+      return
+    }
+
+    // Non-202: treat as error
+    let backendMsg = ''
+    try {
+      const errJson = await res.json()
+      backendMsg = errJson?.error || JSON.stringify(errJson)
+    } catch (e) {
+      backendMsg = res.statusText || `HTTP ${res.status}`
+    }
+    throw new Error(backendMsg)
+  } catch (error) {
+    handleCollectionError(error instanceof Error ? error : new Error(String(error)))
+  }
+}
+
+// Schedule next poll in ms (clears any timer first)
+function scheduleNextPoll(delayMs) {
+  stopPolling()
+  pollTimerId = setTimeout(() => {
+    pollOnce()
+  }, delayMs)
+}
+
+// Stop polling and clear timer
+function stopPolling() {
+  if (pollTimerId) {
+    clearTimeout(pollTimerId)
+    pollTimerId = null
+  }
+  pollInFlight = false
+}
+
+// Poll one time for job status; prevents overlapping by checking pollInFlight
+async function pollOnce() {
+  if (!collectJobId.value) return
+  if (pollInFlight) return
+  pollInFlight = true
+  try {
+    const res = await fetch(`/v1/collect/${collectJobId.value}`)
+
+    if (res.status === 404) {
+      errorMessage.value = '수집 작업 정보를 찾을 수 없습니다. 백엔드가 재시작되었을 수 있습니다.'
+      collectionStatus.value = 'failed'
+      stopPolling()
+      return
+    }
+
     if (!res.ok) {
-      // Try to parse backend error message if provided
       let backendMsg = ''
       try {
         const errJson = await res.json()
@@ -127,32 +192,46 @@ const requestMarketData = async () => {
       } catch (e) {
         backendMsg = res.statusText || `HTTP ${res.status}`
       }
-      throw new Error(backendMsg)
+      errorMessage.value = backendMsg
+      collectionStatus.value = 'failed'
+      stopPolling()
+      return
     }
 
-    const data = (await res.json()) as CollectResponse
-
-    const results = Array.isArray(data.results) ? data.results : []
-    const marketCount = results.length
-    const successCount = results.filter((r) => r.status === 'ok').length
-    const failCount = results.filter((r) => r.status === 'error').length
-
-    // Aggregate failed market messages for display
-    if (failCount > 0) {
-      const failMsgs = results
-        .filter((r) => r.status === 'error')
-        .map((r) => `${r.market}${r.error ? ` (${r.error})` : ''}`)
-      errorMessage.value = `일부 마켓 수집 실패: ${failMsgs.join(', ')}`
+    const data = await res.json()
+    const status = data?.status
+    if (status === 'IN_PROGRESS') {
+      collectionStatus.value = 'collecting'
+      // schedule next poll in 3s
+      scheduleNextPoll(3000)
+      return
     }
 
-    handleCollectionSuccess({
-      date: data.date,
-      marketCount,
-      successCount,
-      failCount,
-    })
-  } catch (error) {
-    handleCollectionError(error instanceof Error ? error : new Error(String(error)))
+    if (status === 'COMPLETED') {
+      // store results and stop polling
+      collectedData.value = data
+      // aggregate counts for backward-compatible UI
+      const results = Array.isArray(data.results) ? data.results : []
+      const marketCount = results.length
+      const successCount = results.filter((r) => r.status === 'ok').length
+      const failCount = results.filter((r) => r.status === 'error').length
+      collectedData.value._summary = { marketCount, successCount, failCount }
+      collectionStatus.value = 'completed'
+      stopPolling()
+      return
+    }
+
+    // Unknown status: stop and show message
+    errorMessage.value = `알 수 없는 상태값: ${status}`
+    collectionStatus.value = 'failed'
+    stopPolling()
+  } catch (err) {
+    // Network or other error: show and stop
+    errorMessage.value = err instanceof Error ? err.message : String(err)
+    collectionStatus.value = 'failed'
+    stopPolling()
+  } finally {
+    pollInFlight = false
   }
 }
 
@@ -191,6 +270,11 @@ const resetCollection = () => {
 // 수집 날짜가 변경되면 기존 시세 수집 상태(수집 데이터/상태 배지/페이퍼 트레이딩 버튼)를 초기화
 watch(selectedDate, () => {
   resetCollection()
+})
+
+// ensure timers are cleaned up on unmount
+onBeforeUnmount(() => {
+  stopPolling()
 })
 
 // 페이퍼 트레이딩 실행 상태 (백엔드 API/응답 규격 미확정 — 프론트 상태만 준비)
@@ -284,8 +368,8 @@ const reset = () => {
 
           <div class="collection-data">
             <template v-if="collectionStatus === 'idle'">수집된 시세 데이터 없음</template>
-            <template v-else-if="collectionStatus === 'collecting'">시세 데이터를 수집하고 있습니다.</template>
-            <template v-else-if="collectionStatus === 'failed'">시세 수집에 실패했습니다. 다시 요청해주세요.</template>
+            <template v-else-if="collectionStatus === 'collecting'">시세 수집 중...</template>
+            <template v-else-if="collectionStatus === 'failed'">시세 수집 실패: {{ errorMessage || '다시 요청해주세요.' }}</template>
             <template v-else-if="collectionStatus === 'completed'">
               <div class="collection-data-list">
                 <div class="collection-data-row">
@@ -294,15 +378,31 @@ const reset = () => {
                 </div>
                 <div class="collection-data-row">
                   <span class="collection-data-key">수집 마켓 수</span>
-                  <span class="collection-data-value">{{ collectedData?.marketCount ?? '-' }}</span>
+                  <span class="collection-data-value">{{ collectedData?._summary?.marketCount ?? '-' }}</span>
                 </div>
                 <div class="collection-data-row">
                   <span class="collection-data-key">수집 성공 마켓 수</span>
-                  <span class="collection-data-value">{{ collectedData?.successCount ?? '-' }}</span>
+                  <span class="collection-data-value">{{ collectedData?._summary?.successCount ?? '-' }}</span>
                 </div>
                 <div class="collection-data-row">
                   <span class="collection-data-key">수집 실패 마켓 수</span>
-                  <span class="collection-data-value">{{ collectedData?.failCount ?? '-' }}</span>
+                  <span class="collection-data-value">{{ collectedData?._summary?.failCount ?? '-' }}</span>
+                </div>
+              </div>
+
+              <div class="collection-results" style="margin-top:12px">
+                <h4 style="margin:0 0 8px 0">마켓별 결과</h4>
+                <div v-if="!collectedData?.results || collectedData.results.length === 0">결과가 없습니다.</div>
+                <div v-else>
+                  <div v-for="(r, idx) in collectedData.results" :key="idx" class="result-row">
+                    <div style="display:flex;justify-content:space-between;gap:12px;padding:8px;background:#071826;border-radius:8px;margin-bottom:6px">
+                      <div><strong>{{ r.market }}</strong> — <span style="color:#9fb0c2">{{ r.status }}</span></div>
+                      <div>
+                        <template v-if="r.status === 'ok'">성공</template>
+                        <template v-else>오류: {{ r.error || '상세 정보 없음' }}</template>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </template>
