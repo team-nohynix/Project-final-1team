@@ -56,11 +56,11 @@
 - 실행 중인 Pod 수 — K8s API 조회 또는 별도 익스포터
 - 이 값들을 계산해서 프론트에 내려줄 API 자체도 없음(계산 로직 + 노출 엔드포인트 둘 다 필요)
 
-### 3.2 `TestResultTrackingView.vue`
-NFR 달성치(접수 TPS, E2E p99, Scale-out 시간), 트레이스 ID로 주문 하나의 처리 단계(API 접수→Kafka 적재→매칭 완료→체결 결과 발행→PostgreSQL) 조회 — 전부 정적 목업, 검색창은 있지만 코드 주석에 `// mock: would call API later`로 명시돼 있음. 트레이스 조회는 `recorder`가 이미 RDS에 `trade_order`/`execution`을 order_id로 저장하고 있어서 구현 자체는 할 수 있지만, 지금은 그 데이터를 읽어주는 API가 전혀 없다(`recorder`는 쓰기 전용, HTTP 라우트가 하나도 없음).
+### 3.2 `TestResultTrackingView.vue` — 트레이스 조회는 **2026-08-12에 새로 생김**, 나머지는 아직 없음
+트레이스 검색(코드 주석엔 `// mock: would call API later`로 표시돼 있던 부분)은 이제 `recorder`의 `GET /v1/trace/{orderId}`로 연결할 수 있다(4.3 참고). 다만 응답 모양이 프론트가 상상한 "API 접수→Kafka 적재→매칭 완료→체결 결과 발행→PostgreSQL" 5단계 타임스탬프와는 다르다 — `recorder`가 실제로 갖고 있는 시각은 주문 접수/체결/취소뿐이라, 그 세 가지만 정확하게 준다. 프론트 화면을 그 실제 모양에 맞게 다시 그려야 한다. NFR 달성치(접수 TPS, E2E p99, Scale-out 시간)는 여전히 없음(3.1과 같은 문제).
 
-### 3.3 `MatchingEngineView.vue`
-엔진 목록, 매칭 단계, 오더북 복구 현황, 체결 내역(Kafka partition/offset 포함) — 전부 정적 목업. `matching_engine_assignment` 테이블(FR-11 배정 이력)이 이미 RDS에 쌓이고 있어서 "엔진 목록"은 그걸 읽으면 구현 가능하지만, 역시 읽어주는 API가 없다.
+### 3.3 `MatchingEngineView.vue` — 엔진 목록은 **2026-08-12에 새로 생김**, 나머지는 아직 없음
+"엔진 목록"(어느 엔진이 어느 마켓을 담당 중인지)은 이제 `recorder`의 `GET /v1/matching/engines`로 연결할 수 있다(4.4 참고) — `matching_engine_assignment` 테이블의 `released_at IS NULL`인 행만 모아 엔진별로 묶어서 준다. 매칭 단계/오더북 복구 현황(`replayed/total/missing/timeSec/goalSec`)/체결 내역(Kafka partition·offset 포함) 이 세 개는 여전히 없다 — 이건 매칭 엔진 내부의 순간 상태(크래시 복구 진행률 등)라 RDS에 애초에 저장되는 값이 아니고, 별도로 노출하는 장치가 있어야 한다.
 
 ### 3.4 `RealtimeMonitoringView.vue` — 이건 예외, 코드가 필요 없을 수도 있음
 이 화면은 자체 fetch 없이 `VITE_GRAFANA_DASHBOARD_URL` 환경변수로 Grafana 대시보드를 iframe으로 띄우기만 한다. 지금 그 값이 없어서 "연결 준비 중" 상태로 뜬다. AMG(Amazon Managed Grafana) 워크스페이스는 이미 만들어져 있으므로(`infra/monitoring.tf`), 거기에 대시보드를 하나 만들고 그 URL을 프론트 `.env`에 넣으면 이 화면만큼은 새 백엔드 코드 없이 끝난다 — 다만 지금 AMP(Prometheus)엔 인프라 지표만 있어서, 3.1의 애플리케이션 지표가 여기 나오게 하려면 결국 애플리케이션이 그 지표를 Prometheus 형식으로 노출해야 한다.
@@ -135,9 +135,61 @@ AI 트레이더를 띄울 때는 `jobType`만 바꾸면 된다(샤드 개념 없
 { "errorCode": "INVALID_SHARD_COUNT", "message": "shardCount는 1 이상이어야 합니다.", "requestId": "..." }
 ```
 
+### 4.3 트레이스 조회 — `GET /v1/trace/{orderId}` (2026-08-12 신설, `recorder`)
+
+```
+GET /v1/trace/ord_20260812_0000001
+```
+```json
+{
+  "orderId": "ord_20260812_0000001",
+  "market": "KRW-BTC",
+  "side": "BUY",
+  "price": "150000000.00000000",
+  "quantity": "0.01000000",
+  "remainingQuantity": "0.00000000",
+  "status": "FILLED",
+  "mode": "PAPER_TRADING",
+  "submittedAt": "2026-08-12T00:00:00.000Z",
+  "executions": [
+    {
+      "executionId": "exec_...",
+      "market": "KRW-BTC",
+      "buyOrderId": "ord_20260812_0000001",
+      "sellOrderId": "ord_...",
+      "price": "150000000.00000000",
+      "quantity": "0.01000000",
+      "mode": "PAPER_TRADING",
+      "executedAt": "2026-08-12T00:00:05.000Z"
+    }
+  ]
+}
+```
+없는 주문이면 404 `{"errorCode":"ORDER_NOT_FOUND", ...}`. 실제 로컬 MySQL/Kafka/Redis로 이 정확한 요청/응답을 직접 확인함(`recorder`가 아직 K8s에 배포된 적은 없어서, 로컬 환경 기준 검증).
+
+**주의 — 이 응답은 프론트가 기대하는 5단계(API 접수/Kafka 적재/매칭 완료/체결 결과 발행/PostgreSQL) 모양이 아니다.** `recorder`가 실제로 갖고 있는 시각은 `submittedAt`/`executions[].executedAt`/(있다면) `canceledAt` 세 종류뿐이다 — 그 중간 단계들은 어디에도 저장되지 않는다. `TestResultTrackingView.vue`의 트레이스 표시 화면은 이 실제 모양에 맞게 다시 그려야 한다.
+
+### 4.4 매칭 엔진 목록 — `GET /v1/matching/engines` (2026-08-12 신설, `recorder`)
+
+```json
+{
+  "engines": [
+    {
+      "engineInstanceId": "engine_28ca71203df2100b",
+      "markets": [
+        { "market": "KRW-BTC", "assignedAt": "2026-08-12T00:00:00.000Z" },
+        { "market": "KRW-ETH", "assignedAt": "2026-08-12T00:00:00.000Z" }
+      ]
+    }
+  ]
+}
+```
+지금 담당 중인(`released_at IS NULL`) 배정만 나온다 — 매칭 엔진이 없으면(아직 아무 마켓도 안 배정됐거나 전부 반납됐으면) `engines`가 빈 배열로 온다. 이 역시 실제 로컬 환경으로 확인함. 매칭 단계/오더북 복구 진행률/체결 내역은 이 엔드포인트에 없다 — 3.3 참고.
+
 ## 요약
 
 - **바로 연결 가능**: 시세 수집/조회, 호가창 조회, 주문 접수/취소 (6개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
 - **필드만 고치면 됨**: 페이퍼 트레이딩 시작, 재생 시작 (실제 시작 엔드포인트는 이미 있음 — `POST /v1/jobs`)
-- **새로 만들어야 함**: 대시보드 지표 전체, 테스트 결과 추적, 매칭 엔진 상태 화면 — 계산 로직 + 조회 API 둘 다 없음
-- **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api` 경로 라우팅, Grafana 대시보드 구성
+- **2026-08-12에 새로 생김**: 트레이스 조회(`GET /v1/trace/{orderId}`), 매칭 엔진 목록(`GET /v1/matching/engines`) — 둘 다 `recorder`, 응답 모양은 프론트 목업과 다르니 화면 쪽 재설계 필요(4.3/4.4 참고)
+- **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
+- **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성
