@@ -37,7 +37,11 @@ type CollectResult struct {
 
 // collectAllMarkets는 upbit.TargetMarkets 전체에 대해 [start, end) 구간 데이터를 수집합니다.
 // 한 마켓에서 에러가 나도 나머지 마켓 수집은 계속 진행하고, 결과에 에러 상태로 기록합니다.
-func collectAllMarkets(storage dataset.Storage, start, end time.Time) []CollectResult {
+// onProgress는 마켓 하나가 끝날 때마다(성공/실패 무관) 호출됩니다 — 프론트
+// 진행률 표시용(2026-08-12 추가, collectHandler가 collectJobStore.progress를
+// 넘겨줌). nil이면 호출하지 않습니다 — 테스트 등 진행률이 필요 없는 호출부를
+// 위한 것입니다.
+func collectAllMarkets(storage dataset.Storage, start, end time.Time, onProgress func()) []CollectResult {
 	results := make([]CollectResult, 0, len(upbit.TargetMarkets))
 
 	for _, market := range upbit.TargetMarkets {
@@ -49,15 +53,18 @@ func collectAllMarkets(storage dataset.Storage, start, end time.Time) []CollectR
 				Status: "error",
 				Error:  err.Error(),
 			})
-			continue
+		} else {
+			results = append(results, CollectResult{
+				Market:     market,
+				Status:     "ok",
+				BatchPath:  batchPath,
+				StreamPath: streamPath,
+			})
 		}
 
-		results = append(results, CollectResult{
-			Market:     market,
-			Status:     "ok",
-			BatchPath:  batchPath,
-			StreamPath: streamPath,
-		})
+		if onProgress != nil {
+			onProgress()
+		}
 	}
 
 	return results
