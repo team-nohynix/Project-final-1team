@@ -16,6 +16,8 @@ const matchingSteps = ref([])
 const orderbookRecovery = ref(null)
 
 const executions = ref([])
+
+const apiAvailable = false // recorder/matching-engine API not proxied in frontend by default
 </script>
 
 <template>
@@ -48,18 +50,24 @@ const executions = ref([])
     </section>
 
     <section class="engine-grid">
-      <template v-if="engines.length === 0">
-        <div class="no-data-panel panel">데이터 연동 예정<br/><small>매칭 엔진 상태 조회 API 연동 후 표시됩니다.</small></div>
+      <template v-if="!apiAvailable">
+        <div class="no-data-panel panel">데이터 연동 예정<br/><small>매칭 엔진 상태 조회 API가 프론트에 연결되어 있지 않습니다.</small></div>
+      </template>
+      <template v-else-if="engines.length === 0">
+        <div class="no-data-panel panel">현재 배정된 매칭 엔진이 없습니다.</div>
       </template>
       <template v-else>
-        <div v-for="e in engines" :key="e.id" class="engine-card panel">
+        <div v-for="e in engines" :key="e.engineInstanceId" class="engine-card panel">
           <div class="engine-title">
-            <span class="engine-dot" :style="{ backgroundColor: e.color }"></span>
-            <strong>{{ e.id }}</strong>
-            <span class="engine-status">{{ e.status === 'running' ? '실행 중' : '중지' }}</span>
+            <span class="engine-dot" :style="{ backgroundColor: e.color || '#2ed39a' }"></span>
+            <strong>{{ e.engineInstanceId }}</strong>
+            <span class="engine-status">{{ e.status === 'running' ? '실행 중' : (e.status || '상태 불명') }}</span>
           </div>
           <div class="engine-markets">
-            <div v-for="m in e.markets" :key="m" class="engine-market">{{ m }}</div>
+            <div v-for="m in e.markets" :key="m.market" class="engine-market">
+              <div><strong>{{ m.market }}</strong></div>
+              <div class="assigned-at">Assigned: {{ m.assignedAt }}</div>
+            </div>
           </div>
         </div>
       </template>
@@ -200,6 +208,8 @@ const executions = ref([])
   font-size: 13px;
   color: #9fb0c1;
 }
+
+.assigned-at { color: #9fb0c1; font-size: 12px; margin-top: 4px }
 
 .middle-row {
   display: flex;

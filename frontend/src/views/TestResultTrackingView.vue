@@ -10,11 +10,20 @@ const nfrs = ref([])
 const faults = ref([])
 
 const traceId = ref('')
-const traceResult = ref([])
+// traceData matches recorder's GET /v1/trace/{orderId} shape
+const traceData = ref(null)
+const apiAvailable = false // recorder endpoint not wired in frontend proxy by default
+const searchMessage = ref('')
 
 const doSearch = () => {
   if (!traceId.value) return
-  // mock: would call API later
+  searchMessage.value = ''
+  if (!apiAvailable) {
+    traceData.value = null
+    searchMessage.value = '데이터 연동 예정 — recorder 엔드포인트가 프론트에 연결되어 있지 않습니다.'
+    return
+  }
+  // If apiAvailable is true, a real fetch would be placed here.
 }
 </script>
 
@@ -103,15 +112,44 @@ const doSearch = () => {
         <button type="button" class="btn-primary" @click="doSearch">Search</button>
       </div>
 
-      <div class="timeline">
-        <div v-if="traceResult.length === 0" class="center-msg">데이터 없음</div>
-        <div v-else>
-          <div v-for="(t,i) in traceResult" :key="i" class="tl-step">
-            <div class="circle" :style="{ background: t.color }">{{ t.step }}</div>
-            <div class="tl-name">{{ t.name }}</div>
-            <div class="tl-time">{{ t.time }}</div>
+      <div class="trace-result">
+        <div v-if="!apiAvailable">
+          <div class="center-msg">데이터 연동 예정<br/><small>recorder API가 프론트에 연결되어 있지 않습니다.</small></div>
+          <div class="order-placeholder panel">
+            <div><strong>Order ID:</strong> {{ traceId || '--' }}</div>
+            <div><strong>Market:</strong> --</div>
+            <div><strong>Side:</strong> --</div>
+            <div><strong>Price:</strong> --</div>
+            <div><strong>Quantity:</strong> --</div>
+            <div><strong>Submitted At:</strong> --</div>
+            <div><strong>Status:</strong> --</div>
+            <h5 style="margin-top:12px">Executions</h5>
+            <div>데이터 연동 예정</div>
           </div>
         </div>
+        <div v-else>
+          <div v-if="!traceData" class="center-msg">데이터 없음</div>
+          <div v-else class="order-detail panel">
+            <div class="order-row"><strong>Order ID:</strong> {{ traceData.orderId }}</div>
+            <div class="order-row"><strong>Market:</strong> {{ traceData.market }}</div>
+            <div class="order-row"><strong>Side:</strong> {{ traceData.side }}</div>
+            <div class="order-row"><strong>Price:</strong> {{ traceData.price }}</div>
+            <div class="order-row"><strong>Quantity:</strong> {{ traceData.quantity }}</div>
+            <div class="order-row"><strong>Submitted At:</strong> {{ traceData.submittedAt }}</div>
+            <div class="order-row"><strong>Status:</strong> {{ traceData.status }}</div>
+            <h5 style="margin-top:12px">Executions</h5>
+            <div v-if="!traceData.executions || traceData.executions.length === 0">실행 내역 없음</div>
+            <div v-else>
+              <div v-for="(ex, idx) in traceData.executions" :key="idx" class="exec-row">
+                <div><strong>Executed At:</strong> {{ ex.executedAt }}</div>
+                <div><strong>Price:</strong> {{ ex.price }}</div>
+                <div><strong>Quantity:</strong> {{ ex.quantity }}</div>
+                <div><strong>Mode:</strong> {{ ex.mode || '--' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="searchMessage" class="search-msg">{{ searchMessage }}</div>
       </div>
     </div>
   </div>
@@ -336,4 +374,15 @@ const doSearch = () => {
   .tl-step:not(:last-child)::after { display: none }
   .circle { margin-bottom: 0 }
 }
+  .order-placeholder, .order-detail {
+    margin-top: 12px;
+    padding: 12px;
+    background: #071826;
+    border-radius: 8px;
+    border: 1px solid #173141;
+    color: #cfe6fa;
+  }
+  .order-row { margin: 6px 0 }
+  .exec-row { padding: 8px; border-top: 1px solid #0b2534; margin-top: 8px }
+  .search-msg { margin-top: 12px; color: #ff9f43; font-weight: 700 }
 </style>
