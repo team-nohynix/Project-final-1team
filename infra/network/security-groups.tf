@@ -223,6 +223,19 @@ resource "aws_security_group_rule" "team1_backend_from_alb" {
   description              = "Public ALB to ingest API pod (real orderapi PORT, confirmed from orderapi/config.go default and k8s Deployment)"
 }
 
+# 시세 수집기(backend, collector 네임스페이스)는 Fargate라 전용 SG가 없고
+# team1_sg_eks_cluster를 쓴다(컨트롤플레인 + Fargate 파드 전부 공유) — 프론트가
+# /v1/collect, /v1/markets/*를 직접 호출하는 걸 확인해서 이 경로도 ALB로 노출.
+resource "aws_security_group_rule" "team1_collector_from_alb" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_cluster.id
+  source_security_group_id = aws_security_group.team1_sg_alb_public.id
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  description              = "Public ALB to market-data collector pod (backend/config.go default PORT)"
+}
+
 # Job 트리거 Lambda(team1-lambda-job-trigger, root 스택 job-trigger.tf) — SQS를 소비해
 # EKS 프라이빗 엔드포인트를 호출한다. Lambda가 항상 발신 쪽이라 인그레스 규칙은 불필요.
 resource "aws_security_group" "team1_sg_lambda_job_trigger" {

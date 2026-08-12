@@ -228,7 +228,12 @@ resource "aws_iam_role" "sa_collector" {
 
 data "aws_iam_policy_document" "sa_collector_policy" {
   statement {
-    actions   = ["s3:PutObject"]
+    # GetObject — backend/server.go의 fileHandler가 캐시 히트 시 직접 읽어서
+    # 서빙한다(HeadObject 존재 확인 후 미스일 때만 새로 수집). PutObject만 주고
+    # GetObject를 안 줬더니 이미 캐시된 데이터 조회조차 403으로 실패하는 걸
+    # 라이브로 확인했다 — collector가 쓰기 전용이라는 원래 가정이 실제 구현과
+    # 안 맞았다.
+    actions   = ["s3:GetObject", "s3:PutObject"]
     resources = ["${aws_s3_bucket.market_data.arn}/*"]
   }
   statement {

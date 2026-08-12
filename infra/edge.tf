@@ -162,6 +162,20 @@ resource "aws_cloudfront_distribution" "frontend" {
     }
   }
 
+  # 시세 수집기 ALB — truss-collector.jhyang.click로 오리진 도메인을 잡는 이유는
+  # 접수 API 오리진과 동일(와일드카드 인증서 검증).
+  origin {
+    domain_name = aws_route53_record.collector.fqdn
+    origin_id   = "team1-collector-alb"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
   default_cache_behavior {
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
@@ -198,6 +212,20 @@ resource "aws_cloudfront_distribution" "frontend" {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.strip_order_api_prefix.arn
     }
+  }
+
+  # 프론트가 /v1/collect, /v1/markets/*를 접두사 없이 바로 호출하는 걸 실제
+  # 소스(AITraderView.vue, MarketStreamView.vue)로 확인해서 시세 수집기 ALB로
+  # 프록시 — backend 자체 라우트가 이미 /v1/...라 경로 재작성이 필요 없다.
+  ordered_cache_behavior {
+    path_pattern           = "/v1/*"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "team1-collector-alb"
+    viewer_protocol_policy = "https-only"
+
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed-CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed-AllViewer
   }
 
   restrictions {
@@ -279,6 +307,33 @@ resource "aws_route53_record" "api" {
   alias {
     name                   = data.aws_lb.orderapi.dns_name
     zone_id                = data.aws_lb.orderapi.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# 시세 수집기(backend) ALB — 프론트가 /order-api 같은 접두사 없이 /v1/collect,
+# /v1/markets/*를 그대로 호출하는 걸 실제 소스(AITraderView.vue,
+# MarketStreamView.vue)로 확인해서 별도 ALB+도메인으로 노출한다. orderapi와
+# 다른 ALB인 이유: 이미 정상 동작 중인 orderapi Ingress를 IngressGroup으로
+# 합치면서 건드리는 리스크를 피하려는 것.
+data "aws_lb" "collector" {
+  tags = {
+    Name = "team1-alb-collector"
+  }
+}
+
+locals {
+  collector_domain = "truss-collector.${var.domain_name}"
+}
+
+resource "aws_route53_record" "collector" {
+  zone_id = data.aws_route53_zone.team1.zone_id
+  name    = local.collector_domain
+  type    = "A"
+
+  alias {
+    name                   = data.aws_lb.collector.dns_name
+    zone_id                = data.aws_lb.collector.zone_id
     evaluate_target_health = true
   }
 }
