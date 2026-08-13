@@ -9,12 +9,26 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"orderapi/backpressure"
 	"orderapi/idempotency"
 	"orderapi/kafkaclient"
 	"orderapi/order"
 	"orderapi/validate"
 )
+
+var ordersTotalCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "orders_total",
+		Help: "Total number of orders accepted",
+	},
+	[]string{"status"},
+)
+
+func init() {
+	prometheus.MustRegister(ordersTotalCounter)
+}
 
 // orderRequest는 POST /v1/orders의 요청 본문입니다. SourceOrderID는 선택
 // 필드(docs/api-specification.md 2.1) — replayengine이 리플레이 주문을 제출할
@@ -116,6 +130,7 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 			// 확인하는 MultiChecker이므로(main.go 참고), 메시지도 어느 한쪽으로
 			// 특정하지 않습니다 — 클라이언트 입장에선 원인이 뭐든 "잠시 후 재시도"가
 			// 동일한 대응이라 구분해서 알려줄 실익도 없습니다.
+			ordersTotalCounter.WithLabelValues("rejected_backpressure").Inc()
 			writeError(w, reqID, http.StatusTooManyRequests, "CONSUMER_LAG_EXCEEDED", "시스템이 처리 지연 중입니다. 잠시 후 다시 시도해주세요.")
 			return
 		}
@@ -167,9 +182,8 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 			return
 		}
 		store.Save(o)
-		log.Printf("주문 접수 완료 (market=%s, side=%s, orderId=%s)", o.Market, o.Side, o.OrderID)
-
 		ordersTotalCounter.WithLabelValues("accepted").Inc()
+		log.Printf("주문 접수 완료 (market=%s, side=%s, orderId=%s)", o.Market, o.Side, o.OrderID)
 
 		body, _ := json.Marshal(o)
 		idem.Put(key, http.StatusAccepted, body)
@@ -213,6 +227,7 @@ func cancelOrderHandler(store *order.Store, producer kafkaclient.Publisher) http
 				writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "취소 발행에 실패했습니다.")
 				return
 			}
+			ordersTotalCounter.WithLabelValues("canceled").Inc()
 			log.Printf("주문 취소 완료 (market=%s, orderId=%s)", o.Market, o.OrderID)
 		}
 

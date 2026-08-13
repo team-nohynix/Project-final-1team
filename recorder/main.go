@@ -111,8 +111,11 @@ func main() {
 	// 읽어 신규 주문을 429로 거절할지 결정합니다(기록기는 이 결정에 관여하지
 	// 않고 오직 관찰한 사실만 Redis에 남김).
 	watcher := &backpressure.Watcher{
-		Sources:       []backpressure.LagSource{orderReader.Lag, execReader.Lag},
-		Flag:          &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey},
+		Sources: []backpressure.LagSource{
+			instrumentedLagSource("orders", orderReader.Lag),
+			instrumentedLagSource("executions", execReader.Lag),
+		},
+		Flag:          instrumentedFlag{inner: &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey}},
 		HighWatermark: backpressureHighWatermark,
 		LowWatermark:  backpressureLowWatermark,
 		CheckInterval: backpressureCheckInterval,
