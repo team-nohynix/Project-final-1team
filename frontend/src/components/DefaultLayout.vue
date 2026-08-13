@@ -16,13 +16,6 @@ const updateOpenMenu = () => {
     p.startsWith('/market-orderbook')
   )
     openMenu.value = 'trading'
-  else if (
-    p.startsWith('/monitoring') ||
-    p.startsWith('/test-results') ||
-    p.startsWith('/fault-recovery')
-  )
-    openMenu.value = 'observe'
-  else if (p.startsWith('/market-stream') || p.startsWith('/deployment-ops')) openMenu.value = 'data'
   else openMenu.value = ''
 }
 
@@ -118,69 +111,25 @@ const isActive = (path) => route.path === path
           </button>
         </div>
 
-        <button class="menu-button" type="button" @click="toggleMenu('observe')">
-          <span>관찰·검증</span>
-          <span class="arrow" :class="{ open: openMenu === 'observe' }">›</span>
+        <button
+          class="submenu-item"
+          :class="{ selected: isActive('/test-results') }"
+          type="button"
+          @click.prevent="go('/test-results')"
+        >
+          <span class="menu-dot"></span>
+          결과 추적
         </button>
 
-        <div v-if="openMenu === 'observe'" class="submenu">
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/monitoring') }"
-            type="button"
-            @click.prevent="go('/monitoring')"
-          >
-            <span class="menu-dot"></span>
-            실시간 모니터링
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/test-results') }"
-            type="button"
-            @click.prevent="go('/test-results')"
-          >
-            <span class="menu-dot"></span>
-            결과 추적
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/fault-recovery') }"
-            type="button"
-            @click.prevent="go('/fault-recovery')"
-          >
-            <span class="menu-dot"></span>
-            장애 주입·복구
-          </button>
-        </div>
-
-        <button class="menu-button" type="button" @click="toggleMenu('data')">
-          <span>데이터·운영</span>
-          <span class="arrow" :class="{ open: openMenu === 'data' }">›</span>
+        <button
+          class="submenu-item"
+          :class="{ selected: isActive('/market-stream') }"
+          type="button"
+          @click.prevent="go('/market-stream')"
+        >
+          <span class="menu-dot"></span>
+          시세 조회
         </button>
-
-        <div v-if="openMenu === 'data'" class="submenu">
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/market-stream') }"
-            type="button"
-            @click.prevent="go('/market-stream')"
-          >
-            <span class="menu-dot"></span>
-            시세 조회
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/deployment-ops') }"
-            type="button"
-            @click.prevent="go('/deployment-ops')"
-          >
-            <span class="menu-dot"></span>
-            배포·운영
-          </button>
-        </div>
       </nav>
 
       <div class="system-badge">
