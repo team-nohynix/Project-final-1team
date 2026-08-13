@@ -86,6 +86,7 @@ func main() {
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(sessionStore))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(sessionStore))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore))
+	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 
 	// JOB_TRIGGER_QUEUE_URL이 없으면(로컬 개발 등) 이 라우트 자체를 등록하지
 	// 않습니다 — config.go 참고, orderapi의 핵심 기능과는 무관한 선택 기능입니다.

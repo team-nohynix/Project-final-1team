@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"recorder/query"
 )
@@ -77,5 +78,51 @@ func dashboardMetricsHandler(q query.Querier) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, metrics)
+	}
+}
+
+// orderSummaryHandler는 GET /v1/orders/summary?mode=...&from=...&to=...를
+// 처리합니다 — 프론트의 "페이퍼 트레이딩 실행 결과" 화면(2026-08-12, 주문
+// 접수/체결/미체결 수)을 지원합니다. mode/from은 필수, to는 생략하면 지금까지로
+// 집계합니다(실행이 아직 진행 중이라 orderapi의 GET /v1/sessions/last-run
+// 응답에 endedAt이 없을 때 씀). from/to는 그 응답의 startedAt/endedAt을 그대로
+// RFC3339로 넘기면 됩니다 — 세션 가드(orderapi/session)가 트레이더/리플레이
+// 엔진을 동시에 하나만 실행되게 막아서, 그 구간엔 다른 실행의 주문이 섞일 수
+// 없어 정확한 집계가 됩니다.
+func orderSummaryHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mode := r.URL.Query().Get("mode")
+		if mode != "PAPER_TRADING" && mode != "REPLAY" {
+			writeError(w, http.StatusBadRequest, "INVALID_MODE", "mode는 PAPER_TRADING 또는 REPLAY여야 합니다.")
+			return
+		}
+
+		fromStr := r.URL.Query().Get("from")
+		if fromStr == "" {
+			writeError(w, http.StatusBadRequest, "MISSING_FROM", "from은 필수입니다 (RFC3339).")
+			return
+		}
+		from, err := time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_FROM", "from 형식이 올바르지 않습니다 (RFC3339).")
+			return
+		}
+
+		var to time.Time
+		if toStr := r.URL.Query().Get("to"); toStr != "" {
+			to, err = time.Parse(time.RFC3339, toStr)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_TO", "to 형식이 올바르지 않습니다 (RFC3339).")
+				return
+			}
+		}
+
+		summary, err := q.OrderSummary(r.Context(), mode, from, to)
+		if err != nil {
+			log.Printf("주문 집계 조회 실패 (mode=%s): %v", mode, err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "주문 집계 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
 	}
 }

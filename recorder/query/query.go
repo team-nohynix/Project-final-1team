@@ -87,6 +87,24 @@ type Querier interface {
 	// (docs/frontend-backend-integration.md 3.1)를 recorder가 이미 RDS에
 	// 쌓아둔 데이터에서 계산해 반환합니다.
 	DashboardMetrics(ctx context.Context) (DashboardMetrics, error)
+	// OrderSummary는 mode+[from,to) 구간에 접수된 주문을 상태별로 집계합니다 —
+	// 프론트의 "페이퍼 트레이딩 실행 결과" 화면(접수/체결/미체결 수, 2026-08-12)을
+	// 지원합니다. to가 zero value면 지금 시각을 씁니다(아직 IN_PROGRESS인 실행의
+	// 현재까지 집계를 보여줄 때 씀). 이 구간 지정이 정확한 이유는 orderapi의
+	// 세션 가드가 트레이더/리플레이 엔진을 동시에 하나만 실행되게 막아서,
+	// [from,to) 구간에 다른 실행의 주문이 섞일 수 없기 때문입니다.
+	OrderSummary(ctx context.Context, mode string, from, to time.Time) (OrderSummary, error)
+}
+
+// OrderSummary는 GET /v1/orders/summary의 응답입니다. Accepted는 그 구간에
+// 접수된 전체 주문 수(모든 상태 포함), Filled는 그중 FILLED, Unfilled는
+// ACCEPTED/PARTIALLY_FILLED(아직 안 끝난 것)입니다 — CANCELED는 셋 다에
+// 안 들어가고 Accepted에만 포함되므로, Filled+Unfilled가 Accepted보다
+// 작을 수 있습니다(취소된 만큼).
+type OrderSummary struct {
+	Accepted int64 `json:"accepted"`
+	Filled   int64 `json:"filled"`
+	Unfilled int64 `json:"unfilled"`
 }
 
 // MetricsBucket은 DashboardMetrics.Series의 항목 하나 — 1분 단위 버킷의
@@ -383,4 +401,28 @@ func percentile99(samplesMs []float64) float64 {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// OrderSummary는 mode+[from,to) 구간의 trade_order를 상태별로 집계합니다.
+// COALESCE로 SUM을 감싼 이유: 그 구간에 해당하는 행이 하나도 없으면 MySQL의
+// SUM(CASE...)이 NULL을 반환하는데(COUNT(*)와 달리), 이걸 그대로 *int64로
+// Scan하면 실패합니다 — 0건일 때도 정상적으로 0을 받기 위함입니다.
+func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to time.Time) (OrderSummary, error) {
+	if to.IsZero() {
+		to = time.Now().UTC()
+	}
+
+	var s OrderSummary
+	err := q.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END), 0)
+		FROM trade_order
+		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+	`, mode, from, to).Scan(&s.Accepted, &s.Filled, &s.Unfilled)
+	if err != nil {
+		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", err)
+	}
+	return s, nil
 }

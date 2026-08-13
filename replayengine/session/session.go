@@ -47,6 +47,13 @@ type errorResponse struct {
 	Message   string `json:"message"`
 }
 
+// releaseRequest는 orderapi/sessionhandlers.go의 releaseRequest와 같은 모양입니다
+// (모듈 간 타입 비공유 원칙에 따라 독립적으로 다시 선언).
+type releaseRequest struct {
+	Status  string `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 // Client는 orderapi의 세션 API를 호출합니다.
 type Client struct {
 	HTTPClient *http.Client
@@ -112,12 +119,20 @@ func (c Client) Heartbeat(ctx context.Context, sessionID string) error {
 }
 
 // Release는 세션을 명시적으로 반납합니다. 정상 종료 경로에서 호출합니다 —
-// 크래시로 못 부르면 TTL이 지나서 자동으로 풀립니다(자기치유).
-func (c Client) Release(ctx context.Context, sessionID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/v1/sessions/"+sessionID, nil)
+// 크래시로 못 부르면 TTL이 지나서 자동으로 풀립니다(자기치유). status/message는
+// 이번 실행이 어떻게 끝났는지를 orderapi의 LastRun에 남깁니다(2026-08-12,
+// trader/session과 같은 이유). status가 비어있으면 orderapi가 COMPLETED로
+// 기본 처리합니다.
+func (c Client) Release(ctx context.Context, sessionID, status, message string) error {
+	body, err := json.Marshal(releaseRequest{Status: status, Message: message})
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/v1/sessions/"+sessionID, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err

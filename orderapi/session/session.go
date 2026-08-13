@@ -50,7 +50,43 @@ const (
 	metaKey          = "orderapi:session:meta"
 	membersKeyPrefix = "orderapi:session:members:"
 	sessionIDSep     = "."
+
+	// lastRunKey는 activeKey/metaKey와 달리 반납(Release) 시 지워지지 않습니다 —
+	// "지금 뭔가 실행 중인가"가 아니라 "가장 최근 실행이 어떻게 끝났는가"를
+	// 프론트가 실행이 끝난 뒤에도 계속 조회할 수 있어야 하기 때문입니다
+	// (2026-08-12, 프론트의 "페이퍼 트레이딩 결과 화면" 지원 — 실행 상태/시작·
+	// 종료 시각/오류 메시지). 다음 Claim이 새 그룹을 만들 때 덮어씁니다. 이
+	// 프로젝트의 세션 배타성 보장(activeKey 하나만 원자적으로 다룸) 덕분에
+	// 언제든 활성 실행은 최대 1개뿐이라, 이 키를 잠금 스크립트 밖에서 별도
+	// GET/SET으로 다뤄도 두 실행이 동시에 이 키를 다르게 쓸 일이 없습니다.
+	lastRunKey = "orderapi:session:lastrun"
 )
+
+// RunStatus 값 — 프론트가 그대로 표시할 수 있는 3가지뿐입니다.
+const (
+	RunStatusInProgress = "IN_PROGRESS"
+	RunStatusCompleted  = "COMPLETED"
+	RunStatusFailed     = "FAILED"
+)
+
+// RunOutcome은 Release 호출부(trader/replayengine)가 "이번 실행이 어떻게
+// 끝났는지"를 함께 보고할 때 씁니다. Message는 실패 사유(에러 메시지) 또는
+// 성공이어도 남길 만한 요약(예: 일부 마켓 실패)을 자유 형식으로 담습니다 —
+// 비워도 됩니다.
+type RunOutcome struct {
+	Status  string
+	Message string
+}
+
+// RunRecord는 GET(마지막 실행 결과 조회)의 응답 데이터입니다.
+type RunRecord struct {
+	RunID     string
+	Owner     string
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time // Status가 IN_PROGRESS면 zero value
+	Message   string
+}
 
 func membersKey(runID string) string { return membersKeyPrefix + runID }
 
@@ -110,7 +146,14 @@ type Store interface {
 	// 그룹이 활성 상태면 *ConflictError를 반환합니다.
 	Claim(ctx context.Context, owner, runID string) (Info, error)
 	Heartbeat(ctx context.Context, sessionID string) error
-	Release(ctx context.Context, sessionID string) error
+	// Release는 이 멤버를 그룹에서 반납합니다. outcome은 그룹의 마지막
+	// 멤버가 반납할 때만(=이 실행 전체가 끝날 때만) LastRun에 반영됩니다 —
+	// 리플레이 샤드처럼 여러 멤버 중 일부만 먼저 끝나는 경우 아직 실행 중인
+	// 것으로 남아야 합니다.
+	Release(ctx context.Context, sessionID string, outcome RunOutcome) error
+	// LastRun은 가장 최근 실행의 기록을 반환합니다. 지금까지 한 번도 실행된
+	// 적이 없으면 found=false(에러 아님).
+	LastRun(ctx context.Context) (RunRecord, bool, error)
 }
 
 // RedisStore는 Store를 Redis로 구현합니다.
@@ -142,7 +185,7 @@ if current == false then
 	return 1
 elseif current == ARGV[1] then
 	redis.call('EXPIRE', KEYS[1], ARGV[2])
-	return 1
+	return 2
 end
 return 0
 `
@@ -160,7 +203,8 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID string) (Info, erro
 	if err != nil {
 		return Info{}, fmt.Errorf("세션 클레임 실패: %w", err)
 	}
-	if n, _ := res.(int64); n == 0 {
+	n, _ := res.(int64)
+	if n == 0 {
 		return Info{}, &ConflictError{Current: s.currentInfo(ctx)}
 	}
 
@@ -178,6 +222,16 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID string) (Info, erro
 	// 때 그대로 덮어쓰이고, 그룹의 마지막 멤버가 반납할 때 같이 지워집니다.
 	if body, err := json.Marshal(metaRecord{Owner: owner, ClaimedAt: now}); err == nil {
 		s.client.Set(ctx, metaKey, body, 0)
+	}
+
+	// claimScript가 1(새 그룹 생성)을 돌려줬을 때만 LastRun을 새로 씁니다 —
+	// 2(기존 그룹에 합류, 예: 리플레이 샤드 2번째 이후)면 이미 첫 멤버가 써둔
+	// StartedAt을 건드리면 안 됩니다.
+	if n == 1 {
+		record := RunRecord{RunID: runID, Owner: owner, Status: RunStatusInProgress, StartedAt: now}
+		if body, err := json.Marshal(record); err == nil {
+			s.client.Set(ctx, lastRunKey, body, 0)
+		}
 	}
 
 	return Info{
@@ -216,6 +270,7 @@ if remaining == 0 and redis.call('GET', KEYS[1]) == ARGV[1] then
 	redis.call('DEL', KEYS[1])
 	redis.call('DEL', KEYS[3])
 	redis.call('DEL', KEYS[2])
+	return 2
 end
 return 1
 `
@@ -239,9 +294,11 @@ func (s *RedisStore) Heartbeat(ctx context.Context, sessionID string) error {
 }
 
 // Release는 이 멤버를 그룹에서 명시적으로 반납합니다 — 그룹의 마지막 멤버였을
-// 때만 그룹 자체(activeKey)도 즉시 지워집니다(다른 멤버가 남아있으면 그룹은
-// 안 건드림). sessionID가 이미 반납됐거나 존재한 적 없으면 ErrNotActive입니다.
-func (s *RedisStore) Release(ctx context.Context, sessionID string) error {
+// 때만 그룹 자체(activeKey)도 즉시 지워지고, 그때만 outcome을 LastRun에
+// 반영합니다(리플레이 샤드처럼 아직 남은 멤버가 있으면 이 실행은 안 끝난
+// 것이므로 LastRun을 안 건드립니다). sessionID가 이미 반납됐거나 존재한 적
+// 없으면 ErrNotActive입니다.
+func (s *RedisStore) Release(ctx context.Context, sessionID string, outcome RunOutcome) error {
 	runID, member, ok := splitSessionID(sessionID)
 	if !ok {
 		return ErrNotActive
@@ -250,10 +307,51 @@ func (s *RedisStore) Release(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("세션 반납 실패: %w", err)
 	}
-	if n, _ := res.(int64); n == 0 {
+	n, _ := res.(int64)
+	if n == 0 {
 		return ErrNotActive
 	}
+	if n == 2 {
+		s.finalizeLastRun(ctx, runID, outcome)
+	}
 	return nil
+}
+
+// finalizeLastRun은 LastRun 레코드에 종료 시각/상태/메시지를 채웁니다. 기존에
+// Claim이 써둔 RunID/Owner/StartedAt은 그대로 두고 이어받습니다 — 다만 Redis
+// 왕복을 하나 더 아끼려고 그냥 새로 만들어도 되는데(Owner/StartedAt은 outcome
+// 호출부가 모르는 값이라 다시 못 채움), 그래서 기존 값을 먼저 읽어와 채웁니다.
+// 조회가 실패해도(레코드가 이미 없어졌거나 등) 최소한 상태/메시지는 남깁니다 —
+// "완료됐다"는 사실 자체가 "시작 시각을 못 보여준다"보다 훨씬 중요합니다.
+func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome RunOutcome) {
+	record := RunRecord{RunID: runID, Status: outcome.Status, EndedAt: time.Now().UTC(), Message: outcome.Message}
+	if body, err := s.client.Get(ctx, lastRunKey).Bytes(); err == nil {
+		var existing RunRecord
+		if json.Unmarshal(body, &existing) == nil && existing.RunID == runID {
+			record.Owner = existing.Owner
+			record.StartedAt = existing.StartedAt
+		}
+	}
+	if body, err := json.Marshal(record); err == nil {
+		s.client.Set(ctx, lastRunKey, body, 0)
+	}
+}
+
+// LastRun은 가장 최근 실행 기록을 반환합니다. 한 번도 실행된 적이 없으면
+// found=false입니다.
+func (s *RedisStore) LastRun(ctx context.Context) (RunRecord, bool, error) {
+	body, err := s.client.Get(ctx, lastRunKey).Bytes()
+	if err == redis.Nil {
+		return RunRecord{}, false, nil
+	}
+	if err != nil {
+		return RunRecord{}, false, fmt.Errorf("마지막 실행 기록 조회 실패: %w", err)
+	}
+	var record RunRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return RunRecord{}, false, fmt.Errorf("마지막 실행 기록 파싱 실패: %w", err)
+	}
+	return record, true, nil
 }
 
 // currentInfo는 충돌 에러 메시지를 사람이 읽기 좋게 만들기 위한 최선의 노력(best

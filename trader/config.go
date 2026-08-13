@@ -10,9 +10,9 @@ import (
 // Config는 trader가 연결할 외부 서비스 주소를 담습니다. backend/config.Load(),
 // orderapi/config.go의 LoadConfig()와 같은 패턴 — .env가 없어도(prod) 오류로 취급하지 않습니다.
 type Config struct {
-	BackendURL    string
-	OrderAPIURL   string
-	BedrockRegion string
+	BackendURL     string
+	OrderAPIURL    string
+	BedrockRegion  string
 	BedrockModelID string
 }
 
