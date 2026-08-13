@@ -19,7 +19,10 @@ func main() {
 	}
 }
 
-func run() error {
+// run의 반환값 err는 named return입니다 — trader/main.go의 run()과 같은 이유로
+// (2026-08-12 추가) 아래 defer가 최종 성공/실패를 orderapi에 보고합니다.
+func run() (err error) {
+	var resultMessage string
 	date := flag.String("date", "", "리플레이할 기록의 날짜 (YYYY-MM-DD, 필수 — trader가 그 -date로 기록한 세션)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 읽어올 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에서 읽음)")
@@ -78,10 +81,19 @@ func run() error {
 	defer func() {
 		stopHeartbeat()
 		heartbeatWG.Wait()
-		if err := sessionClient.Release(context.Background(), sessionID); err != nil {
-			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, err)
+
+		// "COMPLETED"/"FAILED"는 orderapi/session.RunStatusCompleted/Failed와
+		// 같은 문자열입니다 — 모듈 간 타입 비공유 원칙, trader/main.go와 동일.
+		status := "COMPLETED"
+		message := resultMessage
+		if err != nil {
+			status = "FAILED"
+			message = err.Error()
+		}
+		if relErr := sessionClient.Release(context.Background(), sessionID, status, message); relErr != nil {
+			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, relErr)
 		} else {
-			log.Printf("세션 반납 완료 (sessionId=%s)", sessionID)
+			log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, status)
 		}
 	}()
 
@@ -120,6 +132,7 @@ func run() error {
 		started, skipped, *shardIndex, *shardCount, cfg.OrderAPIURL)
 
 	wg.Wait()
+	resultMessage = fmt.Sprintf("%d개 마켓 재생, %d개 건너뜀 (shard %d/%d)", started, skipped, *shardIndex, *shardCount)
 	log.Print("전체 리플레이 완료")
 	return nil
 }

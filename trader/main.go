@@ -22,7 +22,13 @@ func main() {
 	}
 }
 
-func run() error {
+// run의 반환값 err는 named return입니다 — 아래 defer가 "run이 최종적으로
+// 에러를 반환했는지"를 보고 orderapi에 실행 결과(완료/실패)를 보고합니다
+// (2026-08-12, 프론트 "실행 결과" 화면 지원). resultMessage는 err가 nil이어도
+// (마켓 일부만 실패해도 전체 실행 자체는 실패로 안 치는 기존 정책, 아래
+// "실패한 마켓" 로그와 동일) 남길 만한 요약이 있으면 채웁니다.
+func run() (err error) {
+	var resultMessage string
 	date := flag.String("date", "", "재생할 날짜 (YYYY-MM-DD, 필수)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 저장할 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에 저장)")
@@ -65,10 +71,21 @@ func run() error {
 	defer func() {
 		stopHeartbeat()
 		heartbeatWG.Wait()
-		if err := sessionClient.Release(context.Background(), sessionID); err != nil {
-			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, err)
+
+		// "COMPLETED"/"FAILED"는 orderapi/session.RunStatusCompleted/Failed와
+		// 같은 문자열입니다 — 모듈 간 타입 비공유 원칙에 따라 문자열 그대로
+		// 다시 씁니다(orderapi가 실제로 검사하는 값은 releaseRequest.Status
+		// 필드뿐이라 상수 공유가 필요 없습니다).
+		status := "COMPLETED"
+		message := resultMessage
+		if err != nil {
+			status = "FAILED"
+			message = err.Error()
+		}
+		if relErr := sessionClient.Release(context.Background(), sessionID, status, message); relErr != nil {
+			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, relErr)
 		} else {
-			log.Printf("세션 반납 완료 (sessionId=%s)", sessionID)
+			log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, status)
 		}
 	}()
 
@@ -163,7 +180,8 @@ func run() error {
 	}
 
 	if len(failed) > 0 {
-		log.Printf("전체 재생 완료 — 실패한 마켓(%d개): %v", len(failed), failed)
+		resultMessage = fmt.Sprintf("실패한 마켓 %d개: %v", len(failed), failed)
+		log.Printf("전체 재생 완료 — %s", resultMessage)
 		return nil
 	}
 	log.Printf("전체 재생 완료 — %d개 마켓 전부 성공", len(manifest.Markets))

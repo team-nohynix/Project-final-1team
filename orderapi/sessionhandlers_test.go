@@ -19,10 +19,14 @@ type fakeSessionStore struct {
 	claimErr     error
 	heartbeatErr error
 	releaseErr   error
+	lastRunRec   session.RunRecord
+	lastRunFound bool
+	lastRunErr   error
 
 	lastRunID       string
 	lastHeartbeatID string
 	lastReleaseID   string
+	lastOutcome     session.RunOutcome
 }
 
 func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string) (session.Info, error) {
@@ -38,9 +42,14 @@ func (f *fakeSessionStore) Heartbeat(ctx context.Context, sessionID string) erro
 	return f.heartbeatErr
 }
 
-func (f *fakeSessionStore) Release(ctx context.Context, sessionID string) error {
+func (f *fakeSessionStore) Release(ctx context.Context, sessionID string, outcome session.RunOutcome) error {
 	f.lastReleaseID = sessionID
+	f.lastOutcome = outcome
 	return f.releaseErr
+}
+
+func (f *fakeSessionStore) LastRun(ctx context.Context) (session.RunRecord, bool, error) {
+	return f.lastRunRec, f.lastRunFound, f.lastRunErr
 }
 
 func newSessionMux(store session.Store) *http.ServeMux {
@@ -48,6 +57,7 @@ func newSessionMux(store session.Store) *http.ServeMux {
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(store))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(store))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store))
+	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
 	return mux
 }
 
@@ -181,6 +191,76 @@ func TestReleaseSessionNotActive(t *testing.T) {
 	mux := newSessionMux(store)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/sess_gone", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestReleaseSessionNoBodyDefaultsToCompleted(t *testing.T) {
+	store := &fakeSessionStore{}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/sess_1", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if store.lastOutcome.Status != session.RunStatusCompleted {
+		t.Errorf("outcome.Status = %q, want %q (본문 없을 때 기본값)", store.lastOutcome.Status, session.RunStatusCompleted)
+	}
+}
+
+func TestReleaseSessionFailedOutcome(t *testing.T) {
+	store := &fakeSessionStore{}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/sess_1", strings.NewReader(`{"status":"FAILED","message":"보드 연결 실패"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if store.lastOutcome.Status != session.RunStatusFailed || store.lastOutcome.Message != "보드 연결 실패" {
+		t.Errorf("outcome = %+v", store.lastOutcome)
+	}
+}
+
+func TestLastRunHandlerFound(t *testing.T) {
+	started := time.Date(2026, 8, 12, 9, 0, 0, 0, time.UTC)
+	ended := started.Add(3 * time.Minute)
+	store := &fakeSessionStore{lastRunFound: true, lastRunRec: session.RunRecord{
+		RunID: "run_1", Owner: "trader", Status: session.RunStatusCompleted,
+		StartedAt: started, EndedAt: ended, Message: "일부 마켓 실패: 2개",
+	}}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/last-run", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got lastRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if got.Status != "COMPLETED" || got.EndedAt == "" || got.Message == "" {
+		t.Errorf("got = %+v", got)
+	}
+}
+
+func TestLastRunHandlerNeverRun(t *testing.T) {
+	store := &fakeSessionStore{lastRunFound: false}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/last-run", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

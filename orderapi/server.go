@@ -169,6 +169,8 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 		store.Save(o)
 		log.Printf("주문 접수 완료 (market=%s, side=%s, orderId=%s)", o.Market, o.Side, o.OrderID)
 
+		ordersTotalCounter.WithLabelValues("accepted").Inc()
+
 		body, _ := json.Marshal(o)
 		idem.Put(key, http.StatusAccepted, body)
 		w.Header().Set("Content-Type", "application/json")
