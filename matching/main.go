@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"matching/backpressure"
@@ -139,6 +140,20 @@ func newInstanceID() string {
 		return fmt.Sprintf("engine_%d", time.Now().UnixNano())
 	}
 	return "engine_" + hex.EncodeToString(buf)
+}
+
+var (
+	executionsTotalCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "matching_executions_total",
+			Help: "Total executions matched",
+		},
+		[]string{"market"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(executionsTotalCounter)
 }
 
 func main() {

@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.36
 	github.com/joho/godotenv v1.5.1
+	github.com/prometheus/client_golang v1.19.1
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/segmentio/kafka-go/sasl/aws_msk_iam_v2 v0.1.0
