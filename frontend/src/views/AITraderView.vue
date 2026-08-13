@@ -36,6 +36,14 @@ const collectedData = ref(null)
 
 // Job ID returned by POST /v1/collect (used for polling)
 const collectJobId = ref('')
+// 진행률 — GET /v1/collect/{jobId} 응답의 completed/total(2026-08-12 백엔드에
+// 추가됨)을 그대로 보관. 폴링 전이거나 아직 한 마켓도 안 끝났으면 0/0.
+const collectCompleted = ref(0)
+const collectTotal = ref(0)
+const collectProgressPercent = computed(() => {
+  if (!collectTotal.value) return 0
+  return Math.round((collectCompleted.value / collectTotal.value) * 100)
+})
 
 // The date that was requested for collection (set at POST time). This is preserved while collecting/completed.
 const requestedCollectDate = ref('')
@@ -64,6 +72,8 @@ function saveStateToSession() {
       collectionStatus: collectionStatus.value,
       requestedCollectDate: requestedCollectDate.value,
       collectedData: collectedData.value,
+      collectCompleted: collectCompleted.value,
+      collectTotal: collectTotal.value,
       // execution / paper trading
       executionStatus: executionStatus.value,
       paperTradingResult: paperTradingResult.value,
@@ -191,6 +201,8 @@ const requestMarketData = async () => {
   stopPolling()
   collectedData.value = null
   collectJobId.value = ''
+  collectCompleted.value = 0
+  collectTotal.value = 0
   errorMessage.value = ''
 
   collectionStatus.value = 'collecting'
@@ -286,10 +298,15 @@ async function pollOnce() {
 
     const data = await res.json()
     const status = data?.status
+
     // If backend provides a date in the response, prefer it for display; otherwise keep requestedCollectDate
     if (data?.date) {
       requestedCollectDate.value = data.date
     }
+
+    // Update progress counts if backend includes them (keeps backward compatibility)
+    collectCompleted.value = data?.completed ?? collectCompleted.value
+    collectTotal.value = data?.total ?? collectTotal.value
     if (status === 'IN_PROGRESS') {
       collectionStatus.value = 'collecting'
       // schedule next poll in 3s
@@ -355,6 +372,8 @@ const handleCollectionError = (error: Error | any) => {
 const resetCollection = () => {
   collectionStatus.value = 'idle'
   collectedData.value = null
+  collectCompleted.value = 0
+  collectTotal.value = 0
 }
 
 // 수집 날짜가 변경되면 기존 시세 수집 상태(수집 데이터/상태 배지/페이퍼 트레이딩 버튼)를 초기화
@@ -429,6 +448,8 @@ watch(
     collectJobId,
     collectionStatus,
     collectedData,
+    collectCompleted,
+    collectTotal,
     executionStatus,
     paperTradingResult,
     executionError,
@@ -463,7 +484,11 @@ onMounted(async () => {
       collectJobId.value = stored.collectJobId ?? collectJobId.value
       collectionStatus.value = stored.collectionStatus ?? collectionStatus.value
       collectedData.value = stored.collectedData ?? collectedData.value
+
+      // Restore requested date and any collected progress counters
       requestedCollectDate.value = stored.requestedCollectDate ?? requestedCollectDate.value
+      collectCompleted.value = stored.collectCompleted ?? collectCompleted.value
+      collectTotal.value = stored.collectTotal ?? collectTotal.value
 
       // If collection was in progress, resume polling using existing jobId (do not re-POST)
       if (collectionStatus.value === 'collecting' && collectJobId.value) {
@@ -543,7 +568,15 @@ onMounted(async () => {
               </div>
             </div>
             <template v-if="collectionStatus === 'idle'">수집된 시세 데이터 없음</template>
-            <template v-else-if="collectionStatus === 'collecting'">시세 수집 중...</template>
+            <template v-else-if="collectionStatus === 'collecting'">
+              <div class="progress-info">
+                <span>{{ selectedDate }} 시세 수집 중...</span>
+                <span class="progress-count">{{ collectCompleted }}/{{ collectTotal || 20 }} 마켓 ({{ collectProgressPercent }}%)</span>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" :style="{ width: collectProgressPercent + '%' }"></div>
+              </div>
+            </template>
             <template v-else-if="collectionStatus === 'failed'">시세 수집 실패: {{ errorMessage || '다시 요청해주세요.' }}</template>
             <template v-else-if="collectionStatus === 'completed'">
               <div class="collection-data-list">
@@ -887,6 +920,30 @@ onMounted(async () => {
 .collection-request-btn {
   width: 100%;
   margin-top: 12px;
+}
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.progress-count {
+  color: #7fb2ff;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.progress-bar-track {
+  width: 100%;
+  height: 8px;
+  background: #0f2636;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #3f86ff;
+  border-radius: 999px;
+  transition: width 0.4s ease;
 }
 
 @media (max-width: 900px) {
