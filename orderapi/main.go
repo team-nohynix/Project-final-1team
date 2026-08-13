@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"orderapi/backpressure"
@@ -31,6 +33,27 @@ const (
 // 이 값의 1/3 주기로 하트비트를 보내야 하고(session.Client.Claim이 응답에 실어주는
 // ttlSeconds를 그대로 씀), 크래시로 하트비트가 끊기면 이 시간 뒤 자동으로 풀립니다.
 const sessionTTL = 30 * time.Second
+
+var (
+	ordersTotalCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orderapi_orders_total",
+			Help: "Total orders accepted",
+		},
+		[]string{"status"},
+	)
+	ordersLatencyHistogram = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "orderapi_order_latency_seconds",
+			Help:    "Order processing latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(ordersTotalCounter, ordersLatencyHistogram)
+}
 
 func main() {
 	cfg := LoadConfig()
@@ -87,6 +110,7 @@ func main() {
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(sessionStore))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// JOB_TRIGGER_QUEUE_URL이 없으면(로컬 개발 등) 이 라우트 자체를 등록하지
 	// 않습니다 — config.go 참고, orderapi의 핵심 기능과는 무관한 선택 기능입니다.

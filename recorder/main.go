@@ -9,6 +9,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"recorder/archive"
@@ -127,6 +128,7 @@ func main() {
 	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
 	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier))
 	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
+	mux.Handle("GET /metrics", promhttp.Handler())
 	go func() {
 		addr := ":" + cfg.Port
 		log.Printf("기록기 조회 API 시작: %s", addr)
