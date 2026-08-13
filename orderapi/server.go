@@ -9,26 +9,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"orderapi/backpressure"
 	"orderapi/idempotency"
 	"orderapi/kafkaclient"
 	"orderapi/order"
 	"orderapi/validate"
 )
-
-var ordersTotalCounter = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "orders_total",
-		Help: "Total number of orders accepted",
-	},
-	[]string{"status"},
-)
-
-func init() {
-	prometheus.MustRegister(ordersTotalCounter)
-}
 
 // orderRequest는 POST /v1/orders의 요청 본문입니다. SourceOrderID는 선택
 // 필드(docs/api-specification.md 2.1) — replayengine이 리플레이 주문을 제출할
@@ -183,8 +169,6 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 		store.Save(o)
 		ordersTotalCounter.WithLabelValues("accepted").Inc()
 		log.Printf("주문 접수 완료 (market=%s, side=%s, orderId=%s)", o.Market, o.Side, o.OrderID)
-
-		ordersTotalCounter.WithLabelValues("accepted").Inc()
 
 		body, _ := json.Marshal(o)
 		idem.Put(key, http.StatusAccepted, body)
