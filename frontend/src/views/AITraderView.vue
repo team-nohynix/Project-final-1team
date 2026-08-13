@@ -3,14 +3,9 @@ import { ref, computed, watch, onBeforeUnmount, onMounted } from 'vue'
 
 // Defaults
 const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
-// Do not surface large example numbers in the UI; keep sensible internal defaults but show placeholders where appropriate
-const defaultTotalOrders = 0
-const defaultGenerationTime = 60 // seconds
 
 const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
-const totalOrders = ref(defaultTotalOrders)
-const generationTime = ref(defaultGenerationTime)
 // 재생 배속 옵션 (프론트에서 선택만 제공)
 const speed = ref(100)
 const speedOptions = [1, 10, 50, 100]
@@ -64,8 +59,6 @@ function saveStateToSession() {
     const payload = {
       scenarioName: scenarioName.value,
       selectedDate: selectedDate.value,
-      totalOrders: totalOrders.value,
-      generationTime: generationTime.value,
       speed: speed.value,
       // collection
       collectJobId: collectJobId.value,
@@ -155,21 +148,13 @@ const collectionRangeDisplay = computed(() => {
   }
 })
 
-const targetThroughput = computed(() => {
-  const secs = Number(generationTime.value) || 0
-  const total = Number(totalOrders.value) || 0
-  if (total <= 0 || secs <= 0) return '--'
-  const val = Math.round(total / secs)
-  return `${val.toLocaleString()} orders/sec`
-})
+// targetThroughput removed (no longer used)
 
 // 페이퍼 트레이딩 시작에 필요한 필수 입력값이 모두 채워졌는지 여부
 // (목표 처리량은 totalOrders/generationTime으로부터 계산되므로 두 값이 유효하면 함께 충족됨)
 const canCreate = computed(() => {
   if (!scenarioName.value) return false
   if (!selectedDate.value) return false
-  if (!(totalOrders.value > 0)) return false
-  if (!(generationTime.value > 0)) return false
   return true
 })
 
@@ -399,23 +384,174 @@ const resetExecution = () => {
   executionError.value = ''
 }
 
-// 페이퍼 트레이딩 시작 (백엔드 API 미확정 — 실제 요청은 아직 구현하지 않음)
+// ---- Paper trading: integrate with POST /order-api/v1/jobs, GET /order-api/v1/sessions/last-run,
+// and GET /v1/orders/summary (recorder). Respect dev proxy; if recorder isn't reachable
+// at runtime, show an informative message rather than using an arbitrary path.
+
+let execPollTimerId: any = null
+let execPollInFlight = false
+let startRequestInFlight = false
+const storedRunId = ref('')
+
+const formatRFC3339ToKST = (iso: string | null) => {
+  if (!iso) return '-'
+  try {
+    const t = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const year = t.getUTCFullYear()
+    const month = pad(t.getUTCMonth() + 1)
+    const day = pad(t.getUTCDate())
+    const kst = new Date(t.getTime() + 9 * 60 * 60 * 1000)
+    const hh = pad(kst.getUTCHours())
+    const mm = pad(kst.getUTCMinutes())
+    const ss = pad(kst.getUTCSeconds())
+    return `${year}-${month}-${day} ${hh}:${mm}:${ss} KST`
+  } catch (e) {
+    return iso
+  }
+}
+
+const computeElapsed = (startIso: string | null, endIso?: string | null) => {
+  if (!startIso) return '--'
+  try {
+    const start = new Date(startIso).getTime()
+    const end = endIso ? new Date(endIso).getTime() : Date.now()
+    const diff = Math.max(0, end - start)
+    const s = Math.floor(diff / 1000)
+    const hh = String(Math.floor(s / 3600)).padStart(2, '0')
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+    const ss = String(s % 60).padStart(2, '0')
+    return `${hh}:${mm}:${ss}`
+  } catch (e) {
+    return '--'
+  }
+}
+
+function stopExecutionPolling() {
+  if (execPollTimerId) {
+    clearTimeout(execPollTimerId)
+    execPollTimerId = null
+  }
+  execPollInFlight = false
+  startRequestInFlight = false
+}
+
+const fetchOrderSummary = async (startedAt: string, endedAt?: string | null) => {
+  try {
+    const params = new URLSearchParams()
+    params.set('mode', 'PAPER_TRADING')
+    params.set('from', startedAt)
+    if (endedAt) params.set('to', endedAt)
+    // Use recorder dev proxy path when available
+    const url = `/recorder-api/v1/orders/summary?${params.toString()}`
+    const res = await fetch(url)
+    if (res.status === 404) {
+      return { accepted: 0, filled: 0, unfilled: 0, note: '실행 이력 없음 또는 recorder 미구성' }
+    }
+    if (!res.ok) return null
+    return await res.json()
+  } catch (e) {
+    return null
+  }
+}
+
+const pollLastRun = async () => {
+  if (execPollInFlight) return
+  execPollInFlight = true
+  try {
+    const res = await fetch('/order-api/v1/sessions/last-run')
+    if (res.status === 404) {
+      executionStatus.value = 'idle'
+      paperTradingResult.value = null
+      executionError.value = ''
+      infoMessage.value = '실행 이력 없음'
+      storedRunId.value = ''
+      saveStateToSession()
+      stopExecutionPolling()
+      return
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      executionStatus.value = 'error'
+      executionError.value = err?.message || `세션 조회 실패: HTTP ${res.status}`
+      stopExecutionPolling()
+      return
+    }
+    const data = await res.json()
+    if (data.owner !== 'trader') {
+      executionStatus.value = 'error'
+      executionError.value = '실행 소유자가 trader가 아니므로 결과를 표시하지 않습니다.'
+      stopExecutionPolling()
+      return
+    }
+    storedRunId.value = data.runId || ''
+    saveStateToSession()
+    const status = data.status
+    const startedAt = data.startedAt ?? null
+    const endedAt = data.endedAt ?? null
+    if (status === 'IN_PROGRESS') {
+      executionStatus.value = 'running'
+      infoMessage.value = data.message || ''
+      const summary = await fetchOrderSummary(startedAt)
+      if (summary === null) {
+        infoMessage.value = '주문 집계 조회 실패: recorder 경로가 설정되어 있는지 확인하세요.'
+      } else {
+        paperTradingResult.value = summary
+      }
+      execPollTimerId = setTimeout(pollLastRun, 3000)
+      return
+    }
+    if (status === 'COMPLETED' || status === 'FAILED') {
+      executionStatus.value = status === 'COMPLETED' ? 'success' : 'error'
+      infoMessage.value = data.message || ''
+      const summary = await fetchOrderSummary(startedAt, endedAt)
+      if (summary === null) {
+        infoMessage.value = '최종 주문 집계 조회 실패: recorder 경로가 설정되어 있는지 확인하세요.'
+      } else {
+        paperTradingResult.value = summary
+      }
+      stopExecutionPolling()
+      return
+    }
+    executionStatus.value = 'error'
+    executionError.value = `알 수 없는 세션 상태: ${status}`
+    stopExecutionPolling()
+  } finally {
+    execPollInFlight = false
+  }
+}
+
 const startPaperTrading = async () => {
   if (!canStartPaperTrading.value) return
-
+  if (executionStatus.value === 'running' || startRequestInFlight) return
+  startRequestInFlight = true
   executionStatus.value = 'running'
   executionError.value = ''
   paperTradingResult.value = null
-
+  infoMessage.value = ''
   try {
-    // TODO: 백엔드 페이퍼 트레이딩 시작 API 연결
-    // const response = await paperTradingApi.start({ ... })
-    // paperTradingResult.value = response.data
-    // executionStatus.value = 'success'
-    infoMessage.value = '백엔드 연결 전: 페이퍼 트레이딩 시작 요청이 준비되었습니다.'
-  } catch (error) {
-    executionError.value = error instanceof Error ? error.message : ''
+    const payload = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
+    const res = await fetch('/order-api/v1/jobs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    })
+    if (res.status === 202) {
+      infoMessage.value = '실행 요청이 큐에 등록되었습니다. 상태를 조회합니다.'
+      saveStateToSession()
+      stopExecutionPolling()
+      await pollLastRun()
+      return
+    }
+    let body = null
+    try { body = await res.json() } catch (e) {}
+    const msg = body?.message || body?.error || `HTTP ${res.status}`
     executionStatus.value = 'error'
+    executionError.value = `시작 요청 실패: ${msg}`
+  } catch (e) {
+    executionStatus.value = 'error'
+    executionError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    startRequestInFlight = false
+    saveStateToSession()
   }
 }
 
@@ -423,8 +559,7 @@ const reset = () => {
   scenarioName.value = defaultScenarioName
   selectedDate.value = ''
   requestedCollectDate.value = ''
-  totalOrders.value = defaultTotalOrders
-  generationTime.value = defaultGenerationTime
+  // totalOrders/generationTime removed
   infoMessage.value = ''
   errorMessage.value = ''
   resetCollection()
@@ -442,8 +577,6 @@ watch(
   [
     scenarioName,
     selectedDate,
-    totalOrders,
-    generationTime,
     speed,
     collectJobId,
     collectionStatus,
@@ -471,8 +604,7 @@ onMounted(async () => {
       // Restore UI fields
       scenarioName.value = stored.scenarioName ?? scenarioName.value
       selectedDate.value = stored.selectedDate ?? selectedDate.value
-      totalOrders.value = stored.totalOrders ?? totalOrders.value
-      generationTime.value = stored.generationTime ?? generationTime.value
+      // removed totalOrders/generationTime from restore
       speed.value = stored.speed ?? speed.value
 
       // Execution state
@@ -626,21 +758,7 @@ onMounted(async () => {
           </button>
         </div>
 
-        <div class="form-field two-cols">
-          <div>
-            <label>목표 주문 수</label>
-            <div class="readonly-input">--</div>
-          </div>
-          <div>
-            <label>생성 시간 (sec)</label>
-            <div class="readonly-input">--</div>
-          </div>
-        </div>
-
-        <div class="form-field">
-          <label>목표 처리량</label>
-          <div class="readonly-input">{{ targetThroughput }}</div>
-        </div>
+        <!-- 목표 주문 수 / 생성 시간 / 목표 처리량 removed -->
 
         <div class="actions">
           <button class="btn-primary" :disabled="!canStartPaperTrading" @click="startPaperTrading">
