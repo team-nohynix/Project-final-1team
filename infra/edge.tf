@@ -214,26 +214,6 @@ resource "aws_cloudfront_distribution" "frontend" {
     }
   }
 
-  # 프론트가 /recorder-api/*로 부르는 recorder 조회 API(/v1/trace, /v1/matching/engines,
-  # /v1/metrics/dashboard, /v1/orders/summary — orderapi-ingress.yaml에서 같은 ALB를
-  # 공유)를 접수 API ALB로 프록시. 이 behavior가 없으면 default_cache_behavior(S3)로
-  # 떨어져서 정적 프론트 파일을 찾으려다 실패한다(2026-08-13, 김다현 리포트로 발견).
-  ordered_cache_behavior {
-    path_pattern           = "/recorder-api/*"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "team1-orderapi-alb"
-    viewer_protocol_policy = "https-only"
-
-    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed-CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed-AllViewer
-
-    function_association {
-      event_type   = "viewer-request"
-      function_arn = aws_cloudfront_function.strip_recorder_api_prefix.arn
-    }
-  }
-
   # 프론트가 /v1/collect, /v1/markets/*를 접두사 없이 바로 호출하는 걸 실제
   # 소스(AITraderView.vue, MarketStreamView.vue)로 확인해서 시세 수집기 ALB로
   # 프록시 — backend 자체 라우트가 이미 /v1/...라 경로 재작성이 필요 없다.
@@ -394,20 +374,6 @@ resource "aws_cloudfront_function" "strip_order_api_prefix" {
     function handler(event) {
       var request = event.request;
       request.uri = request.uri.replace(/^\/order-api/, "") || "/";
-      return request;
-    }
-  EOT
-}
-
-resource "aws_cloudfront_function" "strip_recorder_api_prefix" {
-  name    = "team1-strip-recorder-api-prefix"
-  runtime = "cloudfront-js-2.0"
-  comment = "/recorder-api/xxx -> /xxx (recorder 라우트도 /order-api와 같은 ALB에서 접두사 없이 등록됨)"
-  publish = true
-  code    = <<-EOT
-    function handler(event) {
-      var request = event.request;
-      request.uri = request.uri.replace(/^\/recorder-api/, "") || "/";
       return request;
     }
   EOT

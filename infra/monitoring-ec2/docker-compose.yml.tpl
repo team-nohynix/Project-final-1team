@@ -29,7 +29,6 @@ services:
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
-      - "80:3000" # monitor.jhyang.click 클릭 시 포트 없이 바로 열리도록
 
 volumes:
   prometheus-data:

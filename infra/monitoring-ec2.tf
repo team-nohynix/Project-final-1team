@@ -124,14 +124,6 @@ resource "aws_security_group" "team1_sg_monitoring" {
   }
 
   ingress {
-    description = "Grafana on :80 (monitor.jhyang.click)"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
     description = "Prometheus"
     from_port   = 9090
     to_port     = 9090
@@ -190,9 +182,7 @@ resource "aws_instance" "monitoring_v2" {
   subnet_id                   = data.terraform_remote_state.network.outputs.subnet_ids.public.a
   vpc_security_group_ids      = [aws_security_group.team1_sg_monitoring.id]
   iam_instance_profile        = aws_iam_instance_profile.monitoring.name
-  # gzip 압축 — 대시보드 JSON이 커지면서 평문 user_data가 EC2의 16KB 한도를 넘겨서
-  # (2026-08-13) 압축으로 전환. EC2가 gzip 매직바이트를 자동 인식해서 부팅 시 그대로 풀어 실행한다.
-  user_data_base64            = base64gzip(local.monitoring_user_data)
+  user_data                   = local.monitoring_user_data
   user_data_replace_on_change = true # user_data는 최초 부팅에만 실행되므로, 바뀌면 재생성해야 실제 반영됨
 
   root_block_device {
@@ -213,14 +203,4 @@ resource "aws_eip_association" "monitoring" {
 
 output "monitoring_public_ip" {
   value = aws_eip.monitoring.public_ip
-}
-
-# monitor.jhyang.click 클릭하면 바로 Grafana(포트 80, docker-compose.yml.tpl에서
-# 3000과 같이 80도 매핑)가 뜨도록 — ALB가 아니라 EIP라 alias가 아닌 값 레코드.
-resource "aws_route53_record" "monitoring" {
-  zone_id = data.aws_route53_zone.team1.zone_id
-  name    = "monitor.jhyang.click"
-  type    = "A"
-  ttl     = 300
-  records = [aws_eip.monitoring.public_ip]
 }

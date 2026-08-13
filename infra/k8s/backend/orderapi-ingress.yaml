@@ -51,13 +51,6 @@ spec:
                 name: recorder
                 port:
                   number: 8082
-          - path: /v1/orders
-            pathType: Prefix
-            backend:
-              service:
-                name: recorder
-                port:
-                  number: 8082
           - path: /
             pathType: Prefix
             backend:
