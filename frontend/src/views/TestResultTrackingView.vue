@@ -1,30 +1,143 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onBeforeUnmount } from 'vue'
 
-const experiment = ref(null)
-
-const summary = ref({ total: null, accepted: null, rejected: null, errors: null })
-
-const nfrs = ref([])
-
-const faults = ref([])
-
+// input
 const traceId = ref('')
-// traceData matches recorder's GET /v1/trace/{orderId} shape
-const traceData = ref(null)
-const apiAvailable = false // recorder endpoint not wired in frontend proxy by default
+
+// lightweight placeholders for other UI blocks (keeps page stable)
+const experiment = ref<any>({ id: '--', name: '', rate: '--', duration: '--', markets: '--', status: '상태 확인 전' })
+const summary = ref<any>({ total: null, accepted: null, rejected: null, errors: null })
+const nfrs = ref<any[]>([])
+const faults = ref<any[]>([])
+
+// UI states: 'idle' | 'loading' | 'success' | 'error'
+const uiState = ref<'idle' | 'loading' | 'success' | 'error'>('idle')
 const searchMessage = ref('')
 
-const doSearch = () => {
-  if (!traceId.value) return
+// response holder
+const traceData = ref<any | null>(null)
+
+// Abort and latest-response guard
+let currentController: AbortController | null = null
+let latestRequestSeq = 0
+
+function formatNumberString(s: string) {
+  if (s == null) return '--'
+  // keep original precision; add thousands separators to integer part
+  const parts = String(s).split('.')
+  const intPart = parts[0]
+  const decPart = parts[1]
+  const withSep = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return decPart ? `${withSep}.${decPart}` : withSep
+}
+
+function toKST(iso?: string) {
+  if (!iso) return '--'
+  try {
+    const d = new Date(iso)
+    // KST = UTC+9
+    const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${kst.getFullYear()}-${pad(kst.getMonth() + 1)}-${pad(kst.getDate())} ${pad(kst.getHours())}:${pad(kst.getMinutes())}:${pad(kst.getSeconds())} KST`
+  } catch (e) {
+    return iso
+  }
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  ACCEPTED: '접수',
+  PARTIALLY_FILLED: '부분 체결',
+  FILLED: '체결 완료',
+  CANCELED: '취소',
+}
+
+const MODE_LABEL: Record<string, string> = {
+  PAPER_TRADING: '페이퍼 트레이딩',
+  REPLAY: '주문 재생',
+}
+
+async function doSearch() {
   searchMessage.value = ''
-  if (!apiAvailable) {
-    traceData.value = null
-    searchMessage.value = '데이터 연동 예정 — recorder 엔드포인트가 프론트에 연결되어 있지 않습니다.'
+  traceData.value = null
+  if (!traceId.value || !traceId.value.trim()) {
+    uiState.value = 'error'
+    searchMessage.value = '주문 ID를 입력하세요.'
     return
   }
-  // If apiAvailable is true, a real fetch would be placed here.
+
+  // cancel previous
+  if (currentController) {
+    try { currentController.abort() } catch (_) {}
+    currentController = null
+  }
+  const controller = new AbortController()
+  currentController = controller
+  const requestSeq = ++latestRequestSeq
+
+  uiState.value = 'loading'
+  searchMessage.value = ''
+
+  const url = `/recorder-api/v1/trace/${encodeURIComponent(traceId.value.trim())}`
+  try {
+    const res = await fetch(url, { signal: controller.signal })
+
+    // ignore if a newer request started
+    if (requestSeq !== latestRequestSeq) return
+
+    if (res.status === 404) {
+      // try to parse body for error code
+      let body: any = null
+      try { body = await res.json() } catch (_) { body = null }
+      if (body && body.errorCode === 'ORDER_NOT_FOUND') {
+        uiState.value = 'error'
+        searchMessage.value = '해당 주문을 찾을 수 없습니다.'
+        traceData.value = null
+        return
+      }
+      uiState.value = 'error'
+      searchMessage.value = '해당 주문을 찾을 수 없습니다.'
+      traceData.value = null
+      return
+    }
+
+    if (!res.ok) {
+      let body: any = null
+      try { body = await res.json() } catch (_) { body = null }
+      uiState.value = 'error'
+      if (body && body.message) searchMessage.value = String(body.message)
+      else searchMessage.value = `주문 추적 조회에 실패했습니다. (HTTP ${res.status})`
+      traceData.value = null
+      return
+    }
+
+    const data = await res.json()
+
+    if (requestSeq !== latestRequestSeq) return
+
+    // success — assign and format nothing destructive (keep strings)
+    traceData.value = data
+    uiState.value = 'success'
+    searchMessage.value = ''
+  } catch (err: any) {
+    if (err && err.name === 'AbortError') {
+      // aborted — swallow silently
+      return
+    }
+    uiState.value = 'error'
+    traceData.value = null
+    searchMessage.value = err?.message || '주문 추적 조회에 실패했습니다.'
+  } finally {
+    // clear controller if it's the same
+    if (currentController === controller) currentController = null
+  }
 }
+
+onBeforeUnmount(() => {
+  if (currentController) {
+    try { currentController.abort() } catch (_) {}
+    currentController = null
+  }
+})
 </script>
 
 <template>
@@ -108,48 +221,46 @@ const doSearch = () => {
     <div class="trace-card">
       <h4 class="card-title">주문 처리 구간 추적</h4>
       <div class="trace-controls">
-        <input v-model="traceId" type="text" class="trace-input" />
-        <button type="button" class="btn-primary" @click="doSearch">Search</button>
+        <input v-model="traceId" type="text" class="trace-input" placeholder="Order ID를 입력하세요" />
+        <button type="button" class="btn-primary" :disabled="uiState === 'loading'" @click="doSearch">검색</button>
       </div>
 
       <div class="trace-result">
-        <div v-if="!apiAvailable">
-          <div class="center-msg">데이터 연동 예정<br/><small>recorder API가 프론트에 연결되어 있지 않습니다.</small></div>
-          <div class="order-placeholder panel">
-            <div><strong>Order ID:</strong> {{ traceId || '--' }}</div>
-            <div><strong>Market:</strong> --</div>
-            <div><strong>Side:</strong> --</div>
-            <div><strong>Price:</strong> --</div>
-            <div><strong>Quantity:</strong> --</div>
-            <div><strong>Submitted At:</strong> --</div>
-            <div><strong>Status:</strong> --</div>
-            <h5 style="margin-top:12px">Executions</h5>
-            <div>데이터 연동 예정</div>
-          </div>
+        <div v-if="uiState === 'loading'" class="center-msg">조회 중입니다...</div>
+        <div v-else-if="uiState === 'error'">
+          <div class="search-msg">{{ searchMessage }}</div>
         </div>
-        <div v-else>
+        <div v-else-if="uiState === 'idle'">
+          <div class="center-msg">주문 ID를 입력하고 검색하세요.</div>
+        </div>
+        <div v-else-if="uiState === 'success'">
           <div v-if="!traceData" class="center-msg">데이터 없음</div>
           <div v-else class="order-detail panel">
             <div class="order-row"><strong>Order ID:</strong> {{ traceData.orderId }}</div>
-            <div class="order-row"><strong>Market:</strong> {{ traceData.market }}</div>
-            <div class="order-row"><strong>Side:</strong> {{ traceData.side }}</div>
-            <div class="order-row"><strong>Price:</strong> {{ traceData.price }}</div>
-            <div class="order-row"><strong>Quantity:</strong> {{ traceData.quantity }}</div>
-            <div class="order-row"><strong>Submitted At:</strong> {{ traceData.submittedAt }}</div>
-            <div class="order-row"><strong>Status:</strong> {{ traceData.status }}</div>
+            <div class="order-row"><strong>Market:</strong> {{ traceData.market || '--' }}</div>
+            <div class="order-row"><strong>Side:</strong> {{ STATUS_LABEL[traceData.side] ? traceData.side : traceData.side }}</div>
+            <div class="order-row"><strong>Price:</strong> {{ formatNumberString(traceData.price) }}</div>
+            <div class="order-row"><strong>Quantity:</strong> {{ formatNumberString(traceData.quantity) }}</div>
+            <div class="order-row"><strong>Remaining:</strong> {{ traceData.remainingQuantity != null ? formatNumberString(traceData.remainingQuantity) : '--' }}</div>
+            <div class="order-row"><strong>Submitted At:</strong> {{ toKST(traceData.submittedAt) }}</div>
+            <div class="order-row"><strong>Status:</strong> {{ STATUS_LABEL[traceData.status] || traceData.status }}</div>
+            <div class="order-row"><strong>Mode:</strong> {{ MODE_LABEL[traceData.mode] || traceData.mode || '--' }}</div>
             <h5 style="margin-top:12px">Executions</h5>
-            <div v-if="!traceData.executions || traceData.executions.length === 0">실행 내역 없음</div>
+            <div v-if="!traceData.executions || traceData.executions.length === 0">체결 내역이 없습니다.</div>
             <div v-else>
               <div v-for="(ex, idx) in traceData.executions" :key="idx" class="exec-row">
-                <div><strong>Executed At:</strong> {{ ex.executedAt }}</div>
-                <div><strong>Price:</strong> {{ ex.price }}</div>
-                <div><strong>Quantity:</strong> {{ ex.quantity }}</div>
-                <div><strong>Mode:</strong> {{ ex.mode || '--' }}</div>
+                <div><strong>Execution ID:</strong> {{ ex.executionId || ex.id || '--' }}</div>
+                <div><strong>Executed At:</strong> {{ toKST(ex.executedAt) }}</div>
+                <div><strong>Price:</strong> {{ formatNumberString(ex.price) }}</div>
+                <div><strong>Quantity:</strong> {{ formatNumberString(ex.quantity) }}</div>
+                <div><strong>Mode:</strong> {{ MODE_LABEL[ex.mode] || ex.mode || '--' }}</div>
+                <div><strong>Buy Order:</strong> {{ ex.buyOrderId || '--' }}</div>
+                <div><strong>Sell Order:</strong> {{ ex.sellOrderId || '--' }}</div>
               </div>
             </div>
           </div>
         </div>
-        <div v-if="searchMessage" class="search-msg">{{ searchMessage }}</div>
+        <div v-if="searchMessage && uiState !== 'error'" class="search-msg">{{ searchMessage }}</div>
       </div>
     </div>
   </div>
