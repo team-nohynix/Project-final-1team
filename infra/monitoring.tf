@@ -1,85 +1,7 @@
-# AMP + AMG + CloudWatch 알람 5종. 측정 대상과 같은 자원을 공유하면 부하가 가장 큰 순간에
-# 모니터링이 먼저 죽으므로 관리형 서비스로 뺀다. 지표 수집기(Prometheus 서버, remote_write
-# 설정)는 Helm으로 클러스터 안에 설치한다 — 여기서는 AMP/AMG 리소스와 그 IAM만 만든다.
-
-resource "aws_prometheus_workspace" "team1" {
-  alias = "team1-amp-truss"
-
-  tags = {
-    Team = "team1"
-    Name = "team1-amp-truss"
-  }
-}
-
-# AMG는 IAM Identity Center(SSO) 인증이 전제라 계정 차원 SSO 활성화가 선행돼야 한다 —
-# 여기서는 워크스페이스만 만들고 사용자/그룹 매핑은 콘솔에서 별도 진행.
-data "aws_iam_policy_document" "amg_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["grafana.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "amg" {
-  name               = "team1-amg-role"
-  assume_role_policy = data.aws_iam_policy_document.amg_assume.json
-
-  tags = {
-    Team = "team1"
-    Name = "team1-amg-role"
-  }
-}
-
-data "aws_iam_policy_document" "amg_policy" {
-  statement {
-    actions = [
-      "aps:ListWorkspaces",
-      "aps:DescribeWorkspace",
-      "aps:QueryMetrics",
-      "aps:GetLabels",
-      "aps:GetSeries",
-      "aps:GetMetricMetadata",
-    ]
-    resources = ["*"]
-  }
-  statement {
-    actions = [
-      "cloudwatch:DescribeAlarmsForMetric",
-      "cloudwatch:ListMetrics",
-      "cloudwatch:GetMetricData",
-      "cloudwatch:GetMetricStatistics",
-      "logs:DescribeLogGroups",
-      "logs:GetLogGroupFields",
-      "logs:StartQuery",
-      "logs:StopQuery",
-      "logs:GetQueryResults",
-    ]
-    resources = ["*"]
-  }
-}
-
-resource "aws_iam_role_policy" "amg" {
-  name   = "team1-amg-policy"
-  role   = aws_iam_role.amg.id
-  policy = data.aws_iam_policy_document.amg_policy.json
-}
-
-resource "aws_grafana_workspace" "team1" {
-  name                     = "team1-amg-truss"
-  account_access_type      = "CURRENT_ACCOUNT"
-  authentication_providers = ["AWS_SSO"]
-  permission_type          = "SERVICE_MANAGED"
-  role_arn                 = aws_iam_role.amg.arn
-  data_sources             = ["PROMETHEUS", "CLOUDWATCH"]
-
-  tags = {
-    Team = "team1"
-    Name = "team1-amg-truss"
-  }
-}
+# CloudWatch 알람 5종 + SNS. AMP/AMG는 안 쓴다 — AMG는 이 계정이 속한 조직의 IAM Identity
+# Center SSO 권한이 없어 구조적으로 막혀서(infra/k8s/monitoring/prometheus-values.yaml 주석
+# 참고), 격리된 모니터링은 infra/monitoring-ec2.tf의 자체 호스팅 EC2로 대체했다
+# (2026-08-13, 한 번도 apply된 적 없던 AMP workspace/AMG workspace/관련 IAM 삭제).
 
 # --- 알람 + SNS -------------------------------------------------------------
 
@@ -203,14 +125,6 @@ resource "aws_cloudwatch_log_group" "eks_cluster" {
     Team = "team1"
     Name = "team1-eks-cluster-logs"
   }
-}
-
-output "amp_workspace_endpoint" {
-  value = aws_prometheus_workspace.team1.prometheus_endpoint
-}
-
-output "amg_workspace_endpoint" {
-  value = aws_grafana_workspace.team1.endpoint
 }
 
 output "sns_alerts_topic_arn" {
