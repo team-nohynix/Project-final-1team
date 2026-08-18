@@ -1,36 +1,143 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onBeforeUnmount } from 'vue'
 
-const experiment = ref({ id: 'TR-20260729-07', name: 'burst-market-20-v3', rate: '30K/s', duration: '10 min', markets: 20, status: 'pass' })
+// input
+const traceId = ref('')
 
-const summary = ref({ total: 18000000, accepted: 5988240, rejected: 12011760, errors: 0 })
+// lightweight placeholders for other UI blocks (keeps page stable)
+const experiment = ref<any>({ id: '--', name: '', rate: '--', duration: '--', markets: '--', status: '상태 확인 전' })
+const summary = ref<any>({ total: null, accepted: null, rejected: null, errors: null })
+const nfrs = ref<any[]>([])
+const faults = ref<any[]>([])
 
-const nfrs = ref([
-  { name: '접수 TPS ≥ 10K', value: '29,968/s', result: 'pass' },
-  { name: 'E2E p99 ≤ 500ms', value: '486ms', result: 'pass' },
-  { name: 'Scale-out ≤ 120s', value: '84 sec', result: 'pass' },
-  { name: '순서·유실·중복', value: '0 cases', result: 'pass' },
-])
+// UI states: 'idle' | 'loading' | 'success' | 'error'
+const uiState = ref<'idle' | 'loading' | 'success' | 'error'>('idle')
+const searchMessage = ref('')
 
-const faults = ref([
-  { name: '매칭 엔진 Pod kill', time: '38s', result: 'Recovered' },
-  { name: 'Kafka broker stop', time: '0 loss', result: 'Recovered' },
-  { name: 'Worker node drain', time: '51s', result: 'Recovered' },
-])
+// response holder
+const traceData = ref<any | null>(null)
 
-const traceId = ref('ORD-20260729-BTC-8F21A0D9')
-const traceResult = ref([
-  { step: 1, name: 'API 접수', time: '8ms', color: '#3478f6' },
-  { step: 2, name: 'Kafka 주문 적재', time: '21ms', color: '#20c8e8' },
-  { step: 3, name: '매칭 완료', time: '184ms', color: '#2ed39a' },
-  { step: 4, name: '체결 결과 발행', time: '36ms', color: '#8b5cf6' },
-  { step: 5, name: 'PostgreSQL', time: '72ms', color: '#ff9f43' },
-])
+// Abort and latest-response guard
+let currentController: AbortController | null = null
+let latestRequestSeq = 0
 
-const doSearch = () => {
-  if (!traceId.value) return
-  // mock: would call API later
+function formatNumberString(s: string) {
+  if (s == null) return '--'
+  // keep original precision; add thousands separators to integer part
+  const parts = String(s).split('.')
+  const intPart = parts[0]
+  const decPart = parts[1]
+  const withSep = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return decPart ? `${withSep}.${decPart}` : withSep
 }
+
+function toKST(iso?: string) {
+  if (!iso) return '--'
+  try {
+    const d = new Date(iso)
+    // KST = UTC+9
+    const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${kst.getFullYear()}-${pad(kst.getMonth() + 1)}-${pad(kst.getDate())} ${pad(kst.getHours())}:${pad(kst.getMinutes())}:${pad(kst.getSeconds())} KST`
+  } catch (e) {
+    return iso
+  }
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  ACCEPTED: '접수',
+  PARTIALLY_FILLED: '부분 체결',
+  FILLED: '체결 완료',
+  CANCELED: '취소',
+}
+
+const MODE_LABEL: Record<string, string> = {
+  PAPER_TRADING: '페이퍼 트레이딩',
+  REPLAY: '주문 재생',
+}
+
+async function doSearch() {
+  searchMessage.value = ''
+  traceData.value = null
+  if (!traceId.value || !traceId.value.trim()) {
+    uiState.value = 'error'
+    searchMessage.value = '주문 ID를 입력하세요.'
+    return
+  }
+
+  // cancel previous
+  if (currentController) {
+    try { currentController.abort() } catch (_) {}
+    currentController = null
+  }
+  const controller = new AbortController()
+  currentController = controller
+  const requestSeq = ++latestRequestSeq
+
+  uiState.value = 'loading'
+  searchMessage.value = ''
+
+  const url = `/recorder-api/v1/trace/${encodeURIComponent(traceId.value.trim())}`
+  try {
+    const res = await fetch(url, { signal: controller.signal })
+
+    // ignore if a newer request started
+    if (requestSeq !== latestRequestSeq) return
+
+    if (res.status === 404) {
+      // try to parse body for error code
+      let body: any = null
+      try { body = await res.json() } catch (_) { body = null }
+      if (body && body.errorCode === 'ORDER_NOT_FOUND') {
+        uiState.value = 'error'
+        searchMessage.value = '해당 주문을 찾을 수 없습니다.'
+        traceData.value = null
+        return
+      }
+      uiState.value = 'error'
+      searchMessage.value = '해당 주문을 찾을 수 없습니다.'
+      traceData.value = null
+      return
+    }
+
+    if (!res.ok) {
+      let body: any = null
+      try { body = await res.json() } catch (_) { body = null }
+      uiState.value = 'error'
+      if (body && body.message) searchMessage.value = String(body.message)
+      else searchMessage.value = `주문 추적 조회에 실패했습니다. (HTTP ${res.status})`
+      traceData.value = null
+      return
+    }
+
+    const data = await res.json()
+
+    if (requestSeq !== latestRequestSeq) return
+
+    // success — assign and format nothing destructive (keep strings)
+    traceData.value = data
+    uiState.value = 'success'
+    searchMessage.value = ''
+  } catch (err: any) {
+    if (err && err.name === 'AbortError') {
+      // aborted — swallow silently
+      return
+    }
+    uiState.value = 'error'
+    traceData.value = null
+    searchMessage.value = err?.message || '주문 추적 조회에 실패했습니다.'
+  } finally {
+    // clear controller if it's the same
+    if (currentController === controller) currentController = null
+  }
+}
+
+onBeforeUnmount(() => {
+  if (currentController) {
+    try { currentController.abort() } catch (_) {}
+    currentController = null
+  }
+})
 </script>
 
 <template>
@@ -43,32 +150,32 @@ const doSearch = () => {
 
     <div class="experiment-card">
       <div class="exp-left">
-        <div class="exp-id">Experiment #{{ experiment.id }}</div>
-        <div class="exp-desc">{{ experiment.name }} · {{ experiment.rate }} · {{ experiment.duration }} · {{ experiment.markets }} markets</div>
+        <div class="exp-id">Experiment #{{ experiment?.id ?? '--' }}</div>
+        <div class="exp-desc">{{ experiment?.name ?? '실험 정보 없음' }} · {{ experiment?.rate ?? '--' }} · {{ experiment?.duration ?? '--' }} · {{ experiment?.markets ?? '--' }} markets</div>
       </div>
-      <div class="exp-right"><div class="badge pass">통과</div></div>
+      <div class="exp-right"><div class="badge pass">{{ experiment?.status ?? '상태 확인 전' }}</div></div>
     </div>
 
     <div class="summary-grid">
       <div class="summary-card">
         <span class="dot" style="background:#3478f6"></span>
         <div class="title">전체 입력 주문</div>
-        <div class="value">{{ summary.total.toLocaleString() }}</div>
+        <div class="value">{{ summary.total != null ? summary.total.toLocaleString() : '--' }}</div>
       </div>
       <div class="summary-card">
         <span class="dot" style="background:#2ed39a"></span>
         <div class="title">접수 주문</div>
-        <div class="value">{{ summary.accepted.toLocaleString() }}</div>
+        <div class="value">{{ summary.accepted != null ? summary.accepted.toLocaleString() : '--' }}</div>
       </div>
       <div class="summary-card">
         <span class="dot" style="background:#ff9f43"></span>
         <div class="title">과부하 거절(429)</div>
-        <div class="value">{{ summary.rejected.toLocaleString() }}</div>
+        <div class="value">{{ summary.rejected != null ? summary.rejected.toLocaleString() : '--' }}</div>
       </div>
       <div class="summary-card">
         <span class="dot" style="background:#ff4b4b"></span>
         <div class="title">데이터 오류</div>
-        <div class="value">{{ summary.errors }}</div>
+        <div class="value">{{ summary.errors != null ? summary.errors : '--' }}</div>
       </div>
     </div>
 
@@ -84,6 +191,9 @@ const doSearch = () => {
             </tr>
           </thead>
           <tbody>
+            <tr v-if="nfrs.length === 0">
+              <td colspan="3" class="nfr-val">데이터 없음</td>
+            </tr>
             <tr v-for="(n,i) in nfrs" :key="i">
               <td class="nfr-name">{{ n.name }}</td>
               <td class="nfr-val">{{ n.value }}</td>
@@ -96,10 +206,13 @@ const doSearch = () => {
       <div class="right">
         <h4 class="card-title">장애 주입 결과</h4>
         <div class="fault-list">
-          <div v-for="(f,i) in faults" :key="i" class="fault-row">
-            <div class="f-name">{{ f.name }}</div>
-            <div class="f-time">{{ f.time }}</div>
-            <span class="badge recovered">{{ f.result }}</span>
+          <div v-if="faults.length === 0" class="fault-row">데이터 없음</div>
+          <div v-else>
+            <div v-for="(f,i) in faults" :key="i" class="fault-row">
+              <div class="f-name">{{ f.name }}</div>
+              <div class="f-time">{{ f.time }}</div>
+              <span class="badge recovered">{{ f.result }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -108,16 +221,46 @@ const doSearch = () => {
     <div class="trace-card">
       <h4 class="card-title">주문 처리 구간 추적</h4>
       <div class="trace-controls">
-        <input v-model="traceId" type="text" class="trace-input" />
-        <button type="button" class="btn-primary" @click="doSearch">Search</button>
+        <input v-model="traceId" type="text" class="trace-input" placeholder="Order ID를 입력하세요" />
+        <button type="button" class="btn-primary" :disabled="uiState === 'loading'" @click="doSearch">검색</button>
       </div>
 
-      <div class="timeline">
-        <div v-for="(t,i) in traceResult" :key="i" class="tl-step">
-          <div class="circle" :style="{ background: t.color }">{{ t.step }}</div>
-          <div class="tl-name">{{ t.name }}</div>
-          <div class="tl-time">{{ t.time }}</div>
+      <div class="trace-result">
+        <div v-if="uiState === 'loading'" class="center-msg">조회 중입니다...</div>
+        <div v-else-if="uiState === 'error'">
+          <div class="search-msg">{{ searchMessage }}</div>
         </div>
+        <div v-else-if="uiState === 'idle'">
+          <div class="center-msg">주문 ID를 입력하고 검색하세요.</div>
+        </div>
+        <div v-else-if="uiState === 'success'">
+          <div v-if="!traceData" class="center-msg">데이터 없음</div>
+          <div v-else class="order-detail panel">
+            <div class="order-row"><strong>Order ID:</strong> {{ traceData.orderId }}</div>
+            <div class="order-row"><strong>Market:</strong> {{ traceData.market || '--' }}</div>
+            <div class="order-row"><strong>Side:</strong> {{ STATUS_LABEL[traceData.side] ? traceData.side : traceData.side }}</div>
+            <div class="order-row"><strong>Price:</strong> {{ formatNumberString(traceData.price) }}</div>
+            <div class="order-row"><strong>Quantity:</strong> {{ formatNumberString(traceData.quantity) }}</div>
+            <div class="order-row"><strong>Remaining:</strong> {{ traceData.remainingQuantity != null ? formatNumberString(traceData.remainingQuantity) : '--' }}</div>
+            <div class="order-row"><strong>Submitted At:</strong> {{ toKST(traceData.submittedAt) }}</div>
+            <div class="order-row"><strong>Status:</strong> {{ STATUS_LABEL[traceData.status] || traceData.status }}</div>
+            <div class="order-row"><strong>Mode:</strong> {{ MODE_LABEL[traceData.mode] || traceData.mode || '--' }}</div>
+            <h5 style="margin-top:12px">Executions</h5>
+            <div v-if="!traceData.executions || traceData.executions.length === 0">체결 내역이 없습니다.</div>
+            <div v-else>
+              <div v-for="(ex, idx) in traceData.executions" :key="idx" class="exec-row">
+                <div><strong>Execution ID:</strong> {{ ex.executionId || ex.id || '--' }}</div>
+                <div><strong>Executed At:</strong> {{ toKST(ex.executedAt) }}</div>
+                <div><strong>Price:</strong> {{ formatNumberString(ex.price) }}</div>
+                <div><strong>Quantity:</strong> {{ formatNumberString(ex.quantity) }}</div>
+                <div><strong>Mode:</strong> {{ MODE_LABEL[ex.mode] || ex.mode || '--' }}</div>
+                <div><strong>Buy Order:</strong> {{ ex.buyOrderId || '--' }}</div>
+                <div><strong>Sell Order:</strong> {{ ex.sellOrderId || '--' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="searchMessage && uiState !== 'error'" class="search-msg">{{ searchMessage }}</div>
       </div>
     </div>
   </div>
@@ -342,4 +485,15 @@ const doSearch = () => {
   .tl-step:not(:last-child)::after { display: none }
   .circle { margin-bottom: 0 }
 }
+  .order-placeholder, .order-detail {
+    margin-top: 12px;
+    padding: 12px;
+    background: #071826;
+    border-radius: 8px;
+    border: 1px solid #173141;
+    color: #cfe6fa;
+  }
+  .order-row { margin: 6px 0 }
+  .exec-row { padding: 8px; border-top: 1px solid #0b2534; margin-top: 8px }
+  .search-msg { margin-top: 12px; color: #ff9f43; font-weight: 700 }
 </style>

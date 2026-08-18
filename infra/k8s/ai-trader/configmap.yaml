@@ -1,0 +1,23 @@
+# job-trigger Lambda가 만드는 ai-trader Job이 envFrom으로 그대로 참조한다
+# (infra/lambda/job-trigger/index.py의 _build_ai_trader_job 참고). CLI 플래그
+# (-date/-speed/-order-bucket)는 Job 쪽에서 args로 넘기고, 여기는 trader가
+# 필요로 하는 연결 정보(URL/리전)만 담는다 — docs/deployment-env-vars.md
+# 4번 표와 1:1 대응.
+#
+# BACKEND_URL/ORDERAPI_URL: backend/orderapi K8s Service의 클러스터 내부 DNS
+# (namespace.svc.cluster.local) — 2026-08-12에 실제 Service 생성 확인 후 채움.
+# BEDROCK_MODEL_ID: 2026-08-12에 실제 InvokeModel로 검증 완료 — raw model ID
+# (anthropic.claude-haiku-4-5*)는 "온디맨드 직접 호출 불가, 추론 프로파일 써라"로
+# 거부돼서, 대신 apac.anthropic.claude-3-haiku-20240307-v1:0(APAC 추론 프로파일,
+# "가장 저렴한 모델" 팀 결정에 부합) 사용 — irsa.tf의 sa_ai_trader_bedrock_policy도
+# 이 프로파일 ARN + 라우팅 대상 5개 APAC 리전의 foundation-model ARN으로 맞춰뒀다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-trader-config
+  namespace: ai-trader
+data:
+  BACKEND_URL: "http://backend.collector.svc.cluster.local:8080"
+  ORDERAPI_URL: "http://orderapi.backend.svc.cluster.local:8081"
+  BEDROCK_REGION: "ap-northeast-2"
+  BEDROCK_MODEL_ID: "apac.anthropic.claude-3-haiku-20240307-v1:0"

@@ -12,18 +12,10 @@ const updateOpenMenu = () => {
   if (p === '/' || p === '') openMenu.value = 'overview'
   else if (p.startsWith('/load-test')) openMenu.value = 'loadtest'
   else if (
-    p.startsWith('/orders') ||
     p.startsWith('/matching-engine') ||
     p.startsWith('/market-orderbook')
   )
     openMenu.value = 'trading'
-  else if (
-    p.startsWith('/monitoring') ||
-    p.startsWith('/test-results') ||
-    p.startsWith('/fault-recovery')
-  )
-    openMenu.value = 'observe'
-  else if (p.startsWith('/market-stream') || p.startsWith('/deployment-ops')) openMenu.value = 'data'
   else openMenu.value = ''
 }
 
@@ -73,16 +65,6 @@ const isActive = (path) => route.path === path
         <div v-if="openMenu === 'trading'" class="submenu">
           <button
             class="submenu-item"
-            :class="{ selected: isActive('/orders') }"
-            type="button"
-            @click.prevent="go('/orders')"
-          >
-            <span class="menu-dot"></span>
-            주문 API 검증
-          </button>
-
-          <button
-            class="submenu-item"
             :class="{ selected: isActive('/matching-engine') }"
             type="button"
             @click.prevent="go('/matching-engine')"
@@ -125,73 +107,29 @@ const isActive = (path) => route.path === path
             @click.prevent="go('/load-test/ai-trader')"
           >
             <span class="menu-dot"></span>
-            AI 트레이더
+            페이퍼 트레이딩
           </button>
         </div>
 
-        <button class="menu-button" type="button" @click="toggleMenu('observe')">
-          <span>관찰·검증</span>
-          <span class="arrow" :class="{ open: openMenu === 'observe' }">›</span>
+        <button
+          class="submenu-item"
+          :class="{ selected: isActive('/test-results') }"
+          type="button"
+          @click.prevent="go('/test-results')"
+        >
+          <span class="menu-dot"></span>
+          결과 추적
         </button>
 
-        <div v-if="openMenu === 'observe'" class="submenu">
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/monitoring') }"
-            type="button"
-            @click.prevent="go('/monitoring')"
-          >
-            <span class="menu-dot"></span>
-            실시간 모니터링
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/test-results') }"
-            type="button"
-            @click.prevent="go('/test-results')"
-          >
-            <span class="menu-dot"></span>
-            결과 추적
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/fault-recovery') }"
-            type="button"
-            @click.prevent="go('/fault-recovery')"
-          >
-            <span class="menu-dot"></span>
-            장애 주입·복구
-          </button>
-        </div>
-
-        <button class="menu-button" type="button" @click="toggleMenu('data')">
-          <span>데이터·운영</span>
-          <span class="arrow" :class="{ open: openMenu === 'data' }">›</span>
+        <button
+          class="submenu-item"
+          :class="{ selected: isActive('/market-stream') }"
+          type="button"
+          @click.prevent="go('/market-stream')"
+        >
+          <span class="menu-dot"></span>
+          시세 조회
         </button>
-
-        <div v-if="openMenu === 'data'" class="submenu">
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/market-stream') }"
-            type="button"
-            @click.prevent="go('/market-stream')"
-          >
-            <span class="menu-dot"></span>
-            시세 처리
-          </button>
-
-          <button
-            class="submenu-item"
-            :class="{ selected: isActive('/deployment-ops') }"
-            type="button"
-            @click.prevent="go('/deployment-ops')"
-          >
-            <span class="menu-dot"></span>
-            배포·운영
-          </button>
-        </div>
       </nav>
 
       <div class="system-badge">
@@ -201,7 +139,13 @@ const isActive = (path) => route.path === path
     </aside>
 
     <main class="main-content">
-      <router-view />
+      <router-view v-slot="{ Component, route }">
+        <keep-alive>
+          <component :is="Component" v-if="route.meta && route.meta.keepAlive" :key="route.name" />
+        </keep-alive>
+
+        <component :is="Component" v-if="!(route.meta && route.meta.keepAlive)" :key="route.name" />
+      </router-view>
     </main>
   </div>
 </template>

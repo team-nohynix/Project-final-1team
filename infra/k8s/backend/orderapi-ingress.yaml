@@ -1,0 +1,67 @@
+# 접수 API 퍼블릭 노출 — ALB Controller가 이 Ingress를 보고 실제 ALB를 만든다.
+# 인증서/WAF ARN은 infra/edge.tf의 output(acm_alb_certificate_arn/waf_alb_web_acl_arn)과
+# 동일한 값을 직접 박아넣었다(Ingress는 Terraform 리소스가 아니라 output을 그대로
+# 참조할 수 없음). healthcheck-path는 orderapi에 별도 헬스체크 엔드포인트가 없어서,
+# 실제로 인증 없이 200을 주는 걸 확인한 GET /v1/markets/{market}/orderbook을 쓴다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orderapi
+  namespace: backend
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/security-groups: sg-086268e229a37b879
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:727646470302:certificate/9085e196-5c96-4d18-9214-315810d902e6
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-northeast-2:727646470302:regional/webacl/team1-waf-alb/afea7efb-02c0-4262-a373-564cd1c565a4
+    alb.ingress.kubernetes.io/healthcheck-path: /v1/markets/KRW-BTC/orderbook
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/tags: Team=team1,Name=team1-alb-orderapi
+spec:
+  rules:
+    - http:
+        paths:
+          # recorder 조회 API(:8082) — orderapi 자체 라우트와 안 겹쳐서 같은 ALB를
+          # 공유한다. ALB Controller는 Ingress 안 paths 목록 순서대로 규칙 우선순위를
+          # 매기므로, 반드시 아래 catch-all "/" 보다 먼저 와야 한다(2026-08-12 추가).
+          - path: /v1/trace
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
+          - path: /v1/matching
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
+          # 대시보드 실시간 지표(docs/frontend-backend-integration.md 3.1,
+          # GET /v1/metrics/dashboard) — 2026-08-12 추가, 위 두 경로와 같은 이유.
+          - path: /v1/metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
+          - path: /v1/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: recorder
+                port:
+                  number: 8082
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orderapi
+                port:
+                  number: 8081

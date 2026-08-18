@@ -2,99 +2,26 @@
 import { ref } from 'vue'
 
 const metrics = [
-  {
-    label: '주문 접수 TPS',
-    value: '9,842',
-    description: '목표 10,000건/초',
-    color: '#3478f6',
-  },
-  {
-    label: '체결 TPS',
-    value: '9,611',
-    description: '체결률 97.6%',
-    color: '#2ed39a',
-  },
-  {
-    label: '처리 대기 주문',
-    value: '12,480',
-    description: 'KEDA 확장 감지',
-    color: '#ffb84d',
-  },
-  {
-    label: '전체 처리 p99',
-    value: '428ms',
-    description: '목표 500ms 이하',
-    color: '#20c8e8',
-  },
-  {
-    label: '실행 중인 Pod',
-    value: '8 / 20',
-    description: 'KEDA 4 → 8',
-    color: '#9b7bff',
-  },
+  { label: '주문 접수 TPS', value: null, description: '목표 10,000건/초', color: '#3478f6' },
+  { label: '체결 TPS', value: null, description: '', color: '#2ed39a' },
+  { label: '처리 대기 주문', value: null, description: '', color: '#ffb84d' },
+  { label: '전체 처리 p99', value: null, description: '목표 500ms 이하', color: '#20c8e8' },
+  { label: '실행 중인 Pod', value: null, description: '', color: '#9b7bff' },
 ]
 
 const systemStatus = [
-  { name: '주문 접수 API', status: '정상', color: '#2ed39a' },
-  { name: 'Kafka 브로커', status: '3 / 3', color: '#2ed39a' },
-  { name: '매칭 엔진', status: '확장 중', color: '#ffb84d' },
-  { name: 'PostgreSQL', status: '정상', color: '#2ed39a' },
-  { name: 'Redis 캐시', status: '정상', color: '#2ed39a' },
+  { name: '주문 접수 API', status: null, color: '#2ed39a' },
+  { name: 'Kafka 브로커', status: null, color: '#2ed39a' },
+  { name: '매칭 엔진', status: null, color: '#ffb84d' },
+  { name: 'PostgreSQL', status: null, color: '#2ed39a' },
+  { name: 'Redis 캐시', status: null, color: '#2ed39a' },
 ]
 
 // Throughput chart data generation (15 minutes, 16 samples)
-const samples = 16
-const orderPoints = ref([])
-const execPoints = ref([])
+// No local fake chart data — show placeholder until real metrics integration.
+const hasRealMetrics = false
 
-const generatePoints = () => {
-  const o = []
-  const e = []
-  for (let i = 0; i < samples; i++) {
-    // base waviness using sin for smooth ups/downs
-    const t = i / (samples - 1)
-    const base = 50 + Math.sin(t * Math.PI * 2.2) * 18 // primary waveform
-    const noise = Math.sin(t * 7.3) * 6
-    const order = Math.max(8, Math.min(92, base + noise + Math.cos(t * 3.1) * 6))
-    // execution follows similar but offset to avoid exact overlap
-    const exec = Math.max(6, Math.min(94, order - 6 + Math.sin(t * 4.1) * 10))
-    o.push(order)
-    e.push(exec)
-  }
-  orderPoints.value = o
-  execPoints.value = e
-}
-
-generatePoints()
-
-const normPoints = (p) => (p && p.value ? p.value : p)
-
-const buildLinePath = (pointsRef) => {
-  const pts = normPoints(pointsRef)
-  if (!pts || pts.length === 0) return ''
-  const parts = pts.map((v, i) => {
-    const x = (i / (pts.length - 1)) * 100
-    const y = 100 - v
-    return `${x.toFixed(2)},${y.toFixed(2)}`
-  })
-  return `M ${parts.join(' L ')}`
-}
-
-const buildAreaPath = (pointsRef) => {
-  const line = buildLinePath(pointsRef)
-  if (!line) return ''
-  // close to baseline (y=100)
-  return `${line} L 100,100 L 0,100 Z`
-}
-
-const lastPointCoord = (pointsRef) => {
-  const pts = normPoints(pointsRef)
-  if (!pts || pts.length === 0) return { x: 0, y: 100 }
-  const i = pts.length - 1
-  const x = (i / (pts.length - 1)) * 100
-  const y = 100 - pts[i]
-  return { x: x.toFixed(2), y: y.toFixed(2) }
-}
+const displayValue = (v) => (v === null || v === undefined ? '--' : v)
 </script>
 
 <template>
@@ -118,7 +45,7 @@ const lastPointCoord = (pointsRef) => {
           <span class="metric-dot" :style="{ backgroundColor: metric.color }"></span>
         </div>
 
-        <strong>{{ metric.value }}</strong>
+        <strong>{{ metric.value === null || metric.value === undefined ? '--' : metric.value }}</strong>
 
         <p :style="{ color: metric.color }">
           {{ metric.description }}
@@ -140,84 +67,10 @@ const lastPointCoord = (pointsRef) => {
           </div>
         </div>
 
-        <div class="chart-placeholder">
-          <svg
-            class="throughput-chart"
-            viewBox="0 0 100 100"
-            preserveAspectRatio="none"
-            xmlns="http://www.w3.org/2000/svg"
-            role="img"
-            aria-label="주문·체결 처리량 그래프"
-          >
-            <defs>
-              <linearGradient id="grad-order" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stop-color="#3478f6" stop-opacity="0.25" />
-                <stop offset="100%" stop-color="#3478f6" stop-opacity="0" />
-              </linearGradient>
-
-              <linearGradient id="grad-exec" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stop-color="#20c8e8" stop-opacity="0.25" />
-                <stop offset="100%" stop-color="#20c8e8" stop-opacity="0" />
-              </linearGradient>
-            </defs>
-
-            <!-- grid lines (4 dashed horizontal lines) -->
-            <g class="grid-lines">
-              <line
-                v-for="i in 4"
-                :key="i"
-                class="grid-line"
-                :x1="0"
-                :x2="100"
-                :y1="i * 20"
-                :y2="i * 20"
-              />
-            </g>
-
-            <!-- order path and area -->
-            <g class="series order-series">
-              <path :d="buildAreaPath(orderPoints)" fill="url(#grad-order)" stroke="none" />
-              <path
-                :d="buildLinePath(orderPoints)"
-                fill="none"
-                stroke="#3478f6"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <circle
-                :cx="lastPointCoord(orderPoints).x"
-                :cy="lastPointCoord(orderPoints).y"
-                r="1.4"
-                fill="#3478f6"
-              />
-            </g>
-
-            <!-- exec path and area -->
-            <g class="series exec-series">
-              <path :d="buildAreaPath(execPoints)" fill="url(#grad-exec)" stroke="none" />
-              <path
-                :d="buildLinePath(execPoints)"
-                fill="none"
-                stroke="#20c8e8"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <circle
-                :cx="lastPointCoord(execPoints).x"
-                :cy="lastPointCoord(execPoints).y"
-                r="1.4"
-                fill="#20c8e8"
-              />
-            </g>
-          </svg>
-
-          <div class="chart-labels">
-            <span>15분 전</span>
-            <span>10분 전</span>
-            <span>5분 전</span>
-            <span>현재</span>
+        <div class="chart-placeholder empty">
+          <div class="empty-center">
+            <strong>데이터 연동 예정</strong>
+            <div class="empty-sub">실제 인프라 및 백엔드 연동 후 데이터가 표시됩니다.</div>
           </div>
         </div>
       </article>
@@ -237,14 +90,10 @@ const lastPointCoord = (pointsRef) => {
     </section>
 
     <section class="scaling-alert">
-      <div class="alert-icon">↗</div>
-
-      <div class="alert-content">
-        <strong>KEDA 매칭 엔진 자동 확장 진행 중</strong>
-        <p>Kafka Consumer Lag 기준 초과 · 매칭 엔진 Pod 4개에서 8개로 확장</p>
+      <div class="alert-content empty-center">
+        <strong>데이터 연동 예정</strong>
+        <p>실제 인프라 및 백엔드 연동 후 확장 상태가 표시됩니다.</p>
       </div>
-
-      <span class="scaling-badge">확장 중</span>
     </section>
 
     <section class="integrity-panel">
@@ -253,19 +102,19 @@ const lastPointCoord = (pointsRef) => {
       <div class="integrity-grid">
         <div>
           <span>순서 역전</span>
-          <strong>0</strong>
+          <strong>{{ '--' }}</strong>
         </div>
         <div>
           <span>주문 유실</span>
-          <strong>0</strong>
+          <strong>{{ '--' }}</strong>
         </div>
         <div>
           <span>중복 체결</span>
-          <strong>0</strong>
+          <strong>{{ '--' }}</strong>
         </div>
         <div>
           <span>매수·매도 총량 불일치</span>
-          <strong>0</strong>
+          <strong>{{ '--' }}</strong>
         </div>
       </div>
     </section>

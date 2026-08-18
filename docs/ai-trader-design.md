@@ -3,17 +3,9 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
-| 2026-08-03 | requirements.md 기준으로 AI 트레이더 설계 문서 최초 작성 (개념 설계 수준) |
-| 2026-08-03 | 분량 축소, 봇-판단 로직 관계 명확화, 단계별 데이터 예시 추가 |
-| 2026-08-03 | Claude 연동 방식(AWS Bedrock) 및 설계 근거(EconAgent/FinCon) 반영, 성능 목표 관련 오류 수정, 구현 개요 절 추가 |
-| 2026-08-03 | 인프라를 EC2에서 EKS(Kubernetes Job)로 변경 — 세션 단위 실행 워크로드 특성에 맞춰 조정 |
-| 2026-08-03 | 다중 파드 환경에서 주문 기록 파일의 시간순 병합 문제 반영(5장, 8장) |
-| 2026-08-03 | 판단 주기·주문 생성 주기 분리 명시, 호가창 생성 주체(매칭 엔진→Redis→접수 API) 데이터 흐름 추가 및 다이어그램 반영, 마켓메이커 봇의 취소(DELETE) 사용 조건 보완 |
-| 2026-08-03 | 4장(주문 생성 로직)에 가격·수량 결정 규칙과 동일 신호 반복 제출 메커니즘 구체화 |
-| 2026-08-03 | 요구사항 정의서 내부 조항 번호(1.2.1 등)·문서 내부 장 번호 인용을 정리하고, 요구사항 문구를 그대로 인용해 방어하는 서술을 직접 서술로 축약 |
-| 2026-08-03 | 3장에 봇 5종의 구체적 구현 알고리즘 추가 — 규칙 기반 3종의 계산 로직, LLM 기반 2종의 프롬프트 입력 데이터 |
-| 2026-08-03 | 6장 인프라 항목의 "백엔드와 클러스터 재사용" 문구를 수정 — AI 트레이더·리플레이 엔진·백엔드가 각각 별도 EKS 클러스터를 쓰는 것으로 architecture.md와 정합성 맞춤 |
-| 2026-08-03 | 판단 로직 봇 5종 중 평균회귀 봇을 모멘텀 추종 봇 위로 재배치. 모멘텀 추종·평균회귀 봇 ↔ Bedrock 화살표를 4개(양방향)에서 각 봇→Bedrock 단방향 2개로 정리 — 봇별 연결은 유지하면서 교차선은 줄임 |
+| 2026-08-10 | 7장 "구현 개요"의 스택을 Python→**Go**로 정정 — 실제 구현(`trader/` 모듈)이 이 프로젝트의 다른 컴포넌트와 통일해 Go로 진행됐고, 이 문서만 예전 계획(Python) 그대로 남아 있었다. 핵심 라이브러리·Bedrock 호출 코드 예시도 Go 기준(aws-sdk-go-v2)으로 교체하고, 현재 구현 상태(①~④ 완료, Claude 연동은 실제 Bedrock 접근으로 아직 미검증)를 추가 |
+| 2026-08-05 | 시세 수집기→AI 트레이더 구간의 Kafka 시세 토픽 구독을 제거하고 HTTP 매니페스트/파일 API(풀 방식)로 정정(2.1 다이어그램, 2.3 데이터 흐름, 7장 구현 개요) — architecture.md·requirements.md와 함께 정정 |
+| 2026-08-03 | - requirements.md 기준 AI 트레이더 설계 문서 최초 작성 후, 인프라를 EC2→EKS(Kubernetes Job)로 변경(AI 트레이더·리플레이 엔진·백엔드를 별도 클러스터로 두어 architecture.md와 정합성 맞춤)<br>- Claude 연동 방식(AWS Bedrock)과 설계 근거(EconAgent/FinCon) 반영, 판단 주기·주문 생성 주기 분리 및 호가창 생성 주체(매칭 엔진→Redis→접수 API) 데이터 흐름 명확화<br>- 3장에 봇 5종 구현 알고리즘(규칙 기반 3종 계산 로직, LLM 기반 2종 프롬프트 입력 데이터), 4장에 가격·수량 결정 규칙 구체화<br>- 다중 파드 환경의 주문 기록 파일 병합 문제 반영(5장·8장), 문서 표현·다이어그램 정리 |
 
 ## 관련 문서
 - [요구사항 정의서](requirements.md) FR-14, FR-16, FR-17, FR-26 근거
@@ -36,7 +28,7 @@
 
 ```mermaid
 flowchart LR
-    COLLECTOR["시세 수집기 (C)"] -->|시세 발행| KAFKA[(Kafka 시세 토픽)]
+    COLLECTOR["시세 수집기 (C)"] -->|매니페스트/파일 API (HTTP)| FEED
     COLLECTOR -->|원본 저장| S3RAW[(S3, 시세 원본)]
 
     subgraph K8S["AI 트레이더 (EKS, Kubernetes Job)"]
@@ -64,8 +56,6 @@ flowchart LR
         DECIDE -->|방향 신호| ORDER
         ORDER --> RECORD
     end
-
-    KAFKA --> FEED
 
     B2 -->|프롬프트 · 방향 신호 JSON| BEDROCK["AWS Bedrock<br/>Claude Sonnet 5 / Haiku 4.5"]
     B3 -->|프롬프트 · 방향 신호 JSON| BEDROCK
@@ -126,8 +116,8 @@ flowchart LR
 ### 2.3 데이터 흐름 (단계별)
 
 1. 사용자가 트레이딩 기간(과거 시점)을 선택한다(FR-26)
-2. 시세 수집기(C)가 업비트에서 해당 기간의 20개 마켓 시세를 수신해 Kafka에 발행하고, 원본은 S3에 저장한다(FR-14)
-3. AI 트레이더의 시세 수신 모듈이 Kafka를 구독한다. 최초 1회 큰 단위(일/주/월/년 단위 가격·거래량)를 일괄 수신해 판단 기준선을 설정하고, 이후 실시간으로 작은 단위(초/분 단위 가격·거래량, 개별 체결 내역)를 순차 수신해 판단을 갱신한다
+2. 시세 수집기(C)가 업비트에서 해당 기간의 20개 마켓 시세를 수신해 원본을 S3에 저장한다(FR-14)
+3. AI 트레이더의 시세 수신 모듈이 시세 수집기의 매니페스트/파일 API를 HTTP로 호출한다(Kafka 아님 — 과거 데이터·소비자 1개뿐이라 pull 방식). 최초 1회 큰 단위(일/주/월/년 단위 가격·거래량, batch 파일)를 일괄 수신해 판단 기준선을 설정하고, 이후 실시간으로 작은 단위(초/분 단위 가격·거래량, 개별 체결 내역, stream 파일)를 이벤트 타임스탬프 간격에 맞춰 순차 수신해 판단을 갱신한다
 4. 판단 로직의 각 봇이 시세와 함께 접수 API의 호가창 조회(`GET /v1/markets/{market}/orderbook`) 결과를 참고해 판단한다(FR-16: "시세와 호가창을 참고")
    - 규칙 기반 3종(마켓메이커 봇·노이즈 봇·대량 주문 봇)은 자체 로직으로 즉시 방향 신호를 만든다
    - LLM 기반 2종(모멘텀 추종 봇·평균회귀 봇)은 프롬프트를 구성해 AWS Bedrock의 Claude를 호출하고, 구조화된 방향 신호를 응답받는다
@@ -232,9 +222,9 @@ LLM을 쓰지 않는 봇은 매 판단 주기마다 아래 규칙을 그대로 �
 - 프롬프트는 역할 프로필(persona, 고정)과 메모리(최근 판단 이력, 매 호출 갱신)로 구성하고, tool_choice로 위 방향 신호 스키마 출력을 강제한다
 - 역할 프로필은 매 호출 동일하므로 프롬프트 캐싱 대상이다
 
-```python
-from anthropic import AnthropicBedrockMantle
-client = AnthropicBedrockMantle(aws_region="us-east-1")
+```go
+cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region)) // aws-sdk-go-v2/config
+client := bedrockruntime.NewFromConfig(cfg)                          // aws-sdk-go-v2/service/bedrockruntime
 ```
 
 ---
@@ -295,7 +285,7 @@ client = AnthropicBedrockMantle(aws_region="us-east-1")
 
 | 항목 | 내용 |
 |---|---|
-| 인프라 | 전용 EKS 클러스터에서 Kubernetes Job으로 실행한다(전체 아키텍처는 [architecture.md](architecture.md) 참고). 백엔드(접수 API·매칭 엔진)와는 별도 클러스터다 — 리플레이 엔진이 매칭 엔진에 부하를 주는 성능 시험과 AI 트레이더 세션이 동시에 실행돼도 자원 경합으로 측정값이 왜곡되지 않게 하기 위함이다. 트레이딩 세션 단위로 시작·종료되는 워크로드라 상시 기동되는 EC2보다 Job 모델이 적합하다. 봇 유형별로 컨테이너를 분리하면 장애 격리와 비중 조절(레플리카 수 조정)이 용이하다 |
+| 인프라 | 단일 EKS 클러스터 안의 전용 Fargate Profile(`ai-trader`, 네임스페이스로 격리)에서 Kubernetes Job으로 실행한다(전체 아키텍처는 [truss-architecture.html](truss-architecture.html) 참고). 백엔드(접수 API·매칭 엔진, 관리형 노드그룹)와는 별도 컴퓨트다 — 리플레이 엔진이 매칭 엔진에 부하를 주는 성능 시험과 AI 트레이더 세션이 동시에 실행돼도 자원 경합으로 측정값이 왜곡되지 않게 하기 위함이다(물리적으로 분리된 클러스터가 아니라 Fargate라 노드 자체가 별도). 트레이딩 세션 단위로 시작·종료되는 워크로드라 상시 기동되는 EC2보다 Job 모델이 적합하다. 봇 유형별로 컨테이너를 분리하면 장애 격리와 비중 조절(레플리카 수 조정)이 용이하다 |
 | 환경 분리 | 접수 API 엔드포인트를 설정값으로 분리해 Mock으로도 독립 시험이 가능해야 한다(FR-23) |
 | 모니터링 | 봇 유형·인스턴스별 주문 생성 수를 지표로 노출하고(FR-25), 요청에 `X-Request-Id`를 포함한다(FR-21) |
 | 성능 | AI 트레이더 자체는 NFR-01/02(초당 1만 건) 목표를 직접 만들 필요가 없다. 모든 성능 측정은 리플레이 모드(FR-18) 기준이며, 페이퍼 트레이딩이 만든 주문을 배속 재생해 목표 처리량을 낸다. AI 트레이더는 현실적인 패턴만 만들면 된다 |
@@ -305,10 +295,11 @@ client = AnthropicBedrockMantle(aws_region="us-east-1")
 
 ## 7. 구현 개요
 
-- **스택**: Python(비동기) — Kafka 시세 소비, Claude 호출, 접수 API 전송을 모두 비동기로 처리
-- **핵심 라이브러리**: `anthropic`(Bedrock 클라이언트 포함), `aiokafka`, `httpx`, `pydantic`, `boto3`
-- **구현 순서**: ① 규칙 기반 3종 봇(마켓메이커 봇·노이즈 봇·대량 주문 봇) + 목업 접수 API로 기본 파이프라인 완성 → ② Kafka 시세 연동 → ③ Claude 기반 2종 봇(모멘텀 추종 봇·평균회귀 봇) 추가 → ④ 주문 기록·S3 업로드 → ⑤ 오류 처리·모니터링 훅 → ⑥ 컨테이너화 후 EKS 배포(Kubernetes Job)
+- **스택**: Go — 시세 수집기 API 호출, Claude(Bedrock) 호출, 접수 API 전송 전부 이 언어 하나로 처리한다. `trader/` 모듈(Go, 별도 `go.mod`)이 AI 트레이더 실행 파일 자체다. (2026-08-05 이전에는 Python(비동기)으로 계획했으나, 실제 구현은 이 프로젝트의 다른 컴포넌트(`backend`/`orderapi`/`matching` 등)와 통일해 Go로 진행했다.)
+- **핵심 라이브러리**: `aws-sdk-go-v2/service/bedrockruntime`(Bedrock Converse API, tool-use로 방향 신호 스키마 강제), `aws-sdk-go-v2/config`(자격증명은 SDK 기본 체인 — API 키를 코드/설정 파일에 남기지 않는다는 NFR-18 원칙은 동일하게 유지, EC2/EKS에서는 인스턴스 프로필/IRSA가 자동으로 채움), `net/http`(시세 수집기·접수 API 호출), `encoding/json`(요청/응답 직렬화 — Python의 `pydantic` 대응은 Go의 구조체+`json` 태그가 그 역할), `aws-sdk-go-v2/service/s3`(주문 기록 업로드)
+- **구현 순서**: ① 규칙 기반 3종 봇(마켓메이커 봇·노이즈 봇·대량 주문 봇) + 목업 접수 API로 기본 파이프라인 완성 → ② 시세 수집기 연동(매니페스트/파일 API, HTTP) → ③ Claude 기반 2종 봇(모멘텀 추종 봇·평균회귀 봇) 추가 → ④ 주문 기록·S3 업로드 → ⑤ 오류 처리·모니터링 훅 → ⑥ 컨테이너화 후 배포
 - 매칭 엔진 구현을 기다리지 않고 독립적으로 개발·시험하기 위해(FR-23) 목업 접수 API로 1단계부터 시작한다
+- **현재 구현 상태(2026-08-10)**: ①~④ 완료 — `trader/bot/`(5종 봇), `trader/bot/bedrock.go`(Claude 호출), `trader/orderstore/`(주문 기록 S3 업로드)에 실제로 존재한다. Claude 연동은 실제 Bedrock 모델 액세스로 아직 손으로 검증하지 못했다(인프라 준비 후 확인 필요) — 자세한 환경변수/AWS 리소스 요구사항은 [`deployment-env-vars.md`](deployment-env-vars.md)/[`aws-infra-handoff.md`](aws-infra-handoff.md) 참고. ⑤~⑥은 아직.
 
 ---
 

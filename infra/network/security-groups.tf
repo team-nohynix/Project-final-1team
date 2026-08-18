@@ -1,0 +1,326 @@
+# Fargate 파드는 프로파일별 개별 보안 그룹을 가질 수 없다(Security Groups for Pods는
+# EC2/Nitro 노드 전용) — 클러스터에 설정한 SG를 전부 공유한다.
+#   - team1_sg_eks_cluster: 클러스터 vpc_config에 지정 → 컨트롤플레인 + Fargate 파드 전부 공유
+#   - team1_sg_eks_backend: 관리형 노드그룹 런치 템플릿에서 자동생성 SG를 대체(추가 아님) →
+#     MSK/RDS/Redis 인그레스는 이 SG만 허용해, Kafka를 쓰지 않는 collector/ai-trader Fargate
+#     파드는 애초에 접근 권한이 없다(격리는 IRSA+SG 이중)
+# description은 ASCII만 허용돼 영문으로 쓴다.
+
+resource "aws_security_group" "team1_sg_eks_cluster" {
+  name        = "team1-sg-eks-cluster"
+  description = "team1 EKS control plane + Fargate pods (collector/ai-trader/replay share this, Fargate has no per-profile SG)"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-eks-cluster"
+  }
+}
+
+resource "aws_security_group_rule" "team1_sg_eks_cluster_self" {
+  type              = "ingress"
+  security_group_id = aws_security_group.team1_sg_eks_cluster.id
+  self              = true
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  description       = "control plane to Fargate pod / pod to pod (self)"
+}
+
+resource "aws_security_group" "team1_sg_eks_backend" {
+  name        = "team1-sg-eks-backend"
+  description = "team1 backend node group (ingest API, matching engine, recorder) - EC2, launch template overrides cluster SG"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-eks-backend"
+  }
+
+  # root 스택(karpenter.tf)이 aws_ec2_tag로 karpenter.sh/discovery 태그를 추가한다 — 여기서
+  # drift로 지우면 EC2NodeClass의 securityGroupSelectorTerms가 이 SG를 못 찾게 된다.
+  lifecycle {
+    ignore_changes = [tags, tags_all]
+  }
+}
+
+resource "aws_security_group_rule" "team1_sg_eks_backend_self" {
+  type              = "ingress"
+  security_group_id = aws_security_group.team1_sg_eks_backend.id
+  self              = true
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  description       = "node to node / pod to pod (self)"
+}
+
+# 관리형 노드그룹 런치 템플릿이 자동생성 클러스터 SG를 대체하므로(추가 아님), 컨트롤플레인
+# <-> 노드 통신 경로를 양방향으로 명시해야 kubelet이 API 서버에 조인할 수 있다.
+resource "aws_security_group_rule" "team1_cluster_to_backend" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_backend.id
+  source_security_group_id = aws_security_group.team1_sg_eks_cluster.id
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  description              = "EKS control plane to backend node group (kubelet/API)"
+}
+
+resource "aws_security_group_rule" "team1_backend_to_cluster" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_cluster.id
+  source_security_group_id = aws_security_group.team1_sg_eks_backend.id
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  description              = "backend node group to EKS control plane"
+}
+
+resource "aws_security_group" "team1_sg_msk" {
+  name        = "team1-sg-msk"
+  description = "team1 MSK Serverless - backend node group only (ingest API publish, matching engine subscribe/publish, recorder subscribe)"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  ingress {
+    description     = "Kafka IAM(SASL) from backend node group"
+    from_port       = 9098
+    to_port         = 9098
+    protocol        = "tcp"
+    security_groups = [aws_security_group.team1_sg_eks_backend.id]
+  }
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-msk"
+  }
+}
+
+resource "aws_security_group" "team1_sg_rds" {
+  name = "team1-sg-rds"
+  # description은 SG를 ForceNew(전체 교체)시키는 필드라 엔진명이 바뀌어도 여기선 안 건드린다
+  # — RDS가 이 SG에 이미 붙어 있으면 ENI 분리 권한 문제로 교체 자체가 실패한다.
+  description = "team1 RDS (PostgreSQL) - backend node group (recorder) only"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  ingress {
+    description     = "recorder to RDS write"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.team1_sg_eks_backend.id]
+  }
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-rds"
+  }
+}
+
+resource "aws_security_group" "team1_sg_redis" {
+  name        = "team1-sg-redis"
+  description = "team1 ElastiCache (Redis) - backend node group only"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  ingress {
+    description     = "matching engine write, ingest API read"
+    from_port       = 6379
+    to_port         = 6379
+    protocol        = "tcp"
+    security_groups = [aws_security_group.team1_sg_eks_backend.id]
+  }
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-redis"
+  }
+}
+
+# 접수 API는 Public ALB 뒤에서 외부 노출(AI트레이더/리플레이 Job은 클러스터 밖 세션
+# 트리거이므로 여기를 거치지 않는다 - job-trigger.tf의 SQS+Lambda 경로 참고). WAF는
+# 네트워크 홉이 아니라 ALB에 연결되는 규칙셋이라 root 스택에서 WebACL만 만들어 붙인다.
+resource "aws_security_group" "team1_sg_alb_public" {
+  name        = "team1-sg-alb-public"
+  description = "team1 Public ALB - ingest API entrypoint (WAF associated in root stack)"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  ingress {
+    description = "public HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "public HTTP (redirect to HTTPS at listener)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-alb-public"
+  }
+}
+
+resource "aws_security_group_rule" "team1_backend_from_alb" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_backend.id
+  source_security_group_id = aws_security_group.team1_sg_alb_public.id
+  from_port                = 8081
+  to_port                  = 8081
+  protocol                 = "tcp"
+  description              = "Public ALB to ingest API pod (real orderapi PORT, confirmed from orderapi/config.go default and k8s Deployment)"
+}
+
+# recorder 조회 API(:8082, GET /v1/trace/{orderId} 등) — orderapi Ingress와 ALB를
+# 공유하도록 2026-08-12에 붙였는데, 이 규칙이 8081 하나로만 좁혀져 있어서 recorder
+# 타겟그룹이 Target.Timeout으로 계속 unhealthy였다(예전 Fargate SG 갭과 같은 클래스의
+# "포트/SG가 좁게 스코프돼 새 백엔드가 조용히 막히는" 패턴).
+resource "aws_security_group_rule" "team1_backend_from_alb_recorder" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_backend.id
+  source_security_group_id = aws_security_group.team1_sg_alb_public.id
+  from_port                = 8082
+  to_port                  = 8082
+  protocol                 = "tcp"
+  description              = "Public ALB to recorder query API pod (recorder/config.go default QUERY_PORT 8082)"
+}
+
+# 시세 수집기(backend, collector 네임스페이스)는 Fargate라 전용 SG가 없고
+# team1_sg_eks_cluster를 쓴다(컨트롤플레인 + Fargate 파드 전부 공유) — 프론트가
+# /v1/collect, /v1/markets/*를 직접 호출하는 걸 확인해서 이 경로도 ALB로 노출.
+resource "aws_security_group_rule" "team1_collector_from_alb" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_cluster.id
+  source_security_group_id = aws_security_group.team1_sg_alb_public.id
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  description              = "Public ALB to market-data collector pod (backend/config.go default PORT)"
+}
+
+# Job 트리거 Lambda(team1-lambda-job-trigger, root 스택 job-trigger.tf) — SQS를 소비해
+# EKS 프라이빗 엔드포인트를 호출한다. Lambda가 항상 발신 쪽이라 인그레스 규칙은 불필요.
+resource "aws_security_group" "team1_sg_lambda_job_trigger" {
+  name        = "team1-sg-lambda-job-trigger"
+  description = "team1 Job trigger Lambda (VPC-attached) - consumes SQS, calls EKS private endpoint"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-lambda-job-trigger"
+  }
+}
+
+# Lambda가 EKS API(클러스터 프라이빗 엔드포인트)를 호출할 수 있어야 Job을 생성한다.
+resource "aws_security_group_rule" "team1_cluster_from_lambda" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.team1_sg_eks_cluster.id
+  source_security_group_id = aws_security_group.team1_sg_lambda_job_trigger.id
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  description              = "Job trigger Lambda to EKS private endpoint"
+}
+
+resource "aws_security_group" "team1_sg_vpc_endpoints" {
+  name        = "team1-sg-vpc-endpoints"
+  description = "team1 Interface Endpoints (ECR, CloudWatch Logs, STS, Bedrock Runtime, SQS)"
+  vpc_id      = aws_vpc.team1_vpc.id
+
+  ingress {
+    description = "backend node group + EKS cluster/Fargate + job-trigger Lambda to Interface Endpoint"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    security_groups = [
+      aws_security_group.team1_sg_eks_backend.id,
+      aws_security_group.team1_sg_eks_cluster.id,
+      aws_security_group.team1_sg_lambda_job_trigger.id,
+    ]
+  }
+
+  ingress {
+    # Fargate 파드는 우리가 만든 team1_sg_eks_cluster가 아니라 EKS가 자동 생성하는
+    # 클러스터 SG(eks-cluster-sg-team1-eks-*)를 쓴다 — root 스택 리소스라 여기(network 스택)서
+    # SG ID로 참조하면 순환 의존이 생겨서, VPC 전체 CIDR로 대신 허용한다(실제 ECR 이미지 pull
+    # i/o timeout으로 발견).
+    description = "whole VPC CIDR (covers Fargate pods, which use the EKS auto-created cluster SG)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.team1_vpc.cidr_block]
+  }
+
+  egress {
+    description = "allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Team = "team1"
+    Name = "team1-sg-vpc-endpoints"
+  }
+}

@@ -1,40 +1,67 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 
-const recordFile = ref('burst-market-20-v3.jsonl')
-const throughput = ref('30000')
-const speed = ref('100×')
-const market = ref('20 KRW markets')
-const pods = ref('4 pods')
+// user-selectable run date (KST day)
+const selectedDate = ref('') // YYYY-MM-DD
 
-const speedOptions = ['1×', '10×', '50×', '100×']
-const marketOptions = ['5 KRW markets', '10 KRW markets', '20 KRW markets']
-const podOptions = ['1 pod', '2 pods', '4 pods', '8 pods']
+// target speed multiplier (numeric)
+const speed = ref(100)
+const speedOptions = [1, 10, 50, 100]
 
+// shardCount replaces pod selection: number of replay shards (1..20)
+const shardCount = ref(1)
+
+// UI / state
 const precheckMessage = ref('')
 const startMessage = ref('')
 const errorMessage = ref('')
 
-const graphBars = [8, 12, 18, 22, 26, 24, 30, 28, 32, 34, 30, 26, 24, 20, 18, 22, 26, 28, 30, 34]
+// replay run state
+const isStarting = ref(false)
+const isPolling = ref(false)
+const pollTimer = ref<number | null>(null)
 
-const botRatios = [
-  { name: '마켓메이커', value: 52, color: '#3478f6' },
-  { name: '모멘텀 추종', value: 14, color: '#20c8e8' },
-  { name: '평균회귀', value: 13, color: '#2ed39a' },
-  { name: '노이즈', value: 16, color: '#8b5cf6' },
-  { name: '대량 주문자', value: 5, color: '#fbbf24' },
-]
+// store last-run seen before starting so we wait for a new runId
+const previousRunId = ref<string | null>(null)
+
+// current run info from GET /order-api/v1/sessions/last-run
+const runInfo = ref<{ runId: string; owner: string; status: string; startedAt?: string; endedAt?: string; message?: string } | null>(null)
+
+// recorder summary
+const summary = ref<{ accepted: number; filled: number; unfilled: number } | null>(null)
+
+// percentages relative to accepted (accepted as 100%)
+const acceptedCount = computed(() => Number(summary.value?.accepted ?? 0))
+const filledPercent = computed(() => {
+  const a = acceptedCount.value
+  if (!a) return 0
+  return Math.round((Number(summary.value?.filled ?? 0) / a) * 100)
+})
+const unfilledPercent = computed(() => {
+  const a = acceptedCount.value
+  if (!a) return 0
+  return Math.round((Number(summary.value?.unfilled ?? 0) / a) * 100)
+})
+
+// sessionStorage keys (separate from paper trading)
+const SS_PREFIX = 'replay_' // keep distinct
+const SS_KEYS = {
+  selectedDate: SS_PREFIX + 'selectedDate',
+  speed: SS_PREFIX + 'speed',
+  shardCount: SS_PREFIX + 'shardCount',
+  runInfo: SS_PREFIX + 'runInfo',
+}
 
 const validate = () => {
   errorMessage.value = ''
-  if (!recordFile.value) return '주문 기록 파일을 입력해주세요'
-  const t = Number(throughput.value)
-  if (!t || Number.isNaN(t) || t <= 0) return '목표 주문 처리량을 올바르게 설정해주세요'
+  if (!selectedDate.value) return '재생할 날짜를 선택해주세요'
+  const sc = Number(shardCount.value)
+  if (!sc || Number.isNaN(sc) || sc < 1 || sc > 20) return '샤드 수는 1~20 사이여야 합니다'
   return ''
 }
 
-const onPrecheck = () => {
-  startMessage.value = ''
+// lightweight precheck used by the UI
+function onPrecheck() {
   const err = validate()
   if (err) {
     errorMessage.value = err
@@ -42,20 +69,228 @@ const onPrecheck = () => {
     return
   }
   errorMessage.value = ''
-  precheckMessage.value = '사전 점검 완료'
+  precheckMessage.value = '사전 점검 준비 완료'
 }
 
-const onStart = () => {
+// UI handler that starts the replay flow
+function onStart() {
+  startReplay()
+}
+
+function saveToSession() {
+  try {
+    sessionStorage.setItem(SS_KEYS.selectedDate, selectedDate.value)
+    sessionStorage.setItem(SS_KEYS.speed, String(speed.value))
+    sessionStorage.setItem(SS_KEYS.shardCount, String(shardCount.value))
+    sessionStorage.setItem(SS_KEYS.runInfo, JSON.stringify(runInfo.value || null))
+  } catch (e) {
+    // ignore storage errors
+  }
+}
+
+function loadFromSession() {
+  try {
+    const sd = sessionStorage.getItem(SS_KEYS.selectedDate)
+    if (sd) selectedDate.value = sd
+    const sp = sessionStorage.getItem(SS_KEYS.speed)
+    if (sp) speed.value = Number(sp)
+    const sc = sessionStorage.getItem(SS_KEYS.shardCount)
+    if (sc) shardCount.value = Number(sc)
+    const ri = sessionStorage.getItem(SS_KEYS.runInfo)
+    if (ri) {
+      const parsed = JSON.parse(ri)
+      if (parsed) runInfo.value = parsed
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function fetchLastRun() {
+  try {
+    const res = await fetch('/order-api/v1/sessions/last-run')
+    if (res.status === 404) {
+      return { found: false }
+    }
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`상태 조회 실패: ${res.status} ${text}`)
+    }
+    const data = await res.json()
+    return { found: true, data }
+  } catch (e: any) {
+    throw e
+  }
+}
+
+async function fetchRecorderSummary(from: string, to?: string) {
+  try {
+    let url = `/recorder-api/v1/orders/summary?mode=REPLAY&from=${encodeURIComponent(from)}`
+    if (to) url += `&to=${encodeURIComponent(to)}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`집계 조회 실패: ${res.status}`)
+    const data = await res.json()
+    summary.value = data
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  }
+}
+
+// convert RFC3339 to KST display
+function toKST(rfc: string | undefined) {
+  if (!rfc) return ''
+  const d = new Date(rfc)
+  // KST = UTC+9
+  const opts: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }
+  // use toLocaleString with 'ko-KR' and timezone offset by constructing with locale and options
+  try {
+    return d.toLocaleString('ko-KR', {...opts, timeZone: 'Asia/Seoul'})
+  } catch {
+    // fallback manual offset
+    const ts = d.getTime() + 9 * 3600 * 1000
+    const kd = new Date(ts)
+    return kd.toISOString().replace('T', ' ').replace('Z', '')
+  }
+}
+
+function computeDuration(start?: string, end?: string) {
+  if (!start) return ''
+  const s = new Date(start).getTime()
+  const e = end ? new Date(end).getTime() : Date.now()
+  const diff = e - s
+  if (diff < 0) return ''
+  const sec = Math.floor(diff / 1000)
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const sRem = sec % 60
+  return `${h}h ${m}m ${sRem}s`
+}
+
+async function startReplay() {
   errorMessage.value = ''
   precheckMessage.value = ''
+  startMessage.value = ''
   const err = validate()
   if (err) {
     errorMessage.value = err
-    startMessage.value = ''
     return
   }
-  startMessage.value = '더미 재생 요청이 생성되었습니다'
+
+  // prevent duplicate
+  if (isStarting.value) return
+  isStarting.value = true
+
+  try {
+    // 1) pre-fetch last-run and remember runId before starting
+    let existingRunId: string | null = null
+    try {
+      const res = await fetchLastRun()
+      if (res.found) {
+        const d = res.data
+        existingRunId = d.runId || null
+      }
+    } catch (e: any) {
+      // treat last-run errors as non-fatal but surface
+      errorMessage.value = '시작 전 마지막 실행 조회 오류: ' + (e.message || String(e))
+    }
+    previousRunId.value = existingRunId
+
+    // 2) POST start job
+    const body = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    const res = await fetch('/order-api/v1/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (res.status !== 202) {
+      const txt = await res.text()
+      throw new Error(`시작 요청 실패: ${res.status} ${txt}`)
+    }
+    startMessage.value = '재생 작업 요청이 큐에 들어갔습니다. 새 실행을 대기합니다.'
+
+    // 3) start polling last-run every 3s
+    if (!isPolling.value) {
+      isPolling.value = true
+      pollTimer.value = window.setInterval(pollLastRun, 3000)
+      // immediate first poll
+      pollLastRun()
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  } finally {
+    isStarting.value = false
+    saveToSession()
+  }
 }
+
+async function pollLastRun() {
+  try {
+    const res = await fetchLastRun()
+    if (!res.found) {
+      // no run yet
+      runInfo.value = null
+      saveToSession()
+      return
+    }
+    const d = res.data
+    // only accept runs with owner === 'replayengine' (use backend's owner contract)
+    if (d.owner !== 'replayengine') {
+      // ignore runs owned by others
+      return
+    }
+
+    // If we had a previous runId saved before starting, wait until a new runId appears
+    if (previousRunId.value && d.runId === previousRunId.value) {
+      // still the old run, keep waiting
+      return
+    }
+
+    // we have a new run (or there was none before)
+    runInfo.value = { runId: d.runId, owner: d.owner, status: d.status, startedAt: d.startedAt, endedAt: d.endedAt, message: d.message }
+    saveToSession()
+
+    // when startedAt present, fetch recorder summary
+    if (runInfo.value.startedAt) {
+      await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+    }
+
+    // update UI message
+    if (runInfo.value.status === 'IN_PROGRESS') {
+      startMessage.value = '재생 중'
+    } else if (runInfo.value.status === 'COMPLETED') {
+      startMessage.value = '재생 완료'
+      // final fetch and stop polling
+      if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopPolling()
+    } else if (runInfo.value.status === 'FAILED') {
+      startMessage.value = '재생 실패'
+      if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopPolling()
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  }
+}
+
+function stopPolling() {
+  if (pollTimer.value !== null) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+  isPolling.value = false
+}
+
+onMounted(() => {
+  loadFromSession()
+  // if we restored an IN_PROGRESS run, resume polling to show live results
+  if (runInfo.value && runInfo.value.status === 'IN_PROGRESS') {
+    if (!isPolling.value) {
+      isPolling.value = true
+      pollTimer.value = window.setInterval(pollLastRun, 3000)
+      pollLastRun()
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+})
 </script>
 
 <template>
@@ -65,6 +300,7 @@ const onStart = () => {
       <p class="subtitle">AI 트레이더 주문 기록과 동일 패턴 재생 설정</p>
       <hr />
     </header>
+    
 
     <div class="content-grid">
       <section class="panel left-panel">
@@ -72,39 +308,26 @@ const onStart = () => {
         <p class="panel-sub">성능 비교를 위한 결정적 주문 재생</p>
 
         <div class="form-field">
-          <label>주문 기록 파일</label>
-          <input v-model="recordFile" type="text" />
+          <label>재생 날짜</label>
+          <input v-model="selectedDate" type="date" />
         </div>
 
         <div class="form-field">
-          <label>목표 주문 처리량</label>
-          <input v-model.number="throughput" type="number" />
-        </div>
-
-        <div class="form-field">
-          <label>재생 배속</label>
-          <select v-model="speed">
-            <option v-for="s in speedOptions" :key="s">{{ s }}</option>
+          <label>재생 배속 (속도)</label>
+          <select v-model.number="speed">
+            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
           </select>
         </div>
 
         <div class="form-field">
-          <label>대상 마켓</label>
-          <select v-model="market">
-            <option v-for="m in marketOptions" :key="m">{{ m }}</option>
-          </select>
-        </div>
-
-        <div class="form-field">
-          <label>분산 재생기</label>
-          <select v-model="pods">
-            <option v-for="p in podOptions" :key="p">{{ p }}</option>
-          </select>
+          <label>샤드 수 (shardCount)</label>
+          <input v-model.number="shardCount" type="number" min="1" max="20" />
+          <p class="date-hint">샤드 수는 1~20 사이의 정수입니다. 백엔드 연동 시 shardCount로 전달됩니다.</p>
         </div>
 
         <div class="actions">
-          <button class="btn-primary" @click="onStart">재생 시작</button>
-          <button class="btn-dark" @click="onPrecheck">사전 점검</button>
+          <button class="btn-primary" :disabled="isStarting || isPolling" @click="onStart">재생 시작</button>
+          <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
         </div>
 
         <div class="messages">
@@ -118,36 +341,58 @@ const onStart = () => {
         <h3 class="panel-title">부하 시나리오 미리보기</h3>
         <p class="panel-sub">예상 부하 분포와 검증 기준</p>
 
-        <div class="bar-chart">
-          <div class="bars">
-            <div
-              v-for="(v, idx) in graphBars"
-              :key="idx"
-              class="bar"
-              :class="{ teal: idx >= graphBars.length - 4 }"
-              :style="{ height: v * 3 + 'px' }"
-            ></div>
-          </div>
-        </div>
-
-        <h4 class="section-title">봇별 주문 비율</h4>
-        <div class="ratios">
-          <div v-for="(b, i) in botRatios" :key="i" class="ratio-row">
-            <div class="ratio-label">{{ b.name }}</div>
-            <div class="ratio-bar">
-              <div class="ratio-fill" :style="{ width: b.value + '%', background: b.color }"></div>
-            </div>
-            <div class="ratio-value">{{ b.value }}%</div>
+        <div class="bar-chart placeholder">
+          <div class="empty-center">
+            <strong>시나리오 미리보기: 데이터 연동 예정</strong>
+            <div class="empty-sub">백엔드 연동 전에는 샘플 미리보기만 표시됩니다.</div>
           </div>
         </div>
 
         <div class="status-box">
           <div class="status-left">
             <span class="status-dot"></span>
-            <span>준비 완료</span>
+            <span>{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
           </div>
-          <div class="status-right">입력 파일 검증 완료 · 1,800,000 orders</div>
+          <div class="status-right">
+            <div v-if="runInfo">
+              <div>{{ runInfo.owner }} • {{ runInfo.runId }}</div>
+              <div v-if="runInfo.startedAt">시작: {{ toKST(runInfo.startedAt) }}</div>
+              <div v-if="runInfo.endedAt">종료: {{ toKST(runInfo.endedAt) }} (소요: {{ computeDuration(runInfo.startedAt, runInfo.endedAt) }})</div>
+            </div>
+            <div v-else>데이터 연동 전</div>
+          </div>
         </div>
+          <!-- Recorder summary: 접수/체결/미체결 -->
+          <div class="summary-box">
+            <div v-if="!summary">데이터 없음</div>
+            <div v-else class="ratios">
+              <div class="section-title">요약</div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">접수</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: '100%', background: '#163247' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.accepted }}</div>
+              </div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">체결</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: filledPercent + '%', background: '#3f86ff' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.filled }} ({{ filledPercent }}%)</div>
+              </div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">미체결</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: unfilledPercent + '%', background: '#ff6b6b' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.unfilled }} ({{ unfilledPercent }}%)</div>
+              </div>
+            </div>
+          </div>
       </aside>
     </div>
   </div>
@@ -320,6 +565,9 @@ const onStart = () => {
   align-items: center;
   justify-content: space-between;
   color: #bcd8e9;
+}
+.summary-box {
+  margin-top: 18px;
 }
 .status-dot {
   width: 10px;

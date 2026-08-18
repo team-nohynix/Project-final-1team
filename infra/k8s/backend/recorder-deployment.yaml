@@ -1,0 +1,86 @@
+# 기록기 — recorder-latest. 환경변수는 앱 담당자가 전달한 "AWS 리소스·권한·계정 정리"
+# 문서(2026-08-11) 기준 — Kafka는 KAFKA_USE_IAM_AUTH=true 하나, Redis는 REDIS_TLS_ENABLED만
+# (AUTH 토큰 없음), DATABASE_URL은 go-sql-driver/mysql DSN(user:pass@tcp(host:port)/db).
+# 스키마는 자동 마이그레이션이 없어 recorder/schema.sql을 수동 적용해야 한다(적용 완료).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recorder
+  namespace: backend
+  labels:
+    app: recorder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recorder
+  template:
+    metadata:
+      labels:
+        app: recorder
+    spec:
+      serviceAccountName: sa-recorder
+      tolerations:
+        - key: workload
+          value: backend
+          effect: NoSchedule
+      nodeSelector:
+        team1.io/workload: backend
+      containers:
+        - name: recorder
+          image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest
+          # 태그가 "recorder-latest"라 K8s 기본 imagePullPolicy가 IfNotPresent —
+          # matching-engine에서 재배포해도 캐시된 예전 이미지를 쓰는 걸 실측으로
+          # 발견해서 여기도 같이 맞춘다.
+          imagePullPolicy: Always
+          env:
+            - name: KAFKA_BROKER
+              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "true"
+            - name: REDIS_ADDR
+              value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: recorder-db-secret
+                  key: DATABASE_URL
+            # 실제 코드(recorder/config.go)가 읽는 이름은 ARCHIVE_BUCKET이다 —
+            # S3_TRADE_RESULTS_BUCKET은 존재하지 않는 변수라 recorder가 계속 빈 값으로
+            # 인식해 로컬 ./records로 폴백했고, 컨테이너 안에서 mkdir 권한이 없어
+            # "아카이브 저장 실패" 로그만 남기고 있었다(2026-08-12 실사용 중 발견).
+            # RDS 저장 경로는 이 버그와 무관 — 원본 아카이빙(S3)만 계속 실패해온 것.
+            - name: ARCHIVE_BUCKET
+              value: "team1-truss-trade-results"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+# 조회 API(GET /v1/trace/{orderId}, GET /v1/matching/engines, :8082 고정) 노출용.
+# 2026-08-12까지 Service가 아예 없어서 클러스터 내부에서도 호출할 방법이 없었음
+# (docs/frontend-backend-integration.md는 "연결 가능"이라 썼지만 실제로는 안 됐던 부분).
+# orderapi Ingress와 ALB를 공유하므로 Ingress 전체 헬스체크 경로
+# (/v1/markets/KRW-BTC/orderbook, orderapi 전용)가 그대로 적용되면 recorder
+# 타겟그룹이 항상 unhealthy가 된다 — Service 자체에 오버라이드를 걸어
+# AWS Load Balancer Controller가 이 백엔드에는 이 경로로 헬스체크하게 한다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: recorder
+  namespace: backend
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /v1/matching/engines
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  selector:
+    app: recorder
+  ports:
+    - port: 8082
+      targetPort: 8082

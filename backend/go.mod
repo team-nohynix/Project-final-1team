@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
-	github.com/segmentio/kafka-go v0.4.51
+	golang.org/x/sync v0.22.0
 )
 
 require (
@@ -27,6 +27,4 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.3 // indirect
 	github.com/aws/smithy-go v1.27.6 // indirect
-	github.com/klauspost/compress v1.15.9 // indirect
-	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 )

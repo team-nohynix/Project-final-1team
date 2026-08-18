@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
@@ -48,11 +49,23 @@ func (s *s3Storage) SaveStream(st StreamFile, start, end time.Time) (string, err
 	return s.putIfAbsent(st, st.Market, start, end, "stream")
 }
 
+func (s *s3Storage) LoadBatch(market string, start, end time.Time) (BatchFile, error) {
+	var b BatchFile
+	err := s.getJSON(market, start, end, "batch", &b)
+	return b, err
+}
+
+func (s *s3Storage) LoadStream(market string, start, end time.Time) (StreamFile, error) {
+	var st StreamFile
+	err := s.getJSON(market, start, end, "stream", &st)
+	return st, err
+}
+
 // putIfAbsent는 CLAUDE.md의 멱등성 설계대로, 같은 키의 파일이 이미 있으면
 // 재생성/재업로드 없이 기존 파일을 그대로 서빙합니다.
 func (s *s3Storage) putIfAbsent(v any, market string, start, end time.Time, kind string) (string, error) {
 	ctx := context.Background()
-	key := fmt.Sprintf("%s/%s_%s_%s.json", market, formatFileTime(start), formatFileTime(end), kind)
+	key := s.objectKey(market, start, end, kind)
 
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -83,6 +96,41 @@ func (s *s3Storage) putIfAbsent(v any, market string, start, end time.Time, kind
 	}
 
 	return s.uri(key), nil
+}
+
+// getJSON은 S3에서 객체를 읽어 v에 언마샬합니다. 객체가 없으면 ErrNotFound를 반환합니다.
+func (s *s3Storage) getJSON(market string, start, end time.Time, kind string, v any) error {
+	ctx := context.Background()
+	key := s.objectKey(market, start, end, kind)
+
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("S3 GetObject 실패: %w", err)
+	}
+	defer out.Body.Close()
+
+	raw, err := io.ReadAll(out.Body)
+	if err != nil {
+		return fmt.Errorf("S3 응답 읽기 실패: %w", err)
+	}
+
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("JSON 파싱 실패: %w", err)
+	}
+
+	return nil
+}
+
+// objectKey는 SaveXxx/LoadXxx가 공유하는 S3 키 생성 규칙입니다.
+func (s *s3Storage) objectKey(market string, start, end time.Time, kind string) string {
+	return fmt.Sprintf("%s/%s_%s_%s.json", market, formatFileTime(start), formatFileTime(end), kind)
 }
 
 func (s *s3Storage) uri(key string) string {
