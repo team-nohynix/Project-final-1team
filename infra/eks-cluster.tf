@@ -74,6 +74,7 @@ resource "aws_eks_cluster" "team1" {
   # 자체 생성해버려 monitoring.tf의 retention 설정과 충돌한다.
   depends_on = [
     aws_iam_role_policy_attachment.team1_eks_cluster,
+    aws_cloudwatch_log_group.eks_cluster,
   ]
 }
 

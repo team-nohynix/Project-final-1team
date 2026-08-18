@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
@@ -11,11 +11,33 @@ const speedOptions = [1, 10, 50, 100]
 // shardCount replaces pod selection: number of replay shards (1..20)
 const shardCount = ref(1)
 
+// UI / state
 const precheckMessage = ref('')
 const startMessage = ref('')
 const errorMessage = ref('')
 
-const graphBars = ref([])
+// replay run state
+const isStarting = ref(false)
+const isPolling = ref(false)
+const pollTimer = ref<number | null>(null)
+
+// store last-run seen before starting so we wait for a new runId
+const previousRunId = ref<string | null>(null)
+
+// current run info from GET /order-api/v1/sessions/last-run
+const runInfo = ref<{ runId: string; owner: string; status: string; startedAt?: string; endedAt?: string; message?: string } | null>(null)
+
+// recorder summary
+const summary = ref<{ accepted: number; filled: number; unfilled: number } | null>(null)
+
+// sessionStorage keys (separate from paper trading)
+const SS_PREFIX = 'replay_' // keep distinct
+const SS_KEYS = {
+  selectedDate: SS_PREFIX + 'selectedDate',
+  speed: SS_PREFIX + 'speed',
+  shardCount: SS_PREFIX + 'shardCount',
+  runInfo: SS_PREFIX + 'runInfo',
+}
 
 const validate = () => {
   errorMessage.value = ''
@@ -25,8 +47,8 @@ const validate = () => {
   return ''
 }
 
-const onPrecheck = () => {
-  startMessage.value = ''
+// lightweight precheck used by the UI
+function onPrecheck() {
   const err = validate()
   if (err) {
     errorMessage.value = err
@@ -34,20 +56,228 @@ const onPrecheck = () => {
     return
   }
   errorMessage.value = ''
-  precheckMessage.value = '사전 점검 준비 완료 (백엔드 연동 전)'
+  precheckMessage.value = '사전 점검 준비 완료'
 }
 
-const onStart = () => {
+// UI handler that starts the replay flow
+function onStart() {
+  startReplay()
+}
+
+function saveToSession() {
+  try {
+    sessionStorage.setItem(SS_KEYS.selectedDate, selectedDate.value)
+    sessionStorage.setItem(SS_KEYS.speed, String(speed.value))
+    sessionStorage.setItem(SS_KEYS.shardCount, String(shardCount.value))
+    sessionStorage.setItem(SS_KEYS.runInfo, JSON.stringify(runInfo.value || null))
+  } catch (e) {
+    // ignore storage errors
+  }
+}
+
+function loadFromSession() {
+  try {
+    const sd = sessionStorage.getItem(SS_KEYS.selectedDate)
+    if (sd) selectedDate.value = sd
+    const sp = sessionStorage.getItem(SS_KEYS.speed)
+    if (sp) speed.value = Number(sp)
+    const sc = sessionStorage.getItem(SS_KEYS.shardCount)
+    if (sc) shardCount.value = Number(sc)
+    const ri = sessionStorage.getItem(SS_KEYS.runInfo)
+    if (ri) {
+      const parsed = JSON.parse(ri)
+      if (parsed) runInfo.value = parsed
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function fetchLastRun() {
+  try {
+    const res = await fetch('/order-api/v1/sessions/last-run')
+    if (res.status === 404) {
+      return { found: false }
+    }
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`상태 조회 실패: ${res.status} ${text}`)
+    }
+    const data = await res.json()
+    return { found: true, data }
+  } catch (e: any) {
+    throw e
+  }
+}
+
+async function fetchRecorderSummary(from: string, to?: string) {
+  try {
+    let url = `/recorder-api/v1/orders/summary?mode=REPLAY&from=${encodeURIComponent(from)}`
+    if (to) url += `&to=${encodeURIComponent(to)}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`집계 조회 실패: ${res.status}`)
+    const data = await res.json()
+    summary.value = data
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  }
+}
+
+// convert RFC3339 to KST display
+function toKST(rfc: string | undefined) {
+  if (!rfc) return ''
+  const d = new Date(rfc)
+  // KST = UTC+9
+  const opts: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }
+  // use toLocaleString with 'ko-KR' and timezone offset by constructing with locale and options
+  try {
+    return d.toLocaleString('ko-KR', {...opts, timeZone: 'Asia/Seoul'})
+  } catch {
+    // fallback manual offset
+    const ts = d.getTime() + 9 * 3600 * 1000
+    const kd = new Date(ts)
+    return kd.toISOString().replace('T', ' ').replace('Z', '')
+  }
+}
+
+function computeDuration(start?: string, end?: string) {
+  if (!start) return ''
+  const s = new Date(start).getTime()
+  const e = end ? new Date(end).getTime() : Date.now()
+  const diff = e - s
+  if (diff < 0) return ''
+  const sec = Math.floor(diff / 1000)
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const sRem = sec % 60
+  return `${h}h ${m}m ${sRem}s`
+}
+
+async function startReplay() {
   errorMessage.value = ''
   precheckMessage.value = ''
+  startMessage.value = ''
   const err = validate()
   if (err) {
     errorMessage.value = err
-    startMessage.value = ''
     return
   }
-  startMessage.value = '재생 시작 요청 준비됨 (백엔드 연동 전)'
+
+  // prevent duplicate
+  if (isStarting.value) return
+  isStarting.value = true
+
+  try {
+    // 1) pre-fetch last-run and remember runId before starting
+    let existingRunId: string | null = null
+    try {
+      const res = await fetchLastRun()
+      if (res.found) {
+        const d = res.data
+        existingRunId = d.runId || null
+      }
+    } catch (e: any) {
+      // treat last-run errors as non-fatal but surface
+      errorMessage.value = '시작 전 마지막 실행 조회 오류: ' + (e.message || String(e))
+    }
+    previousRunId.value = existingRunId
+
+    // 2) POST start job
+    const body = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    const res = await fetch('/order-api/v1/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (res.status !== 202) {
+      const txt = await res.text()
+      throw new Error(`시작 요청 실패: ${res.status} ${txt}`)
+    }
+    startMessage.value = '재생 작업 요청이 큐에 들어갔습니다. 새 실행을 대기합니다.'
+
+    // 3) start polling last-run every 3s
+    if (!isPolling.value) {
+      isPolling.value = true
+      pollTimer.value = window.setInterval(pollLastRun, 3000)
+      // immediate first poll
+      pollLastRun()
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  } finally {
+    isStarting.value = false
+    saveToSession()
+  }
 }
+
+async function pollLastRun() {
+  try {
+    const res = await fetchLastRun()
+    if (!res.found) {
+      // no run yet
+      runInfo.value = null
+      saveToSession()
+      return
+    }
+    const d = res.data
+    // only accept runs with owner === 'replayengine' (use backend's owner contract)
+    if (d.owner !== 'replayengine') {
+      // ignore runs owned by others
+      return
+    }
+
+    // If we had a previous runId saved before starting, wait until a new runId appears
+    if (previousRunId.value && d.runId === previousRunId.value) {
+      // still the old run, keep waiting
+      return
+    }
+
+    // we have a new run (or there was none before)
+    runInfo.value = { runId: d.runId, owner: d.owner, status: d.status, startedAt: d.startedAt, endedAt: d.endedAt, message: d.message }
+    saveToSession()
+
+    // when startedAt present, fetch recorder summary
+    if (runInfo.value.startedAt) {
+      await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+    }
+
+    // update UI message
+    if (runInfo.value.status === 'IN_PROGRESS') {
+      startMessage.value = '재생 중'
+    } else if (runInfo.value.status === 'COMPLETED') {
+      startMessage.value = '재생 완료'
+      // final fetch and stop polling
+      if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopPolling()
+    } else if (runInfo.value.status === 'FAILED') {
+      startMessage.value = '재생 실패'
+      if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopPolling()
+    }
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  }
+}
+
+function stopPolling() {
+  if (pollTimer.value !== null) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+  isPolling.value = false
+}
+
+onMounted(() => {
+  loadFromSession()
+  // if we restored an IN_PROGRESS run, resume polling to show live results
+  if (runInfo.value && runInfo.value.status === 'IN_PROGRESS') {
+    if (!isPolling.value) {
+      isPolling.value = true
+      pollTimer.value = window.setInterval(pollLastRun, 3000)
+      pollLastRun()
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+})
 </script>
 
 <template>
@@ -82,8 +312,8 @@ const onStart = () => {
         </div>
 
         <div class="actions">
-          <button class="btn-primary" @click="onStart">재생 시작</button>
-          <button class="btn-dark" @click="onPrecheck">사전 점검</button>
+          <button class="btn-primary" :disabled="isStarting || isPolling" @click="onStart">재생 시작</button>
+          <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
         </div>
 
         <div class="messages">
@@ -107,9 +337,16 @@ const onStart = () => {
         <div class="status-box">
           <div class="status-left">
             <span class="status-dot"></span>
-            <span>상태 확인 전</span>
+            <span>{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
           </div>
-          <div class="status-right">데이터 연동 예정</div>
+          <div class="status-right">
+            <div v-if="runInfo">
+              <div>{{ runInfo.owner }} • {{ runInfo.runId }}</div>
+              <div v-if="runInfo.startedAt">시작: {{ toKST(runInfo.startedAt) }}</div>
+              <div v-if="runInfo.endedAt">종료: {{ toKST(runInfo.endedAt) }} (소요: {{ computeDuration(runInfo.startedAt, runInfo.endedAt) }})</div>
+            </div>
+            <div v-else>데이터 연동 전</div>
+          </div>
         </div>
       </aside>
     </div>

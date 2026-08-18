@@ -128,6 +128,7 @@ func main() {
 	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
 	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier))
 	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
+
 	mux.Handle("GET /metrics", promhttp.Handler())
 	go func() {
 		addr := ":" + cfg.Port

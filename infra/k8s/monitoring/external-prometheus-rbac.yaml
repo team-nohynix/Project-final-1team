@@ -1,0 +1,41 @@
+# 클러스터 밖(모니터링 EC2)의 Prometheus가 EKS API 서버 프록시 경유로 스크레이프할 때
+# 쓰는 RBAC. IAM 매핑은 infra/monitoring-ec2.tf의 aws_eks_access_entry(kubernetes_groups
+# = team1-monitoring-viewers)에서 하고, 실제 권한은 여기서 그 그룹에 바인딩한다 —
+# infra/job-trigger.tf의 access entry가 쓰는 것과 같은 패턴(AWS 관리형 정책 대신 커스텀 RBAC).
+#
+# prometheus-prometheus ClusterRole(in-cluster kube-prometheus-stack) 규칙을 그대로 미러링하고,
+# 여기에 pods/proxy, services/proxy, nodes/proxy(get)만 추가했다 — in-cluster Prometheus는
+# 파드 네트워크에 직접 붙어서 이 프록시 권한이 필요 없었지만, 외부 Prometheus는 API 서버
+# 프록시 경로(/api/v1/.../proxy/...)로만 스크레이프하므로 반드시 필요하다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/proxy", "services/proxy", "nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: external-prometheus
+subjects:
+  - kind: Group
+    name: team1-monitoring-viewers
+    apiGroup: rbac.authorization.k8s.io
