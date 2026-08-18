@@ -24,44 +24,6 @@ env:
   TF_APPLY_ROLE: arn:aws:iam::727646470302:role/team1-github-actions-tf-apply
 
 jobs:
-  # --- 임시 디버그: OIDC AssumeRoleWithWebIdentity가 "Not authorized"로 계속
-  # 실패하는 원인을 좁히기 위해, GitHub이 실제로 발급하는 토큰의 클레임을
-  # 그대로 찍어본다 — 신뢰 정책/저장소 이름/브랜치는 이미 다 확인했는데도
-  # 실패해서, 토큰 자체가 기대와 다른지 그보다 상위(계정 SCP 등)에서 막히는지
-  # 구분하기 위함. 원본 토큰 문자열은 절대 로그에 남기지 않고 디코딩된 클레임만
-  # 출력한다. 원인 파악되면 이 job은 지운다.
-  debug-oidc-token:
-    runs-on: ubuntu-latest
-    steps:
-      - name: OIDC 토큰 클레임 디코딩 (sts.amazonaws.com 대상)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com');
-            const payloadB64 = token.split('.')[1];
-            const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf8'));
-            delete payload.jti; // 토큰 재현에 쓰일 수 있는 값이라 제외, 나머지는 민감정보 아님
-            console.log('=== GitHub OIDC 토큰 클레임 (audience=sts.amazonaws.com) ===');
-            console.log(JSON.stringify(payload, null, 2));
-      - name: aws-actions/configure-aws-credentials를 거치지 않고 원본 STS 호출로 직접 assume 시도
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com');
-            core.exportVariable('RAW_OIDC_TOKEN', token);
-      - name: aws sts assume-role-with-web-identity 직접 호출 (원본 에러 확인용)
-        run: |
-          aws sts assume-role-with-web-identity \
-            --role-arn arn:aws:iam::727646470302:role/team1-github-actions-ecr-push \
-            --role-session-name debug-oidc-session \
-            --web-identity-token "$RAW_OIDC_TOKEN" \
-            --duration-seconds 900 \
-            --query 'AssumedRoleUser.Arn' \
-            --output text
-          echo "성공 시 위에 assume된 역할 ARN이 출력됩니다."
-        env:
-          AWS_REGION: ap-northeast-2
-
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
