@@ -24,12 +24,23 @@ data "aws_iam_policy_document" "github_actions_assume" {
     # main은 예전 backend 전용 워크플로 흔적, 새 워크플로는 prod만 쓰지만 트러스트는
     # 굳이 좁히지 않고 남겨둔다(레포에 남아있는 워크플로 파일 자체가 실제 방아쇠라
     # 여기 조건 하나만으로 뭐가 도는지 결정되지 않음).
+    #
+    # 저장소 이름 뒤 와일드카드(2026-08-18 추가, 실제 배포 실패로 발견): GitHub의
+    # OIDC subject claim이 항상 "repo:{owner}/{repo}:ref:..." 형태인 게 아니라,
+    # 저장소가 "저장소 ID를 subject claim에 포함" 옵션을 쓰면
+    # "repo:{owner}/{repo}@{repository_id}:ref:..."로 바뀐다 — 이 저장소에서
+    # 그 설정이 켜지면서 문자열이 정확히 안 맞아 sts:AssumeRoleWithWebIdentity가
+    # 계속 AccessDenied로 실패하는 걸 실제 배포에서 확인했다(팀원이 지난주엔
+    # 성공했던 걸로 봐서 그 사이 설정이 바뀐 것으로 추정, 정확한 원인은 GitHub
+    # 저장소 Settings 이력으로 확인 필요). 와일드카드는 "@{repository_id}" 유무
+    # 둘 다(빈 문자열도 매칭) 허용해서, 이 설정이 나중에 다시 바뀌어도 트러스트가
+    # 안 깨지게 한다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/main",
-        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
+        "repo:KimDJ7105/Project-final-1team*:ref:refs/heads/main",
+        "repo:KimDJ7105/Project-final-1team*:ref:refs/heads/prod",
       ]
     }
   }

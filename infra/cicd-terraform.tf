@@ -29,10 +29,13 @@ data "aws_iam_policy_document" "github_actions_terraform_plan_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # cicd.tf의 github_actions_assume과 같은 이유로 저장소 이름 뒤에 와일드카드를
+    # 둔다 — "@{repository_id}"가 subject claim에 붙을 수도 안 붙을 수도 있음
+    # (2026-08-18, 실제 배포 실패로 발견한 것과 동일한 원인).
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod"]
+      values   = ["repo:KimDJ7105/Project-final-1team*:ref:refs/heads/prod"]
     }
   }
 }
@@ -66,10 +69,12 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # cicd.tf의 github_actions_assume과 같은 이유로 저장소 이름 뒤에 와일드카드를
+    # 둔다(2026-08-18, 실제 배포 실패로 발견).
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod"]
+      values   = ["repo:KimDJ7105/Project-final-1team*:ref:refs/heads/prod"]
     }
     # 이 조건이 실제 게이트 — GitHub Environment "infra-apply"에 필수 리뷰어를
     # 설정해두면(저장소 Settings에서 수동 설정), 그 environment를 쓰는 job은
