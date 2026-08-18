@@ -24,6 +24,31 @@ env:
   TF_APPLY_ROLE: arn:aws:iam::727646470302:role/team1-github-actions-tf-apply
 
 jobs:
+  # --- 임시 디버그(2차): 트러스트 정책의 sub 조건을 저장소 ID까지 정확히
+  # 맞춰서 고쳤는데도 여전히 AssumeRoleWithWebIdentity가 실패해서, 이번에
+  # 실패하는 바로 그 실행의 실제 sub 클레임을 다시 확인한다. 원인 파악되면
+  # 이 job은 지운다.
+  debug-oidc-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: OIDC 토큰 클레임 디코딩 (sts.amazonaws.com 대상)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const payloadB64 = token.split('.')[1];
+            const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf8'));
+            delete payload.jti; // 토큰 재현에 쓰일 수 있는 값이라 제외, 나머지는 민감정보 아님
+            console.log('=== GitHub OIDC 토큰 클레임 (audience=sts.amazonaws.com) ===');
+            console.log(JSON.stringify(payload, null, 2));
+      - name: 실제 배포 job과 동일한 방식(aws-actions/configure-aws-credentials)으로 assume 시도
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::727646470302:role/team1-github-actions-ecr-push
+          aws-region: ap-northeast-2
+      - name: assume 성공 시 현재 identity 출력
+        run: aws sts get-caller-identity
+
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
