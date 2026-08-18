@@ -71,6 +71,8 @@ function saveStateToSession() {
       executionStatus: executionStatus.value,
       paperTradingResult: paperTradingResult.value,
       executionError: executionError.value,
+      previousRunId: previousRunId.value,
+      awaitingNewRun: awaitingNewRun.value,
       // timestamp to help debugging
       savedAt: new Date().toISOString(),
     }
@@ -382,6 +384,8 @@ const resetExecution = () => {
   executionStatus.value = 'idle'
   paperTradingResult.value = null
   executionError.value = ''
+  previousRunId.value = ''
+  awaitingNewRun.value = false
 }
 
 // ---- Paper trading: integrate with POST /order-api/v1/jobs, GET /order-api/v1/sessions/last-run,
@@ -392,6 +396,10 @@ let execPollTimerId: any = null
 let execPollInFlight = false
 let startRequestInFlight = false
 const storedRunId = ref('')
+// store the runId observed BEFORE issuing a new start request
+const previousRunId = ref('')
+// whether we're currently waiting for a newly-queued run to appear
+const awaitingNewRun = ref(false)
 
 const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
@@ -461,6 +469,14 @@ const pollLastRun = async () => {
   try {
     const res = await fetch('/order-api/v1/sessions/last-run')
     if (res.status === 404) {
+      // If backend no longer knows about any run, and we're awaiting a new run,
+      // keep polling. This covers the case where the system never had a trader run
+      // before (previousRunId may be empty) but we've just queued one.
+      if (awaitingNewRun.value) {
+        execPollTimerId = setTimeout(pollLastRun, 3000)
+        execPollInFlight = false
+        return
+      }
       executionStatus.value = 'idle'
       paperTradingResult.value = null
       executionError.value = ''
@@ -478,13 +494,33 @@ const pollLastRun = async () => {
       return
     }
     const data = await res.json()
+    // If we have a previousRunId saved (observed before POST), and the backend
+    // still reports the same runId, then this response reflects the old run record
+    // rather than the new queued run — keep polling until runId changes.
+    const currentRunId = data.runId || ''
+    if (awaitingNewRun.value && previousRunId.value && currentRunId && currentRunId === previousRunId.value) {
+      // still seeing the previous run; wait and poll again
+      execPollTimerId = setTimeout(pollLastRun, 3000)
+      execPollInFlight = false
+      return
+    }
+
+    // We've observed a runId different from the previous one (or there was none).
+    // We're no longer awaiting the new run.
+    awaitingNewRun.value = false
+    saveStateToSession()
+
+    // Now we have either a new runId or no previousRunId to compare; proceed with owner check
     if (data.owner !== 'trader') {
       executionStatus.value = 'error'
       executionError.value = '실행 소유자가 trader가 아니므로 결과를 표시하지 않습니다.'
+      // clear marker since this is a terminal state
+      previousRunId.value = ''
+      saveStateToSession()
       stopExecutionPolling()
       return
     }
-    storedRunId.value = data.runId || ''
+    storedRunId.value = currentRunId
     saveStateToSession()
     const status = data.status
     const startedAt = data.startedAt ?? null
@@ -510,6 +546,10 @@ const pollLastRun = async () => {
       } else {
         paperTradingResult.value = summary
       }
+      // Clear the previousRunId marker now that we've observed a completed/failed run
+      previousRunId.value = ''
+      awaitingNewRun.value = false
+      saveStateToSession()
       stopExecutionPolling()
       return
     }
@@ -530,6 +570,26 @@ const startPaperTrading = async () => {
   paperTradingResult.value = null
   infoMessage.value = ''
   try {
+    // Record current last-run's runId before sending a new start request.
+    // This prevents misinterpreting a still-stale last-run record as the new run.
+    try {
+      const pre = await fetch('/order-api/v1/sessions/last-run')
+      if (pre.status === 404) {
+        previousRunId.value = ''
+      } else if (pre.ok) {
+        const preData = await pre.json()
+        previousRunId.value = preData.runId || ''
+      } else {
+        previousRunId.value = ''
+      }
+    } catch (e) {
+      // network or other error; clear so we don't block polling forever
+      previousRunId.value = ''
+    }
+    // We're now awaiting the appearance of a newly-queued run (regardless of previousRunId value)
+    awaitingNewRun.value = true
+    saveStateToSession()
+
     const payload = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
     const res = await fetch('/order-api/v1/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
@@ -539,6 +599,7 @@ const startPaperTrading = async () => {
       saveStateToSession()
       stopExecutionPolling()
       await pollLastRun()
+      // Note: previousRunId will be cleared by pollLastRun once it sees a new runId and the run completes.
       return
     }
     let body = null
@@ -611,6 +672,8 @@ onMounted(async () => {
       executionStatus.value = stored.executionStatus ?? executionStatus.value
       paperTradingResult.value = stored.paperTradingResult ?? paperTradingResult.value
       executionError.value = stored.executionError ?? executionError.value
+      previousRunId.value = stored.previousRunId ?? previousRunId.value
+      awaitingNewRun.value = stored.awaitingNewRun ?? awaitingNewRun.value
 
       // Collection state
       collectJobId.value = stored.collectJobId ?? collectJobId.value
