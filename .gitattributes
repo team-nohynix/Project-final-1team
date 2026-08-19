@@ -5,6 +5,11 @@
 # line ending으로 계산하면 terraform이 매번 "user_data_base64 변경 →
 # 인스턴스 replace"로 착각한다(2026-08-19, 실제로 이 문제로 살아있는
 # 모니터링 EC2가 반복 재생성되는 걸 발견).
+#
+# 2026-08-19(같은 날 두 번째): job-trigger.tf의 archive_file도 같은 이유로
+# source_code_hash가 로컬/CI 간에 계속 달라져서 lambda_function.job_trigger가
+# 매번 업데이트 대상으로 잡히는 걸 발견 — .py도 추가.
 infra/monitoring-ec2/** text eol=lf
 infra/**/*.tpl text eol=lf
 infra/**/*.sh text eol=lf
+infra/**/*.py text eol=lf
