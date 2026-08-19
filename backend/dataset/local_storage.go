@@ -42,6 +42,39 @@ func (s *localStorage) LoadStream(market string, start, end time.Time) (StreamFi
 	return st, err
 }
 
+func (s *localStorage) Exists(market string, start, end time.Time) (ExistsResult, error) {
+	var res ExistsResult
+
+	batchPath := s.filePath(market, start, end, "batch")
+	res.BatchPath = batchPath
+	batchExists, err := statExists(batchPath)
+	if err != nil {
+		return ExistsResult{}, err
+	}
+	res.BatchExists = batchExists
+
+	streamPath := s.filePath(market, start, end, "stream")
+	res.StreamPath = streamPath
+	streamExists, err := statExists(streamPath)
+	if err != nil {
+		return ExistsResult{}, err
+	}
+	res.StreamExists = streamExists
+
+	return res, nil
+}
+
+func statExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("파일 확인 실패: %w", err)
+}
+
 func (s *localStorage) writeJSON(v any, market string, start, end time.Time, kind string) (string, error) {
 	path := s.filePath(market, start, end, kind)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
