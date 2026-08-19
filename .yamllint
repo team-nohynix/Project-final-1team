@@ -1,0 +1,6 @@
+extends: default
+
+rules:
+  document-start: disable  # 파일 시작 부분의 --- 강제 규칙 끄기
+  truthy: disable          # on, off 등 값 관련 경고 끄기
+  new-line-at-end-of-file: disable # 파일 끝 빈 줄(개행) 강제 규칙 끄기

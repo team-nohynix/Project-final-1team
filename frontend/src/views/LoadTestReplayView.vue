@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
@@ -29,6 +29,19 @@ const runInfo = ref<{ runId: string; owner: string; status: string; startedAt?: 
 
 // recorder summary
 const summary = ref<{ accepted: number; filled: number; unfilled: number } | null>(null)
+
+// percentages relative to accepted (accepted as 100%)
+const acceptedCount = computed(() => Number(summary.value?.accepted ?? 0))
+const filledPercent = computed(() => {
+  const a = acceptedCount.value
+  if (!a) return 0
+  return Math.round((Number(summary.value?.filled ?? 0) / a) * 100)
+})
+const unfilledPercent = computed(() => {
+  const a = acceptedCount.value
+  if (!a) return 0
+  return Math.round((Number(summary.value?.unfilled ?? 0) / a) * 100)
+})
 
 // sessionStorage keys (separate from paper trading)
 const SS_PREFIX = 'replay_' // keep distinct
@@ -287,6 +300,7 @@ onBeforeUnmount(() => {
       <p class="subtitle">AI 트레이더 주문 기록과 동일 패턴 재생 설정</p>
       <hr />
     </header>
+    
 
     <div class="content-grid">
       <section class="panel left-panel">
@@ -348,6 +362,37 @@ onBeforeUnmount(() => {
             <div v-else>데이터 연동 전</div>
           </div>
         </div>
+          <!-- Recorder summary: 접수/체결/미체결 -->
+          <div class="summary-box">
+            <div v-if="!summary">데이터 없음</div>
+            <div v-else class="ratios">
+              <div class="section-title">요약</div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">접수</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: '100%', background: '#163247' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.accepted }}</div>
+              </div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">체결</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: filledPercent + '%', background: '#3f86ff' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.filled }} ({{ filledPercent }}%)</div>
+              </div>
+
+              <div class="ratio-row">
+                <div class="ratio-label">미체결</div>
+                <div class="ratio-bar">
+                  <div class="ratio-fill" :style="{ width: unfilledPercent + '%', background: '#ff6b6b' }"></div>
+                </div>
+                <div class="ratio-value">{{ summary.unfilled }} ({{ unfilledPercent }}%)</div>
+              </div>
+            </div>
+          </div>
       </aside>
     </div>
   </div>
@@ -520,6 +565,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   color: #bcd8e9;
+}
+.summary-box {
+  margin-top: 18px;
 }
 .status-dot {
   width: 10px;

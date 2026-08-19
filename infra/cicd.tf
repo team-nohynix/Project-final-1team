@@ -24,12 +24,33 @@ data "aws_iam_policy_document" "github_actions_assume" {
     # main은 예전 backend 전용 워크플로 흔적, 새 워크플로는 prod만 쓰지만 트러스트는
     # 굳이 좁히지 않고 남겨둔다(레포에 남아있는 워크플로 파일 자체가 실제 방아쇠라
     # 여기 조건 하나만으로 뭐가 도는지 결정되지 않음).
+    #
+    # 저장소 ID 명시(2026-08-18 추가, 실제 배포 실패로 발견): GitHub의 OIDC
+    # subject claim이 항상 "repo:{owner}/{repo}:ref:..." 형태인 게 아니라,
+    # 저장소가 "저장소 ID를 subject claim에 포함" 옵션을 쓰면
+    # "repo:{owner}/{repo}@{repository_id}:ref:..."로 바뀐다 — 이 저장소에서
+    # 그 설정이 켜지면서 문자열이 정확히 안 맞아 sts:AssumeRoleWithWebIdentity가
+    # 계속 AccessDenied로 실패하는 걸 실제 배포에서 확인했다(팀원이 지난주엔
+    # 성공했던 걸로 봐서 그 사이 설정이 바뀐 것으로 추정, 정확한 원인은 GitHub
+    # 저장소 Settings 이력으로 확인 필요).
+    #
+    # 처음엔 "Project-final-1team*"처럼 저장소 이름 뒤에 와일드카드를 썼는데,
+    # 이러면 GitHub이 저장소 ID를 넣는 이유(같은 이름으로 저장소를 지웠다
+    # 재생성해도 ID는 절대 안 겹치므로, 탈취 방지)가 무력화된다 — 와일드카드는
+    # ID가 뭐든(공격자가 새로 만든 동명 저장소의 ID라도) 다 통과시키기 때문.
+    # 그래서 와일드카드 대신 실제 저장소 ID(1314526744, GitHub API로 확인한
+    # 이 저장소의 고유 ID)를 정확히 못 박은 문자열을 예전 형식과 나란히
+    # 허용한다 — 둘 다 와일드카드 없는 완전한 문자열이라 이름만 같고 ID가
+    # 다른 가짜 저장소는 여전히 막힌다. 이 옵션이 나중에 꺼지면 예전 형식이,
+    # 켜져 있으면 ID 포함 형식이 매칭된다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
         "repo:KimDJ7105/Project-final-1team:ref:refs/heads/main",
         "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
+        "repo:KimDJ7105/Project-final-1team@1314526744:ref:refs/heads/main",
+        "repo:KimDJ7105/Project-final-1team@1314526744:ref:refs/heads/prod",
       ]
     }
   }
