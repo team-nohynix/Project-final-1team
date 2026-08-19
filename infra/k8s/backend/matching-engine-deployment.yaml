@@ -59,6 +59,24 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+          # readinessProbe 없이는 재시작 직후(Kafka 연결/상태 복원 전)에도 파드가 즉시
+          # Ready로 잡혀 트래픽을 받을 수 있다 — orderapi에서 같은 이유로 502가 재현된 걸
+          # 보고 다른 backend 서비스에도 같이 추가한다(2026-08-19). /metrics는 HTTP 서버가
+          # 뜨는 즉시 응답하므로 준비 상태 판단에 충분하다.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
