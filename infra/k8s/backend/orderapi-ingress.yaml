@@ -51,7 +51,11 @@ spec:
                 name: recorder
                 port:
                   number: 8082
-          - path: /v1/orders
+          # /v1/orders(Prefix)로 두면 orderapi의 POST /v1/orders(실제 주문 접수)까지
+          # recorder로 잘못 라우팅돼 404가 났다(2026-08-19, recorder는 /v1/orders/summary만
+          # 있음 — 실제 배포에서 주문 접수가 계속 실패하고 있었던 원인). recorder가 실제로
+          # 쓰는 정확한 경로로 좁힌다.
+          - path: /v1/orders/summary
             pathType: Prefix
             backend:
               service:
