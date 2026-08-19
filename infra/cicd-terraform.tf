@@ -101,7 +101,14 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
     # AccessDenied — CloudTrail로 실제 요청자를 확인해보니 이 job처럼 `environment:`를
     # 쓰는 job은 sub 클레임이 "repo:OWNER/REPO:ref:refs/heads/BRANCH"가 아니라
     # "repo:OWNER/REPO:environment:ENV_NAME"으로 완전히 다른 형식이 된다(ref 부분이
-    # environment 부분으로 대체됨, 둘이 같이 안 붙음). environment 기반 패턴을 추가한다.
+    # environment 부분으로 대체됨, 둘이 같이 안 붙음). environment 기반 패턴도 추가해뒀다.
+    #
+    # 2026-08-19(같은 날 두 번째): 워크플로에서 environment: infra-apply 자체를
+    # 뗐다(사용자 요청으로 사람 승인 게이트 없이 자동 apply하도록 변경 — 이 계정이
+    # 여러 팀 공유이고 이 role의 권한이 광범위해서 리스크가 있다는 걸 알고 진행한
+    # 선택). environment 클레임이 더 이상 안 붙으니 sub는 항상 ref 기반으로 돌아오고,
+    # 아래 environment StringEquals 조건은 제거했다 — environment 기반 sub 패턴 2개는
+    # 당장 안 쓰이지만, 나중에 승인 게이트를 다시 붙일 경우를 대비해 남겨둔다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
@@ -111,14 +118,6 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
         "repo:KimDJ7105/Project-final-1team:environment:${local.terraform_apply_environment}",
         "repo:KimDJ7105@101383021/Project-final-1team@1314526744:environment:${local.terraform_apply_environment}",
       ]
-    }
-    # 이 조건이 실제 게이트 — GitHub Environment "infra-apply"에 필수 리뷰어를
-    # 설정해두면(저장소 Settings에서 수동 설정), 그 environment를 쓰는 job은
-    # 리뷰어가 승인해야만 실행되고, 이 OIDC 클레임도 그때 가서야 발급된다.
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:environment"
-      values   = [local.terraform_apply_environment]
     }
   }
 }
