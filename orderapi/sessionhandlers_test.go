@@ -22,6 +22,9 @@ type fakeSessionStore struct {
 	lastRunRec   session.RunRecord
 	lastRunFound bool
 	lastRunErr   error
+	prevRunRec   session.RunRecord
+	prevRunFound bool
+	prevRunErr   error
 
 	lastRunID       string
 	lastHeartbeatID string
@@ -52,12 +55,17 @@ func (f *fakeSessionStore) LastRun(ctx context.Context) (session.RunRecord, bool
 	return f.lastRunRec, f.lastRunFound, f.lastRunErr
 }
 
+func (f *fakeSessionStore) PreviousRun(ctx context.Context) (session.RunRecord, bool, error) {
+	return f.prevRunRec, f.prevRunFound, f.prevRunErr
+}
+
 func newSessionMux(store session.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(store))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(store))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
+	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(store))
 	return mux
 }
 
@@ -261,6 +269,44 @@ func TestLastRunHandlerNeverRun(t *testing.T) {
 	mux := newSessionMux(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/last-run", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestPreviousRunHandlerFound(t *testing.T) {
+	started := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	ended := started.Add(5 * time.Minute)
+	store := &fakeSessionStore{prevRunFound: true, prevRunRec: session.RunRecord{
+		RunID: "run_0", Owner: "replayengine", Status: session.RunStatusCompleted,
+		StartedAt: started, EndedAt: ended,
+	}}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/previous-run", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got lastRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if got.RunID != "run_0" || got.Owner != "replayengine" || got.EndedAt == "" {
+		t.Errorf("got = %+v", got)
+	}
+}
+
+func TestPreviousRunHandlerNone(t *testing.T) {
+	store := &fakeSessionStore{prevRunFound: false}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/previous-run", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

@@ -18,6 +18,7 @@ type Config struct {
 	RedisPassword      string
 	RedisTLSEnabled    bool
 	JobTriggerQueueURL string
+	OrderRecordsBucket string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -94,6 +95,13 @@ func LoadConfig() Config {
 	// 안 쓰는 로컬 개발 환경에 억지로 값을 채우게 하지 않습니다.
 	jobTriggerQueueURL := os.Getenv("JOB_TRIGGER_QUEUE_URL")
 
+	// ORDER_RECORDS_BUCKET도 선택입니다 — trader/replayengine의 -order-bucket
+	// 플래그와 같은 기본값 규칙(비어있으면 로컬 ./orders 디렉터리)입니다.
+	// GET /v1/jobs/replay-preview(2026-08-19 추가, "부하 시나리오 미리보기"
+	// 지원)가 이 값으로 trader가 기록해둔 주문 파일을 읽습니다 — orderapi의
+	// 핵심 기능(주문 접수/취소)과는 무관하므로 필수로 요구하지 않습니다.
+	orderRecordsBucket := os.Getenv("ORDER_RECORDS_BUCKET")
+
 	return Config{
 		Port:               port,
 		KafkaBroker:        broker,
@@ -104,5 +112,6 @@ func LoadConfig() Config {
 		RedisPassword:      redisPassword,
 		RedisTLSEnabled:    redisTLSEnabled,
 		JobTriggerQueueURL: jobTriggerQueueURL,
+		OrderRecordsBucket: orderRecordsBucket,
 	}
 }

@@ -169,6 +169,20 @@ type lastRunResponse struct {
 	Message   string `json:"message,omitempty"`
 }
 
+func toLastRunResponse(record session.RunRecord) lastRunResponse {
+	resp := lastRunResponse{
+		RunID:     record.RunID,
+		Owner:     record.Owner,
+		Status:    record.Status,
+		StartedAt: record.StartedAt.Format(time.RFC3339),
+		Message:   record.Message,
+	}
+	if !record.EndedAt.IsZero() {
+		resp.EndedAt = record.EndedAt.Format(time.RFC3339)
+	}
+	return resp
+}
+
 // lastRunHandler는 GET /v1/sessions/last-run을 처리합니다. 지금까지 한 번도
 // 실행된 적이 없으면 404입니다(세션 관련 다른 404들과 같은 관례).
 func lastRunHandler(store session.Store) http.HandlerFunc {
@@ -186,17 +200,28 @@ func lastRunHandler(store session.Store) http.HandlerFunc {
 			writeError(w, reqID, http.StatusNotFound, "NO_RUN_YET", "아직 실행된 적이 없습니다.")
 			return
 		}
+		writeJSON(w, http.StatusOK, toLastRunResponse(record))
+	}
+}
 
-		resp := lastRunResponse{
-			RunID:     record.RunID,
-			Owner:     record.Owner,
-			Status:    record.Status,
-			StartedAt: record.StartedAt.Format(time.RFC3339),
-			Message:   record.Message,
+// previousRunHandler는 GET /v1/sessions/previous-run을 처리합니다 — 응답
+// 모양은 last-run과 동일합니다(2026-08-19, 주문재생 "부하 시나리오 미리보기"
+// 화면의 "직전 실행과 비교" 지원). 실행이 2번 미만이었으면 404입니다.
+func previousRunHandler(store session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		record, found, err := store.PreviousRun(r.Context())
+		if err != nil {
+			log.Printf("직전 실행 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "직전 실행 조회에 실패했습니다.")
+			return
 		}
-		if !record.EndedAt.IsZero() {
-			resp.EndedAt = record.EndedAt.Format(time.RFC3339)
+		if !found {
+			writeError(w, reqID, http.StatusNotFound, "NO_PREVIOUS_RUN", "직전 실행 기록이 없습니다.")
+			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, toLastRunResponse(record))
 	}
 }
