@@ -7,8 +7,25 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"orderapi/session"
 )
+
+// sessionEventsCounter는 세션 클레임/충돌/하트비트/반납을 관찰용으로 셉니다 —
+// 특히 claim_conflict(트레이더/리플레이가 동시에 두 개 실행되려는 시도)는
+// 로그로만 남았던 걸 그대로 지표로도 남깁니다.
+var sessionEventsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "session_events_total",
+		Help: "Total number of session lifecycle events",
+	},
+	[]string{"action"},
+)
+
+func init() {
+	prometheus.MustRegister(sessionEventsCounter)
+}
 
 // claimRequest는 POST /v1/sessions의 요청 본문입니다. RunID는 FR-19(리플레이
 // 엔진 분산 실행) 지원용 선택 필드 — 같은 리플레이 실행에 속한 여러
@@ -51,6 +68,7 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 		if err != nil {
 			var conflict *session.ConflictError
 			if errors.As(err, &conflict) {
+				sessionEventsCounter.WithLabelValues("claim_conflict").Inc()
 				writeError(w, reqID, http.StatusConflict, "SESSION_ALREADY_ACTIVE",
 					"이미 활성 세션이 있습니다 (owner="+conflict.Current.Owner+", claimedAt="+conflict.Current.ClaimedAt.Format(time.RFC3339)+") — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있습니다.")
 				return
@@ -60,6 +78,7 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 			return
 		}
 
+		sessionEventsCounter.WithLabelValues("claimed").Inc()
 		log.Printf("세션 클레임 완료 (sessionId=%s, runId=%s, owner=%s)", info.SessionID, info.RunID, info.Owner)
 		writeJSON(w, http.StatusCreated, claimResponse{
 			SessionID:  info.SessionID,
@@ -87,6 +106,7 @@ func heartbeatSessionHandler(store session.Store) http.HandlerFunc {
 			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "하트비트 처리에 실패했습니다.")
 			return
 		}
+		sessionEventsCounter.WithLabelValues("heartbeat").Inc()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -130,6 +150,7 @@ func releaseSessionHandler(store session.Store) http.HandlerFunc {
 			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "세션 반납에 실패했습니다.")
 			return
 		}
+		sessionEventsCounter.WithLabelValues("released").Inc()
 		log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, outcome.Status)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -146,6 +167,20 @@ type lastRunResponse struct {
 	StartedAt string `json:"startedAt"`
 	EndedAt   string `json:"endedAt,omitempty"`
 	Message   string `json:"message,omitempty"`
+}
+
+func toLastRunResponse(record session.RunRecord) lastRunResponse {
+	resp := lastRunResponse{
+		RunID:     record.RunID,
+		Owner:     record.Owner,
+		Status:    record.Status,
+		StartedAt: record.StartedAt.Format(time.RFC3339),
+		Message:   record.Message,
+	}
+	if !record.EndedAt.IsZero() {
+		resp.EndedAt = record.EndedAt.Format(time.RFC3339)
+	}
+	return resp
 }
 
 // lastRunHandler는 GET /v1/sessions/last-run을 처리합니다. 지금까지 한 번도
@@ -165,17 +200,28 @@ func lastRunHandler(store session.Store) http.HandlerFunc {
 			writeError(w, reqID, http.StatusNotFound, "NO_RUN_YET", "아직 실행된 적이 없습니다.")
 			return
 		}
+		writeJSON(w, http.StatusOK, toLastRunResponse(record))
+	}
+}
 
-		resp := lastRunResponse{
-			RunID:     record.RunID,
-			Owner:     record.Owner,
-			Status:    record.Status,
-			StartedAt: record.StartedAt.Format(time.RFC3339),
-			Message:   record.Message,
+// previousRunHandler는 GET /v1/sessions/previous-run을 처리합니다 — 응답
+// 모양은 last-run과 동일합니다(2026-08-19, 주문재생 "부하 시나리오 미리보기"
+// 화면의 "직전 실행과 비교" 지원). 실행이 2번 미만이었으면 404입니다.
+func previousRunHandler(store session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		record, found, err := store.PreviousRun(r.Context())
+		if err != nil {
+			log.Printf("직전 실행 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "직전 실행 조회에 실패했습니다.")
+			return
 		}
-		if !record.EndedAt.IsZero() {
-			resp.EndedAt = record.EndedAt.Format(time.RFC3339)
+		if !found {
+			writeError(w, reqID, http.StatusNotFound, "NO_PREVIOUS_RUN", "직전 실행 기록이 없습니다.")
+			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, toLastRunResponse(record))
 	}
 }

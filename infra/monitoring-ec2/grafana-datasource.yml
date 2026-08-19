@@ -6,3 +6,15 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+  # Kafka(MSK)/RDS/Redis는 Prometheus exporter가 없고 CloudWatch 지표만 있다
+  # (infra/monitoring.tf의 CloudWatch 알람들이 보는 것과 같은 지표) — EC2
+  # 인스턴스 프로파일(team1-monitoring-role)의 기본 자격증명 체인을 그대로
+  # 쓰므로 액세스 키를 따로 넣지 않는다(2026-08-19, cloudwatch:Get*/List*
+  # 권한을 role에 추가함, infra/monitoring-ec2.tf 참고).
+  - name: CloudWatch
+    type: cloudwatch
+    access: proxy
+    jsonData:
+      authType: default
+      defaultRegion: ap-northeast-2
+    editable: false

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"matching/backpressure"
@@ -100,6 +99,7 @@ func (r *marketRegistry) Acquire(ctx context.Context, market string) (int64, err
 	if err := r.assignments.PublishAssigned(ctx, market, r.instanceID); err != nil {
 		log.Printf("배정 기록 이벤트 발행 실패 (market=%s): %v", market, err)
 	}
+	marketAcquiredCounter.Add(1)
 	return resumeFrom, nil
 }
 
@@ -127,6 +127,7 @@ func (r *marketRegistry) Release(ctx context.Context, market string) error {
 	if err := r.assignments.PublishReleased(ctx, market, r.instanceID); err != nil {
 		log.Printf("반납 기록 이벤트 발행 실패 (market=%s): %v", market, err)
 	}
+	marketReleasedCounter.Add(1)
 	return nil
 }
 
@@ -140,20 +141,6 @@ func newInstanceID() string {
 		return fmt.Sprintf("engine_%d", time.Now().UnixNano())
 	}
 	return "engine_" + hex.EncodeToString(buf)
-}
-
-var (
-	executionsTotalCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "matching_executions_total",
-			Help: "Total executions matched",
-		},
-		[]string{"market"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(executionsTotalCounter)
 }
 
 func main() {
@@ -204,7 +191,7 @@ func main() {
 	// 지워버리면 안 되기 때문입니다. orderapi는 이 키와 recorder의 키를 둘 다 확인합니다.
 	matchingWatcher := &backpressure.Watcher{
 		Sources:       []backpressure.LagSource{consumer.Lag},
-		Flag:          &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey},
+		Flag:          instrumentedFlag{inner: &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey}},
 		HighWatermark: backpressureHighWatermark,
 		LowWatermark:  backpressureLowWatermark,
 		CheckInterval: backpressureCheckInterval,

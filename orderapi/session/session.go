@@ -60,6 +60,15 @@ const (
 	// 언제든 활성 실행은 최대 1개뿐이라, 이 키를 잠금 스크립트 밖에서 별도
 	// GET/SET으로 다뤄도 두 실행이 동시에 이 키를 다르게 쓸 일이 없습니다.
 	lastRunKey = "orderapi:session:lastrun"
+
+	// prevRunKey는 lastRunKey 바로 이전 실행의 기록입니다(2026-08-19, 주문재생
+	// "부하 시나리오 미리보기" 화면의 "직전 실행과 비교" 지원). lastRunKey는
+	// 슬롯이 하나뿐이라 새 실행이 시작되는 순간 그 값이 곧바로 덮어써지는데,
+	// "지금 진행 중인 실행"과 "그 직전 실행"을 화면에 동시에 보여주려면 새
+	// 실행이 lastRunKey를 덮어쓰기 전에 그 값을 여기로 한 칸 밀어둬야 합니다.
+	// activeKey와 마찬가지로 반납 시 지워지지 않고, 다음다음 Claim이 새 그룹을
+	// 만들 때만 다시 밀려납니다.
+	prevRunKey = "orderapi:session:prevrun"
 )
 
 // RunStatus 값 — 프론트가 그대로 표시할 수 있는 3가지뿐입니다.
@@ -154,6 +163,9 @@ type Store interface {
 	// LastRun은 가장 최근 실행의 기록을 반환합니다. 지금까지 한 번도 실행된
 	// 적이 없으면 found=false(에러 아님).
 	LastRun(ctx context.Context) (RunRecord, bool, error)
+	// PreviousRun은 LastRun 바로 이전 실행의 기록을 반환합니다("직전 실행과
+	// 비교" 지원). 실행이 2번 미만이었으면 found=false(에러 아님).
+	PreviousRun(ctx context.Context) (RunRecord, bool, error)
 }
 
 // RedisStore는 Store를 Redis로 구현합니다.
@@ -228,6 +240,16 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID string) (Info, erro
 	// 2(기존 그룹에 합류, 예: 리플레이 샤드 2번째 이후)면 이미 첫 멤버가 써둔
 	// StartedAt을 건드리면 안 됩니다.
 	if n == 1 {
+		// lastRunKey를 덮어쓰기 전에, 지금 거기 있는 값(=방금 전까지 "마지막
+		// 실행"이었던 것)을 prevRunKey로 한 칸 밀어둡니다 — 이 시점 이후로는
+		// 새로 시작하는 이 실행이 lastRunKey를 차지하므로, 그 이전 값을 못
+		// 읽게 되기 전에 옮겨야 합니다. claimScript가 이미 activeKey를 원자적으로
+		// 선점한 뒤라 이 시점에 다른 Claim이 동시에 새 그룹을 만들 수 없으므로,
+		// 별도 Lua 스크립트 없이 plain GET+SET으로도 안전합니다.
+		if body, err := s.client.Get(ctx, lastRunKey).Bytes(); err == nil {
+			s.client.Set(ctx, prevRunKey, body, 0)
+		}
+
 		record := RunRecord{RunID: runID, Owner: owner, Status: RunStatusInProgress, StartedAt: now}
 		if body, err := json.Marshal(record); err == nil {
 			s.client.Set(ctx, lastRunKey, body, 0)
@@ -350,6 +372,24 @@ func (s *RedisStore) LastRun(ctx context.Context) (RunRecord, bool, error) {
 	var record RunRecord
 	if err := json.Unmarshal(body, &record); err != nil {
 		return RunRecord{}, false, fmt.Errorf("마지막 실행 기록 파싱 실패: %w", err)
+	}
+	return record, true, nil
+}
+
+// PreviousRun은 LastRun 바로 이전 실행의 기록을 반환합니다. 지금까지 실행이
+// 2번 미만이었으면(한 번도 없었거나, 지금 진행 중인/막 끝난 게 처음 실행이면)
+// found=false입니다.
+func (s *RedisStore) PreviousRun(ctx context.Context) (RunRecord, bool, error) {
+	body, err := s.client.Get(ctx, prevRunKey).Bytes()
+	if err == redis.Nil {
+		return RunRecord{}, false, nil
+	}
+	if err != nil {
+		return RunRecord{}, false, fmt.Errorf("직전 실행 기록 조회 실패: %w", err)
+	}
+	var record RunRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return RunRecord{}, false, fmt.Errorf("직전 실행 기록 파싱 실패: %w", err)
 	}
 	return record, true, nil
 }
