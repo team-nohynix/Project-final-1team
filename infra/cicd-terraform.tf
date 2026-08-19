@@ -75,12 +75,20 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
     # 2026-08-18: GitHub sub 클레임 포맷 변경으로 owner/repo 둘 다 불변 숫자 ID가 붙음
     # (cicd.tf의 github_actions_assume 조건 주석 참고) — 이 두 role도 같은 이유로
     # 전체 CI/CD가 실패하고 있었다.
+    #
+    # 2026-08-19: 위 수정 후에도 terraform-apply만 여전히 AssumeRoleWithWebIdentity가
+    # AccessDenied — CloudTrail로 실제 요청자를 확인해보니 이 job처럼 `environment:`를
+    # 쓰는 job은 sub 클레임이 "repo:OWNER/REPO:ref:refs/heads/BRANCH"가 아니라
+    # "repo:OWNER/REPO:environment:ENV_NAME"으로 완전히 다른 형식이 된다(ref 부분이
+    # environment 부분으로 대체됨, 둘이 같이 안 붙음). environment 기반 패턴을 추가한다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
         "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
         "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
+        "repo:KimDJ7105/Project-final-1team:environment:${local.terraform_apply_environment}",
+        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:environment:${local.terraform_apply_environment}",
       ]
     }
     # 이 조건이 실제 게이트 — GitHub Environment "infra-apply"에 필수 리뷰어를
