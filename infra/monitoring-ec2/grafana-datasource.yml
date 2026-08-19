@@ -12,6 +12,7 @@ datasources:
   # 쓰므로 액세스 키를 따로 넣지 않는다(2026-08-19, cloudwatch:Get*/List*
   # 권한을 role에 추가함, infra/monitoring-ec2.tf 참고).
   - name: CloudWatch
+    uid: cloudwatch
     type: cloudwatch
     access: proxy
     jsonData:

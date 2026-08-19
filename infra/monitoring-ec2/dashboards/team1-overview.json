@@ -886,8 +886,11 @@
         "x": 0,
         "y": 74
       },
-      "datasource": "CloudWatch",
-      "description": "RDS/Redis는 대표로 instance-1/001 인스턴스 값만 표시합니다(monitoring.tf 알람은 인스턴스별로 개별 감시) — 여러 인스턴스 중 하나라도 이상 있으면 CloudWatch 알람이 별도로 울립니다.",
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "description": "RDS/Redis는 대표로 instance-1/001 인스턴스 값만 표시합니다. Kafka는 SumOffsetLag이 클러스터 단위가 아니라 (Consumer Group, Topic) 조합별로만 발행돼서, 여기선 orderapi-executions 그룹 하나만 대표로 봅니다 — matching-engine은 컨슈머 그룹 밖에서 직접 읽어(matching/kafkaclient/consumer.go) 이 지표 자체에 안 잡히므로 자체 matching_engine_lag 패널로 봐야 합니다.",
       "options": {
         "colorMode": "background",
         "textMode": "value_and_name",
@@ -1015,10 +1018,16 @@
           "namespace": "AWS/Kafka",
           "metricName": "SumOffsetLag",
           "dimensions": {
-            "Cluster Name": "team1-truss-msk"
+            "Cluster Name": "team1-truss-msk",
+            "Consumer Group": "orderapi-executions",
+            "Topic": "executions"
           },
           "statistic": "Average",
-          "label": "Kafka 브로커"
+          "label": "Kafka (orderapi executions lag)",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          }
         },
         {
           "refId": "B",
@@ -1029,7 +1038,11 @@
             "DBInstanceIdentifier": "team1-truss-db-instance-1"
           },
           "statistic": "Average",
-          "label": "MySQL (RDS)"
+          "label": "MySQL (RDS)",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          }
         },
         {
           "refId": "C",
@@ -1040,7 +1053,11 @@
             "CacheClusterId": "team1-truss-redis-001"
           },
           "statistic": "Average",
-          "label": "Redis 캐시"
+          "label": "Redis 캐시",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          }
         }
       ]
     }
