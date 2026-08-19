@@ -61,6 +61,24 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          # orderapi에서 재현된 것과 같은 이유(readinessProbe 없이 재시작 직후 트래픽을
+          # 받아 502)로 추가(2026-08-19). recorder는 RDS 접속 실패 시 크래시루프에 빠지는
+          # 걸 이미 겪어서(DB 비밀번호 로테이션 사건), /metrics(HTTP 서버만 뜨면 응답,
+          # DB 의존 없음)로 최소한의 "프로세스가 살아있음"만 확인한다.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8082
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
 ---
 # 조회 API(GET /v1/trace/{orderId}, GET /v1/matching/engines, :8082 고정) 노출용.
 # 2026-08-12까지 Service가 아예 없어서 클러스터 내부에서도 호출할 방법이 없었음
