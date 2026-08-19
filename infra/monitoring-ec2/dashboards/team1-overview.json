@@ -877,12 +877,12 @@
       ]
     },
     {
-      "id": 208,
-      "title": "인프라 리소스 상태 (CloudWatch — Kafka/MySQL/Redis)",
+      "id": 209,
+      "title": "Kafka 브로커 (orderapi-executions lag)",
       "type": "stat",
       "gridPos": {
         "h": 6,
-        "w": 24,
+        "w": 8,
         "x": 0,
         "y": 74
       },
@@ -890,18 +890,10 @@
         "type": "cloudwatch",
         "uid": "cloudwatch"
       },
-      "description": "RDS/Redis는 대표로 instance-1/001 인스턴스 값만 표시합니다. Kafka는 SumOffsetLag이 클러스터 단위가 아니라 (Consumer Group, Topic) 조합별로만 발행돼서, 여기선 orderapi-executions 그룹 하나만 대표로 봅니다 — matching-engine은 컨슈머 그룹 밖에서 직접 읽어(matching/kafkaclient/consumer.go) 이 지표 자체에 안 잡히므로 자체 matching_engine_lag 패널로 봐야 합니다.",
       "options": {
         "colorMode": "background",
         "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "values": true,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        }
+        "orientation": "horizontal"
       },
       "fieldConfig": {
         "defaults": {
@@ -910,110 +902,17 @@
               {
                 "color": "green",
                 "value": null
-              }
-            ]
-          },
-          "noValue": "데이터 없음"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "A"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "red",
-                      "value": 100000
-                    }
-                  ]
-                }
               },
               {
-                "id": "displayName",
-                "value": "Kafka 브로커 (SumOffsetLag)"
-              },
-              {
-                "id": "noValue",
-                "value": "랙 없음 (정상 — MSK 유휴 시 미발행)"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "B"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "red",
-                      "value": 80
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "MySQL (RDS CPU%)"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byFrameRefID",
-              "options": "C"
-            },
-            "properties": [
-              {
-                "id": "thresholds",
-                "value": {
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "red",
-                      "value": 80
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "Redis 캐시 (CPU%)"
+                "color": "red",
+                "value": 100000
               }
             ]
           }
-        ]
+        }
       },
       "targets": [
         {
-          "refId": "A",
           "region": "ap-northeast-2",
           "namespace": "AWS/Kafka",
           "metricName": "SumOffsetLag",
@@ -1023,14 +922,52 @@
             "Topic": "executions"
           },
           "statistic": "Average",
-          "label": "Kafka (orderapi executions lag)",
+          "refId": "A",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           }
-        },
+        }
+      ]
+    },
+    {
+      "id": 210,
+      "title": "MySQL (RDS CPU%)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 74
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
         {
-          "refId": "B",
           "region": "ap-northeast-2",
           "namespace": "AWS/RDS",
           "metricName": "CPUUtilization",
@@ -1038,14 +975,52 @@
             "DBInstanceIdentifier": "team1-truss-db-instance-1"
           },
           "statistic": "Average",
-          "label": "MySQL (RDS)",
+          "refId": "A",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
           }
-        },
+        }
+      ]
+    },
+    {
+      "id": 211,
+      "title": "Redis 캐시 (CPU%)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 74
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
         {
-          "refId": "C",
           "region": "ap-northeast-2",
           "namespace": "AWS/ElastiCache",
           "metricName": "EngineCPUUtilization",
@@ -1053,7 +1028,7 @@
             "CacheClusterId": "team1-truss-redis-001"
           },
           "statistic": "Average",
-          "label": "Redis 캐시",
+          "refId": "A",
           "datasource": {
             "type": "cloudwatch",
             "uid": "cloudwatch"
