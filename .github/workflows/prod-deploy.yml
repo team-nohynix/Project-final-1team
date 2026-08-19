@@ -98,7 +98,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - run: aws s3 sync frontend/dist/ s3://team1-truss-frontend/ --delete
       - run: |
-          DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?Origins.Items[0].DomainName=='team1-truss-frontend.s3.ap-northeast-2.amazonaws.com'].Id" --output text)
+          # truss.jhyang.click 배포는 오리진이 여러 개(recorder-api 등도 같은 distribution에 추가됨,
+          # infra/edge.tf 참고)라 frontend S3 오리진이 Items[0]이 아닐 수 있음 — 인덱스 대신
+          # 전체 오리진 목록에서 도메인으로 매칭해야 함(2026-08-19, 실제로 index 2였음).
+          DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?contains(Origins.Items[*].DomainName, 'team1-truss-frontend.s3.ap-northeast-2.amazonaws.com')].Id" --output text)
           aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*"
 
   # --- 시세 수집기(backend) — Deployment "backend", namespace collector ---

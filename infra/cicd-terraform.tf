@@ -29,18 +29,15 @@ data "aws_iam_policy_document" "github_actions_terraform_plan_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # cicd.tf의 github_actions_assume과 같은 이유(2026-08-18, 실제 배포 실패로
-    # 발견) — "@{repository_id}"가 subject claim에 붙을 수도 안 붙을 수도 있어서
-    # 두 형식을 각각 정확한 문자열로(와일드카드 없이) 나란히 허용한다. 처음엔
-    # 저장소 이름 뒤에 와일드카드를 썼는데, 그러면 이름만 같고 ID가 다른(탈취된)
-    # 저장소까지 통과시키는 구멍이 생겨서 실제 ID(1314526744)를 못 박는 방식으로
-    # 바꿨다 — 자세한 이유는 cicd.tf의 같은 조건 주석 참고.
+    # 2026-08-18: GitHub sub 클레임 포맷 변경으로 owner/repo 둘 다 불변 숫자 ID가 붙음
+    # (cicd.tf의 github_actions_assume 조건 주석 참고) — 이 두 role도 같은 이유로
+    # 전체 CI/CD가 실패하고 있었다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
         "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
-        "repo:KimDJ7105/Project-final-1team@1314526744:ref:refs/heads/prod",
+        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
       ]
     }
   }
@@ -75,15 +72,15 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # cicd.tf의 github_actions_assume과 같은 이유(2026-08-18, 실제 배포 실패로
-    # 발견) — 와일드카드 대신 실제 저장소 ID를 못 박은 이유는 위
-    # github_actions_terraform_plan_assume의 같은 조건 주석 참고.
+    # 2026-08-18: GitHub sub 클레임 포맷 변경으로 owner/repo 둘 다 불변 숫자 ID가 붙음
+    # (cicd.tf의 github_actions_assume 조건 주석 참고) — 이 두 role도 같은 이유로
+    # 전체 CI/CD가 실패하고 있었다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
         "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
-        "repo:KimDJ7105/Project-final-1team@1314526744:ref:refs/heads/prod",
+        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
       ]
     }
     # 이 조건이 실제 게이트 — GitHub Environment "infra-apply"에 필수 리뷰어를
