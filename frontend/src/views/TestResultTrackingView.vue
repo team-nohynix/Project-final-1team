@@ -7,6 +7,8 @@ const traceId = ref('')
 // run / summary state (replaces earlier placeholders)
 const runInfo = ref<any | null>(null)
 const runLoading = ref(false)
+// flag when a last-run exists but is not from replayengine
+const lastRunNotReplay = ref(false)
 const summary = ref<any>({ accepted: null, filled: null, unfilled: null })
 
 // constants and labels
@@ -174,57 +176,73 @@ async function fetchLastRun() {
     const res = await fetch('/order-api/v1/sessions/last-run')
     if (res.status === 404) {
       runInfo.value = null
+      lastRunNotReplay.value = false
       // stop polling if any
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
       return
     }
     if (!res.ok) {
       runInfo.value = null
+      lastRunNotReplay.value = false
       return
     }
     const data = await res.json()
-    runInfo.value = data
+    // only treat it as a replay run if owner === 'replayengine'
+    if (data && data.owner === 'replayengine') {
+      runInfo.value = data
+      lastRunNotReplay.value = false
 
-    // if in progress, start polling every 3s
-    if (data && data.status === 'IN_PROGRESS') {
-      if (!pollInterval) {
-        pollInterval = window.setInterval(async () => {
-          try {
-            const r = await fetch('/order-api/v1/sessions/last-run')
-            if (!r.ok) return
-            const d = await r.json()
-            runInfo.value = d
-            if (d.status !== 'IN_PROGRESS') {
-              if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
-              // once completed, fetch summary for final numbers
-              fetchSummary()
-            }
-          } catch (_) {}
-        }, 3000)
+      // if in progress, start polling every 3s
+      if (data.status === 'IN_PROGRESS') {
+        if (!pollInterval) {
+          pollInterval = window.setInterval(async () => {
+            try {
+              const r = await fetch('/order-api/v1/sessions/last-run')
+              if (!r.ok) return
+              const d = await r.json()
+              // only accept updates when owner is still replayengine
+              if (d && d.owner === 'replayengine') {
+                runInfo.value = d
+                if (d.status !== 'IN_PROGRESS') {
+                  if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+                  // once completed, fetch summary for final numbers
+                  fetchSummary()
+                }
+              } else {
+                // owner changed or no longer replayengine: treat as no replay history
+                runInfo.value = null
+                lastRunNotReplay.value = true
+                if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+              }
+            } catch (_) {}
+          }, 3000)
+        }
+      } else {
+        // completed/failed: fetch summary
+        fetchSummary()
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
       }
     } else {
-      // completed/failed: fetch summary
-      fetchSummary()
+      // last run exists but is not from replayengine — treat as no recent replay run
+      runInfo.value = null
+      lastRunNotReplay.value = true
+      // stop polling
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
     }
   } catch (e) {
     runInfo.value = null
+    lastRunNotReplay.value = false
   } finally {
     runLoading.value = false
   }
 }
 
 async function fetchSummary() {
-  // require runInfo
-  if (!runInfo.value) return
-  const owner = runInfo.value.owner
-  const mode = owner === 'trader' ? 'PAPER_TRADING' : owner === 'replayengine' ? 'REPLAY' : ''
-  if (!mode) return
-
+  // always query REPLAY mode for this screen; include from/to if available
   const params = new URLSearchParams()
-  params.append('mode', mode)
-  if (runInfo.value.startedAt) params.append('from', runInfo.value.startedAt)
-  if (runInfo.value.endedAt) params.append('to', runInfo.value.endedAt)
+  params.append('mode', 'REPLAY')
+  if (runInfo.value && runInfo.value.startedAt) params.append('from', runInfo.value.startedAt)
+  if (runInfo.value && runInfo.value.endedAt) params.append('to', runInfo.value.endedAt)
   try {
     const res = await fetch(`/recorder-api/v1/orders/summary?${params.toString()}`)
     if (!res.ok) {
@@ -243,7 +261,7 @@ async function fetchSummary() {
   <div class="trt-page">
     <header class="page-header">
       <h2>테스트 결과·추적</h2>
-      <p class="subtitle">성능 시험 결과, 장애 복구 기록, 주문 단위 구간 추적</p>
+      <p class="subtitle">성능 시험 결과, 주문 단위 구간 추적</p>
       <hr />
     </header>
 
@@ -260,7 +278,8 @@ async function fetchSummary() {
             </div>
           </template>
           <template v-else>
-            실행 이력 없음
+            <template v-if="lastRunNotReplay">최근 재생 실행 이력 없음</template>
+            <template v-else>실행 이력 없음</template>
           </template>
         </div>
       </div>
