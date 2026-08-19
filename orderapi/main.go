@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
@@ -34,27 +32,6 @@ const (
 // 이 값의 1/3 주기로 하트비트를 보내야 하고(session.Client.Claim이 응답에 실어주는
 // ttlSeconds를 그대로 씀), 크래시로 하트비트가 끊기면 이 시간 뒤 자동으로 풀립니다.
 const sessionTTL = 30 * time.Second
-
-var (
-	ordersTotalCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "orderapi_orders_total",
-			Help: "Total orders accepted",
-		},
-		[]string{"status"},
-	)
-	ordersLatencyHistogram = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "orderapi_order_latency_seconds",
-			Help:    "Order processing latency in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(ordersTotalCounter, ordersLatencyHistogram)
-}
 
 func main() {
 	cfg := LoadConfig()
