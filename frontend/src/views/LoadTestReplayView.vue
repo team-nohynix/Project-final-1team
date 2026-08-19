@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
@@ -29,6 +29,63 @@ const runInfo = ref<{ runId: string; owner: string; status: string; startedAt?: 
 
 // recorder summary
 const summary = ref<{ accepted: number; filled: number; unfilled: number } | null>(null)
+
+// replay preview from backend
+const preview = ref<null | { date: string; totalOrders: number; marketsWithRecords: number; marketsTotal: number; maxEventSpanSeconds: number }>(null)
+const previewError = ref<string | null>(null)
+const previewLoading = ref(false)
+
+function formatSecondsToHMS(secTotal: number) {
+  if (!Number.isFinite(secTotal) || secTotal <= 0) return '--'
+  const s = Math.floor(secTotal)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sRem = s % 60
+  const parts = []
+  if (h) parts.push(`${h}h`)
+  if (m) parts.push(`${m}m`)
+  parts.push(`${sRem}s`)
+  return parts.join(' ')
+}
+
+const estimatedDurationDisplay = computed(() => {
+  if (!preview.value || !preview.value.maxEventSpanSeconds) return '--'
+  const speedVal = Number(speed.value) || 1
+  const estSec = preview.value.maxEventSpanSeconds / speedVal
+  return formatSecondsToHMS(estSec)
+})
+
+async function fetchReplayPreview(date: string) {
+  previewError.value = null
+  previewLoading.value = true
+  preview.value = null
+  if (!date) {
+    previewLoading.value = false
+    return
+  }
+  try {
+    const res = await fetch(`/order-api/v1/jobs/replay-preview?date=${encodeURIComponent(date)}`)
+    if (!res.ok) {
+      const txt = await res.text()
+      throw new Error(`프리뷰 조회 실패: ${res.status} ${txt}`)
+    }
+    const data = await res.json()
+    // expected shape: { date, totalOrders, marketsWithRecords, marketsTotal, maxEventSpanSeconds }
+    preview.value = data
+  } catch (e: any) {
+    previewError.value = e?.message || String(e)
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+// watch selectedDate changes
+watch(selectedDate, (newD, oldD) => {
+  preview.value = null
+  previewError.value = null
+  if (!newD) return
+  fetchReplayPreview(newD)
+})
 
 // percentages relative to accepted (accepted as 100%)
 const acceptedCount = computed(() => Number(summary.value?.accepted ?? 0))
@@ -342,13 +399,41 @@ onBeforeUnmount(() => {
         <p class="panel-sub">예상 부하 분포와 검증 기준</p>
 
         <div class="bar-chart placeholder">
-          <div class="empty-center">
+          <div v-if="previewLoading" class="empty-center">
+            <strong>프리뷰 불러오는 중...</strong>
+          </div>
+
+          <div v-else-if="previewError" class="empty-center">
+            <strong>프리뷰 로드 실패</strong>
+            <div class="empty-sub">{{ previewError }}</div>
+          </div>
+
+          <div v-else-if="preview && preview.totalOrders === 0" class="empty-center">
+            <strong>이 날짜엔 기록된 주문이 없습니다.</strong>
+            <div class="empty-sub">먼저 페이퍼 트레이딩을 실행하세요.</div>
+          </div>
+
+          <div v-else-if="preview" class="preview-body">
+            <div class="preview-line">
+              <div class="preview-main">총 {{ preview.totalOrders.toLocaleString() }}건 재생 예정 · {{ preview.marketsWithRecords }}/{{ preview.marketsTotal }}개 마켓</div>
+            </div>
+            <div class="preview-line" style="margin-top:8px">
+              <div class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</div>
+              <div class="preview-value">{{ estimatedDurationDisplay }}</div>
+            </div>
+
+            <div class="preview-checks" style="margin-top:12px">
+              <div class="check-item">검증 기준: 목표 처리량 10,000건/초 · 목표 체결률 90% · 허용 거부율 5%</div>
+            </div>
+          </div>
+
+          <div v-else class="empty-center">
             <strong>시나리오 미리보기: 데이터 연동 예정</strong>
-            <div class="empty-sub">백엔드 연동 전에는 샘플 미리보기만 표시됩니다.</div>
+            <div class="empty-sub">날짜를 선택하면 자동으로 프리뷰를 조회합니다.</div>
           </div>
         </div>
 
-        <div class="status-box">
+          <div class="status-box">
           <div class="status-left">
             <span class="status-dot"></span>
             <span>{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
