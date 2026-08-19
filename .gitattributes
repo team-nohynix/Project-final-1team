@@ -1,0 +1,10 @@
+# Windows(core.autocrlf=true)에서 체크아웃한 파일이 CRLF로 바뀌면서 Linux
+# CI가 만드는 것과 다른 바이트가 되는 문제를 막는다. 특히
+# infra/monitoring-ec2/*.tpl, dashboards/*.json은 base64gzip()으로 EC2
+# user_data에 그대로 들어가는데, 로컬(Windows)과 CI(Linux)가 서로 다른
+# line ending으로 계산하면 terraform이 매번 "user_data_base64 변경 →
+# 인스턴스 replace"로 착각한다(2026-08-19, 실제로 이 문제로 살아있는
+# 모니터링 EC2가 반복 재생성되는 걸 발견).
+infra/monitoring-ec2/** text eol=lf
+infra/**/*.tpl text eol=lf
+infra/**/*.sh text eol=lf
