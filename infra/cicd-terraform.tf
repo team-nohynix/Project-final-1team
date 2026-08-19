@@ -135,8 +135,13 @@ resource "aws_iam_role" "github_actions_terraform_apply" {
 # 이 스택이 실제로 만드는 서비스만 나열 — AdministratorAccess 대신 서비스 단위로
 # 좁혔지만, 각 서비스 안에서는 광범위하다(Terraform이 뭘 더 만들지 미리 다 못
 # 정하므로). iam:*은 irsa.tf/cicd.tf 등이 역할·정책을 직접 만들고 바꾸는 것 때문에
-# 불가피하다 — 이 계정 공유 특성상 위험한 권한이라는 걸 분명히 인지할 것
-# (그래서 environment 승인 게이트가 필요함).
+# 불가피하다 — 이 계정 공유 특성상 위험한 권한이라는 걸 분명히 인지할 것.
+#
+# 2026-08-19: environment 승인 게이트를 뗀 뒤 처음 실제로 끝까지 apply를 돌려보고서야
+# ecr:*/elasticloadbalancing:*/events:*가 원래부터 빠져 있었다는 걸 발견했다 —
+# 지금까지는 사람이 승인해야만 apply가 실행됐는데, 실제로는 root stack이 한 번도
+# 끝까지 성공한 적이 없었던 것으로 보인다(ecr.tf의 ECR repo, edge.tf의 data "aws_lb",
+# karpenter.tf의 EventBridge rule을 이 role이 원래도 못 읽었다).
 data "aws_iam_policy_document" "github_actions_terraform_apply_policy" {
   statement {
     sid = "TerraformManagedServices"
@@ -161,6 +166,9 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_policy" {
       "acm:List*",
       "acm:Get*",
       "iam:*",
+      "ecr:*",
+      "elasticloadbalancing:*",
+      "events:*",
     ]
     resources = ["*"]
   }
