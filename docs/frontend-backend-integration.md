@@ -81,6 +81,14 @@
 - **"생성 주문 수"/"거절 수"는 의도적으로 뺐다** — `trader`가 봇의 원시 판단(생성) 건수를 API로 노출하지 않고(로그에만 남음), 거절된 주문은 Kafka에 아예 도달하지 않아 시스템 어디에도 흔적이 남지 않는다(구조적으로 관측 불가능). `accepted`/`filled`/`unfilled` 세 값만 있고, `accepted`엔 취소된 주문도 포함되므로 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소분 차이).
 - 실제 로컬 Kafka/Redis/MySQL로 `IN_PROGRESS`→`COMPLETED`/`FAILED` 전이, 404(실행 이력 없음), 주문 접수 후 `mode`별 집계, 체결 반영 후 `filled` 카운트 변화까지 전부 직접 확인함.
 
+### 3.6 "부하 시나리오 미리보기" 화면(`LoadTestReplayView.vue`) — **2026-08-19에 새로 생김**
+재생 시작 전에 "그날 트레이더가 기록해둔 주문이 총 몇 건이고, 대략 얼마나 걸릴지"를 미리 보여주는 화면. 두 엔드포인트로 지원한다.
+
+- **총 재생 예정 건수 + 예상 소요 시간** → `orderapi`의 `GET /v1/jobs/replay-preview?date=YYYY-MM-DD` (4.8 참고). `totalOrders`는 그날 20개 마켓 전체의 기록된 주문 수 합. `maxEventSpanSeconds`는 배속 1일 때 값이라, 프론트가 재생 시작 폼에서 이미 고른 speed로 **나눠서** 예상 소요 시간을 계산하면 된다(`replayengine`은 마켓마다 독립된 고루틴으로 동시에 재생하므로, 전체 실행 시간은 각 마켓 소요 시간의 **합이 아니라 가장 긴 마켓 하나에 수렴** — 그래서 서버가 마켓별 최댓값을 미리 계산해서 준다). 기록이 없는 마켓은 조용히 건너뛴 값이라 별도 처리 필요 없음.
+- **직전 실행과 비교** → `orderapi`의 `GET /v1/sessions/previous-run` (4.9 참고) — `GET /v1/sessions/last-run`(3.5/4.6)과 완전히 같은 응답 모양이지만, "지금 진행 중인/막 끝난 실행"이 아니라 **그 바로 이전 실행**을 준다. 진행 중인 실행을 보여주면서 동시에 "직전엔 어땠는지"를 비교하려면 `last-run`만으론 안 되는데(진행 중인 실행이 시작되는 순간 `last-run` 슬롯을 곧바로 차지해버림), 이 엔드포인트가 그 이전 값을 별도로 보관해뒀다가 준다. 실행이 2번 미만이었으면 404 `NO_PREVIOUS_RUN`. 직전 실행의 접수/체결 수까지 같이 보여주려면, 이 응답의 `startedAt`/`endedAt`을 그대로 `GET /v1/orders/summary`(4.7)에 넘기면 된다 — 단, 직전 실행이 `trader`(페이퍼 트레이딩)였을 수도 있으니 `owner` 필드로 `"replayengine"`인지 먼저 확인하고 보여주는 걸 권장(재생 화면인데 직전이 페이퍼 트레이딩 실행이면 비교 대상으로 부적절).
+- **"미체결" 항목은 이 화면에 안 씀** — 팀 결정으로 접수/체결만 보여주기로 함. `GET /v1/orders/summary`의 `unfilled` 필드 자체는 그대로 있으니(AI 트레이더 결과 화면 등 다른 곳에서 씀) 이 화면에서만 그 필드를 안 쓰면 된다 — 백엔드가 따로 응답을 바꾸지 않음.
+- 실제 로컬 환경에서 20개 마켓 중 일부만 기록 있는 경우의 합산/최댓값 계산, 마켓 조회 실패가 전체 요청을 막지 않는 것, 두 번째 실행이 시작되는 순간 `previous-run`이 정확히 그 이전 실행으로 갱신되는 것까지 확인함.
+
 ## 4. 사용 예시 (실제 요청/응답)
 
 ### 4.1 호가창 조회 — `GET /v1/markets/{market}/orderbook`
@@ -275,6 +283,40 @@ GET /v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:56:28Z&to=2026-08-1
 ```
 `mode`는 `PAPER_TRADING`/`REPLAY` 중 하나(필수), `from`은 필수(RFC3339), `to`는 생략하면 지금까지 누적치로 응답(실행이 아직 `IN_PROGRESS`일 때 씀). `mode`/`from`이 없거나 형식이 틀리면 400. `accepted`는 그 구간에 접수된 전체 주문 수(취소분 포함), `filled`/`unfilled`는 그중 체결완료/(접수됨+부분체결) 상태의 개수라 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소된 만큼). 실제 로컬 환경에서 `PAPER_TRADING`/`REPLAY` 각각 주문을 접수해 모드별로 정확히 갈리는 것, `to` 생략 시 지금까지 누적으로 응답하는 것, 체결 반영 후 `filled` 카운트가 실제로 올라가는 것, 데이터 없는 구간엔 `{0,0,0}`으로(에러 아님) 응답하는 것까지 전부 직접 확인함.
 
+### 4.8 주문 재생 미리보기 — `GET /v1/jobs/replay-preview` (2026-08-19 신설, `orderapi`)
+
+```
+GET /v1/jobs/replay-preview?date=2026-08-19
+```
+```json
+{
+  "date": "2026-08-19",
+  "totalOrders": 12483,
+  "marketsWithRecords": 18,
+  "marketsTotal": 20,
+  "maxEventSpanSeconds": 86390
+}
+```
+`date`는 필수(YYYY-MM-DD, `trader`가 그 날짜로 기록했을 때와 같은 값). `marketsWithRecords`는 20개 마켓 중 실제로 그날 기록이 있었던 마켓 수(나머지는 조용히 0건 처리 — 에러 아님). `maxEventSpanSeconds`는 **배속 1일 때** 값이라, 프론트가 재생 시작 폼의 speed 선택값으로 나눠서 예상 소요 시간을 계산해야 한다(예: speed=60이면 `maxEventSpanSeconds / 60`초). 서버가 speed를 안 받는 이유는 프론트에서 speed를 바꿀 때마다 재요청하지 않고 그 자리에서 다시 나누기만 하면 되게 하려는 것. `date` 누락 시 400 `MISSING_DATE`, 형식이 틀리면 400 `INVALID_DATE`. 실제 로컬 환경에서 마켓별 건수 합산, 기록 없는 마켓 자동 제외, 마켓 하나의 조회 실패가 전체 응답을 막지 않는 것(로그만 남기고 계속 진행), 여러 마켓 중 이벤트 시간 범위가 가장 넓은 마켓의 값이 `maxEventSpanSeconds`로 반영되는 것(합이 아니라 최댓값)까지 전부 직접 확인함.
+
+### 4.9 직전 실행 조회 — `GET /v1/sessions/previous-run` (2026-08-19 신설, `orderapi`)
+
+```
+GET /v1/sessions/previous-run
+```
+응답 모양은 4.6의 `last-run`과 완전히 동일:
+```json
+{
+  "runId": "run_prev123",
+  "owner": "replayengine",
+  "status": "COMPLETED",
+  "startedAt": "2026-08-18T09:02:11Z",
+  "endedAt": "2026-08-18T09:14:37Z",
+  "message": "20개 마켓 재생, 0개 건너뜀 (shard 1/1)"
+}
+```
+"지금 진행 중인/방금 끝난 실행"이 아니라 **그 바로 이전 실행**을 준다 — 새 실행이 시작되는 순간 `last-run`이 그 실행 것으로 즉시 바뀌기 때문에, "진행 중 화면"과 "직전 실행과 비교"를 동시에 보여주려면 이 별도 엔드포인트가 필요하다. 실행이 2번 미만이었으면(한 번도 없었거나 첫 실행 도중이면) 404 `NO_PREVIOUS_RUN`. `owner`가 `"trader"`일 수도 있으니(직전이 페이퍼 트레이딩이었던 경우), 재생 화면에서 비교 대상으로 쓰기 전에 `owner === "replayengine"`인지 프론트에서 먼저 확인하는 걸 권장 — 아니면 그냥 "직전 재생 실행 없음"으로 처리. 실제 로컬 Redis로 첫 실행 완료 → 404 아님 확인 → 두 번째 실행 시작 → 그 순간 `last-run`은 새 실행, `previous-run`은 정확히 첫 실행으로 갈리는 것까지 확인함.
+
 ## 요약
 
 - **바로 연결 가능**: 시세 조회, 호가창 조회, 주문 접수/취소 (5개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
@@ -282,5 +324,6 @@ GET /v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:56:28Z&to=2026-08-1
 - **응답 방식이 바뀜, 프론트 수정 필요**: 시세 수집(`POST /v1/collect`) — 동기 200에서 비동기 202+폴링으로 바뀜(2.4/4.5 참고), 서버 쪽은 이미 반영됨
 - **2026-08-12에 새로 생김**: 트레이스 조회(`GET /v1/trace/{orderId}`), 매칭 엔진 목록(`GET /v1/matching/engines`) — 둘 다 `recorder`, 응답 모양은 프론트 목업과 다르니 화면 쪽 재설계 필요(4.3/4.4 참고)
 - **2026-08-13에 새로 생김**: AI 트레이더 실행 결과 화면용 세 엔드포인트 — `orderapi`의 `GET /v1/sessions/last-run`(실행 상태/시작·종료 시각/오류 메시지, 4.6 참고)과 `recorder`의 `GET /v1/orders/summary`(주문 접수/체결/미체결 수, 4.7 참고). 둘 다 프론트가 직접 계산할 게 없는, 그대로 쓸 수 있는 응답(3.5 참고)
+- **2026-08-19에 새로 생김**: 부하 시나리오 미리보기 화면용 두 엔드포인트 — `orderapi`의 `GET /v1/jobs/replay-preview`(재생 예정 건수 + 배속 1 기준 소요 시간, 프론트가 speed로 나눠 씀, 4.8 참고)와 `GET /v1/sessions/previous-run`(직전 실행 기록, `last-run`과 같은 모양, 4.9 참고). 이 화면은 접수/체결만 보여주고 미체결은 의도적으로 뺌(3.6 참고)
 - **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
 - **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성
