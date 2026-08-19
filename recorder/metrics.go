@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"log"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"recorder/backpressure"
+	"recorder/query"
 )
 
 // recorderLagGauge/recorderBackpressureActiveGauge는 백프레셔 Watcher(main.go)가 이미
@@ -28,8 +31,71 @@ var (
 	)
 )
 
+// dashboardMetricsPollInterval은 GET /v1/metrics/dashboard가 이미 계산하는 값들을
+// 그대로 재사용해 Grafana에도 노출하기 위한 폴링 주기입니다(2026-08-19, 프론트
+// "실시간 모니터링" 화면과 동일한 지표를 Grafana에도 띄워달라는 요청으로 추가) —
+// TPS/대기주문/p99 계산이 전부 MySQL 쿼리라 매 스크레이프(보통 15s)마다 다시
+// 돌리면 DB 부하가 늘어나므로, 별도 주기로 값을 캐싱하듯 갱신합니다.
+const dashboardMetricsPollInterval = 10 * time.Second
+
+var (
+	recorderOrderAcceptTps = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_order_accept_tps",
+		Help: "최근 60초 주문 접수 TPS (trade_order.submitted_at 기준)",
+	})
+	recorderExecutionTps = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_execution_tps",
+		Help: "최근 60초 체결 TPS (execution.executed_at 기준)",
+	})
+	recorderPendingOrders = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_pending_orders",
+		Help: "미종결 주문 수 (ACCEPTED + PARTIALLY_FILLED)",
+	})
+	recorderE2EP99Ms = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_e2e_p99_latency_ms",
+		Help: "최근 5분 내 체결 완료 주문의 접수→최종체결 p99 지연시간(ms) — 근사치, query.DashboardMetrics 타입 주석 참고",
+	})
+	recorderE2EP99SampleCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_e2e_p99_sample_count",
+		Help: "recorder_e2e_p99_latency_ms 계산에 쓰인 표본 수 — 너무 적으면 p99 값을 신뢰하기 어려움",
+	})
+	recorderRunningEnginePods = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "recorder_running_engine_pods",
+		Help: "현재 마켓이 배정된 매칭 엔진 인스턴스 수(distinct engine_instance_id)",
+	})
+)
+
 func init() {
-	prometheus.MustRegister(recorderLagGauge, recorderBackpressureActiveGauge)
+	prometheus.MustRegister(
+		recorderLagGauge, recorderBackpressureActiveGauge,
+		recorderOrderAcceptTps, recorderExecutionTps, recorderPendingOrders,
+		recorderE2EP99Ms, recorderE2EP99SampleCount, recorderRunningEnginePods,
+	)
+}
+
+// pollDashboardMetrics는 DashboardMetrics(GET /v1/metrics/dashboard가 쓰는 것과 같은
+// 함수)를 주기적으로 호출해 위 게이지들을 갱신합니다. ctx가 취소되면 종료합니다.
+func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier) {
+	ticker := time.NewTicker(dashboardMetricsPollInterval)
+	defer ticker.Stop()
+	for {
+		m, err := querier.DashboardMetrics(ctx)
+		if err != nil {
+			log.Printf("대시보드 지표 폴링 실패(다음 주기에 재시도): %v", err)
+		} else {
+			recorderOrderAcceptTps.Set(m.OrderAcceptTps)
+			recorderExecutionTps.Set(m.ExecutionTps)
+			recorderPendingOrders.Set(float64(m.PendingOrders))
+			recorderE2EP99Ms.Set(m.E2EP99Ms)
+			recorderE2EP99SampleCount.Set(float64(m.E2EP99SampleCount))
+			recorderRunningEnginePods.Set(float64(m.RunningEnginePods))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // instrumentedLagSource는 Watcher가 원래 쓰는 LagSource를 감싸서, Watcher가 값을
