@@ -104,6 +104,13 @@ data "aws_iam_policy_document" "github_actions_frontend_deploy_policy" {
     actions   = ["cloudfront:CreateInvalidation"]
     resources = [aws_cloudfront_distribution.frontend.arn]
   }
+  # ListDistributions는 IAM에서 리소스 단위로 못 좁힌다(항상 "*") — 배포 스크립트가
+  # frontend distribution ID를 하드코딩하지 않고 도메인으로 찾으려면 필요하다.
+  # 읽기 전용이라 공유 계정의 다른 팀 리소스를 조회는 하지만 바꾸진 못한다.
+  statement {
+    actions   = ["cloudfront:ListDistributions"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "github_actions_frontend_deploy" {
