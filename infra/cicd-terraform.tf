@@ -58,6 +58,27 @@ resource "aws_iam_role_policy_attachment" "github_actions_terraform_plan_readonl
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
+# ReadOnlyAccess만으로는 S3 네이티브 state locking(각 스택 providers.tf의
+# use_lockfile = true)이 안 된다 — plan조차 state를 읽기 전에 .tflock 오브젝트를
+# 잠깐 썼다 지워야 해서 s3:PutObject/DeleteObject가 필요하다(2026-08-19, terraform
+# plan을 tee로 가리던 pipefail 버그를 고치고 나서야 이게 계속 실패해왔다는 걸
+# 발견했다). lock 파일 경로만 좁혀서 허용.
+data "aws_iam_policy_document" "github_actions_terraform_plan_lockfile" {
+  statement {
+    actions = ["s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "arn:aws:s3:::team1-terraform-state-s3/network/terraform.tfstate.tflock",
+      "arn:aws:s3:::team1-terraform-state-s3/truss/terraform.tfstate.tflock",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_terraform_plan_lockfile" {
+  name   = "team1-github-actions-tf-plan-lockfile-policy"
+  role   = aws_iam_role.github_actions_terraform_plan.id
+  policy = data.aws_iam_policy_document.github_actions_terraform_plan_lockfile.json
+}
+
 # --- apply (쓰기 권한, environment로 게이트) ---------------------------------
 
 data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
