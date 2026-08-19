@@ -4,218 +4,1023 @@
   "schemaVersion": 39,
   "version": 2,
   "refresh": "30s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "panels": [
-    { "id": 100, "type": "row", "title": "개요", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "개요",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
     {
       "id": 1,
       "title": "타겟 상태",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 14, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 14,
+        "x": 0,
+        "y": 1
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
         "textMode": "value_and_name",
         "orientation": "horizontal",
-        "text": { "titleSize": 16, "valueSize": 24 }
+        "text": {
+          "titleSize": 16,
+          "valueSize": 24
+        }
       },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "1": { "text": "정상", "color": "green" }, "0": { "text": "장애", "color": "red" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
           ],
-          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "targets": [{ "expr": "up{job=\"k8s-services\", service=~\".*-metrics\"}", "legendFormat": "{{service}}" }]
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=~\".*-metrics\"}",
+          "legendFormat": "{{service}}"
+        }
+      ]
     },
     {
       "id": 7,
       "title": "활성 노드 수",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 14, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 14,
+        "y": 1
+      },
       "datasource": "Prometheus",
-      "options": { "text": { "titleSize": 16, "valueSize": 36 } },
-      "targets": [{ "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)", "legendFormat": "nodes up" }]
+      "options": {
+        "text": {
+          "titleSize": 16,
+          "valueSize": 36
+        }
+      },
+      "targets": [
+        {
+          "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)",
+          "legendFormat": "nodes up"
+        }
+      ]
     },
     {
       "id": 6,
       "title": "backend 파드 재시작 누적",
       "type": "table",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "custom": { "align": "left", "cellOptions": { "type": "color-background" } },
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] }
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "color-background"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
         }
       },
-      "targets": [{ "expr": "sum by (pod) (kube_pod_container_status_restarts_total{exported_namespace=\"backend\"})", "format": "table", "instant": true }],
+      "targets": [
+        {
+          "expr": "sum by (pod) (kube_pod_container_status_restarts_total{exported_namespace=\"backend\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
       "transformations": [
-        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true }, "renameByName": { "pod": "파드", "Value": "재시작 횟수" } } }
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "pod": "파드",
+              "Value": "재시작 횟수"
+            }
+          }
+        }
       ]
     },
-
-    { "id": 101, "type": "row", "title": "비즈니스 지표", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "collapsed": false },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "비즈니스 지표",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false
+    },
     {
       "id": 2,
       "title": "주문 누적 접수량 (orders_total)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "orders_total", "legendFormat": "{{status}}" }]
+      "targets": [
+        {
+          "expr": "orders_total",
+          "legendFormat": "{{status}}"
+        }
+      ]
     },
     {
       "id": 8,
       "title": "주문 접수 속도 (건/초)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "rate(orders_total[1m])", "legendFormat": "{{status}}" }]
+      "targets": [
+        {
+          "expr": "rate(orders_total[1m])",
+          "legendFormat": "{{status}}"
+        }
+      ]
     },
     {
       "id": 3,
       "title": "매칭엔진 컨슈머 랙",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "matching_engine_lag", "legendFormat": "lag" }]
+      "targets": [
+        {
+          "expr": "matching_engine_lag",
+          "legendFormat": "lag"
+        }
+      ]
     },
-
-    { "id": 102, "type": "row", "title": "서비스별 리소스 사용량 (컨테이너)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "collapsed": false },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "서비스별 리소스 사용량 (컨테이너)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "collapsed": false
+    },
     {
       "id": 9,
       "title": "CPU 사용량 (core)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"backend\", container!=\"\"}[2m]))", "legendFormat": "{{pod}}" }]
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"backend\", container!=\"\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
     },
     {
       "id": 10,
       "title": "메모리 사용량 (working set)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
       "datasource": "Prometheus",
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "targets": [{ "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\"})", "legendFormat": "{{pod}}" }]
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ]
     },
-
-    { "id": 103, "type": "row", "title": "파드 상태", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "collapsed": false },
+    {
+      "id": 103,
+      "type": "row",
+      "title": "파드 상태",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "collapsed": false
+    },
     {
       "id": 11,
       "title": "backend 파드 상태 (Running=1)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"}", "legendFormat": "{{pod}}" }]
+      "targets": [
+        {
+          "expr": "kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
     },
     {
       "id": 12,
       "title": "재시작 횟수 추이",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "kube_pod_container_status_restarts_total{exported_namespace=\"backend\"}", "legendFormat": "{{pod}}" }]
+      "targets": [
+        {
+          "expr": "kube_pod_container_status_restarts_total{exported_namespace=\"backend\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
     },
-
-    { "id": 105, "type": "row", "title": "오토스케일링", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }, "collapsed": false },
+    {
+      "id": 105,
+      "type": "row",
+      "title": "오토스케일링",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "collapsed": false
+    },
     {
       "id": 13,
       "title": "활성 노드 수 추이 (Karpenter)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)", "legendFormat": "활성 노드 수" }]
+      "targets": [
+        {
+          "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)",
+          "legendFormat": "활성 노드 수"
+        }
+      ]
     },
     {
       "id": 14,
       "title": "서비스별 레플리카 수 (KEDA/HPA)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\"}", "legendFormat": "{{deployment}}" }]
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\"}",
+          "legendFormat": "{{deployment}}"
+        }
+      ]
     },
-
-    { "id": 106, "type": "row", "title": "백프레셔 / 병목", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 }, "collapsed": false },
+    {
+      "id": 106,
+      "type": "row",
+      "title": "백프레셔 / 병목",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "collapsed": false
+    },
     {
       "id": 15,
       "title": "백프레셔 활성 상태",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 41 },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
         "textMode": "value_and_name",
         "orientation": "horizontal",
-        "text": { "titleSize": 16, "valueSize": 24 }
+        "text": {
+          "titleSize": 16,
+          "valueSize": 24
+        }
       },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "1": { "text": "활성 (주문 거절 중)", "color": "red" }, "0": { "text": "정상", "color": "green" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "정상",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "활성 (주문 거절 중)",
+                  "color": "red"
+                }
+              }
+            }
           ],
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         }
       },
       "targets": [
-        { "expr": "matching_backpressure_active", "legendFormat": "matching" },
-        { "expr": "recorder_backpressure_active", "legendFormat": "recorder" }
+        {
+          "expr": "matching_backpressure_active",
+          "legendFormat": "matching"
+        },
+        {
+          "expr": "recorder_backpressure_active",
+          "legendFormat": "recorder"
+        }
       ]
     },
     {
       "id": 16,
       "title": "recorder 컨슈머 랙 (orders/executions)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 41 },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 41
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "recorder_consumer_lag", "legendFormat": "{{reader}}" }]
+      "targets": [
+        {
+          "expr": "recorder_consumer_lag",
+          "legendFormat": "{{reader}}"
+        }
+      ]
     },
-
-    { "id": 107, "type": "row", "title": "세션 / 마켓 배정", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 }, "collapsed": false },
+    {
+      "id": 107,
+      "type": "row",
+      "title": "세션 / 마켓 배정",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "collapsed": false
+    },
     {
       "id": 17,
       "title": "주문 취소 누적",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 50 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 50
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "orders_total{status=\"canceled\"}", "legendFormat": "canceled" }]
+      "targets": [
+        {
+          "expr": "orders_total{status=\"canceled\"}",
+          "legendFormat": "canceled"
+        }
+      ]
     },
     {
       "id": 18,
       "title": "세션 이벤트 (클레임/충돌/하트비트/반납)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 50 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 50
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "rate(session_events_total[1m])", "legendFormat": "{{action}}" }]
+      "targets": [
+        {
+          "expr": "rate(session_events_total[1m])",
+          "legendFormat": "{{action}}"
+        }
+      ]
     },
     {
       "id": 19,
       "title": "매칭엔진 마켓 배정/반납 누적 (FR-11 리밸런싱)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 50 },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 50
+      },
       "datasource": "Prometheus",
-      "targets": [{ "expr": "matching_market_assignments_total", "legendFormat": "{{action}}" }]
+      "targets": [
+        {
+          "expr": "matching_market_assignments_total",
+          "legendFormat": "{{action}}"
+        }
+      ]
     },
-
-    { "id": 104, "type": "row", "title": "Go 런타임 (보조 지표)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 }, "collapsed": true,
+    {
+      "id": 104,
+      "type": "row",
+      "title": "Go 런타임 (보조 지표)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "collapsed": true,
       "panels": [
         {
           "id": 4,
           "title": "고루틴 수",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 32
+          },
           "datasource": "Prometheus",
-          "targets": [{ "expr": "go_goroutines{service=~\".*-metrics\"}", "legendFormat": "{{service}}" }]
+          "targets": [
+            {
+              "expr": "go_goroutines{service=~\".*-metrics\"}",
+              "legendFormat": "{{service}}"
+            }
+          ]
         },
         {
           "id": 5,
           "title": "Go 힙 메모리",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 32
+          },
           "datasource": "Prometheus",
-          "fieldConfig": { "defaults": { "unit": "bytes" } },
-          "targets": [{ "expr": "go_memstats_heap_alloc_bytes{service=~\".*-metrics\"}", "legendFormat": "{{service}}" }]
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            }
+          },
+          "targets": [
+            {
+              "expr": "go_memstats_heap_alloc_bytes{service=~\".*-metrics\"}",
+              "legendFormat": "{{service}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "실시간 모니터링 (프론트 화면 대응, 2026-08-19 추가)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "collapsed": false
+    },
+    {
+      "id": 201,
+      "title": "주문 접수 TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 0,
+        "y": 60
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": "TPS"
+        }
+      ]
+    },
+    {
+      "id": 202,
+      "title": "체결 TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 5,
+        "y": 60
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": "TPS"
+        }
+      ]
+    },
+    {
+      "id": 203,
+      "title": "처리 대기 주문",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 10,
+        "y": 60
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_pending_orders",
+          "legendFormat": "건"
+        }
+      ]
+    },
+    {
+      "id": 204,
+      "title": "전체 처리 p99",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 15,
+        "y": 60
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_e2e_p99_latency_ms",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 205,
+      "title": "실행 중인 Pod",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 60
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"})",
+          "legendFormat": "pods"
+        }
+      ]
+    },
+    {
+      "id": 206,
+      "title": "주문·체결 처리량 (TPS, 최근 15분)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": "주문"
+        },
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": "체결"
+        }
+      ]
+    },
+    {
+      "id": 207,
+      "title": "핵심 서비스 상태",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 66
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "비정상",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"orderapi-metrics\"}",
+          "legendFormat": "주문 접수 API"
+        },
+        {
+          "expr": "up{job=\"k8s-services\", service=\"matching-engine-metrics\"}",
+          "legendFormat": "매칭 엔진"
+        },
+        {
+          "expr": "up{job=\"k8s-services\", service=\"recorder-metrics\"}",
+          "legendFormat": "기록기(recorder)"
+        }
+      ]
+    },
+    {
+      "id": 208,
+      "title": "인프라 리소스 상태 (CloudWatch — Kafka/MySQL/Redis)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "datasource": "CloudWatch",
+      "description": "RDS/Redis는 대표로 instance-1/001 인스턴스 값만 표시합니다(monitoring.tf 알람은 인스턴스별로 개별 감시) — 여러 인스턴스 중 하나라도 이상 있으면 CloudWatch 알람이 별도로 울립니다.",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 100000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "displayName",
+                "value": "Kafka 브로커 (SumOffsetLag)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 80
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "MySQL (RDS CPU%)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 80
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "Redis 캐시 (CPU%)"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "region": "ap-northeast-2",
+          "namespace": "AWS/Kafka",
+          "metricName": "SumOffsetLag",
+          "dimensions": {
+            "Cluster Name": "team1-truss-msk"
+          },
+          "statistic": "Average"
+        },
+        {
+          "refId": "B",
+          "region": "ap-northeast-2",
+          "namespace": "AWS/RDS",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "DBInstanceIdentifier": "team1-truss-db-instance-1"
+          },
+          "statistic": "Average"
+        },
+        {
+          "refId": "C",
+          "region": "ap-northeast-2",
+          "namespace": "AWS/ElastiCache",
+          "metricName": "EngineCPUUtilization",
+          "dimensions": {
+            "CacheClusterId": "team1-truss-redis-001"
+          },
+          "statistic": "Average"
         }
       ]
     }

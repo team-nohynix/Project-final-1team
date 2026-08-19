@@ -88,6 +88,28 @@ resource "aws_iam_role_policy" "monitoring_eks_describe" {
   policy = data.aws_iam_policy_document.monitoring_eks_describe.json
 }
 
+# Grafana의 CloudWatch 데이터소스(grafana-datasource.yml)용 — Kafka(MSK)/RDS/Redis는
+# Prometheus exporter가 없고 CloudWatch 지표만 있어서, monitoring.tf의 알람이 보는
+# 것과 같은 지표를 Grafana에서도 직접 조회하려면 필요하다(2026-08-19). 읽기 전용.
+data "aws_iam_policy_document" "monitoring_cloudwatch_read" {
+  statement {
+    actions = [
+      "cloudwatch:GetMetricData",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:ListMetrics",
+      "cloudwatch:DescribeAlarms",
+      "tag:GetResources",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "monitoring_cloudwatch_read" {
+  name   = "team1-monitoring-cloudwatch-read"
+  role   = aws_iam_role.monitoring.id
+  policy = data.aws_iam_policy_document.monitoring_cloudwatch_read.json
+}
+
 resource "aws_iam_instance_profile" "monitoring" {
   name = "team1-monitoring-profile"
   role = aws_iam_role.monitoring.name
