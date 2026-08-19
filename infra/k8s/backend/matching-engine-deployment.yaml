@@ -49,13 +49,16 @@ spec:
           ports:
             - name: metrics
               containerPort: 9090
+          # 2026-08-19: 이번 세션 부하테스트로 미종결 주문이 15만 건 이상 쌓인 상태에서
+          # 재시작하면서 그 백로그를 메모리에 복원하다 512Mi를 넘겨 OOMKilled(exit 137)됐다
+          # (kubectl describe pod의 lastState.terminated.reason으로 확인) — 512Mi/1Gi로 상향.
           resources:
             requests:
               cpu: 250m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: "1"
-              memory: 512Mi
+              memory: 1Gi
 ---
 apiVersion: v1
 kind: Service
