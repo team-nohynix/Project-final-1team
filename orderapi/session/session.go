@@ -158,8 +158,12 @@ type Store interface {
 	// Release는 이 멤버를 그룹에서 반납합니다. outcome은 그룹의 마지막
 	// 멤버가 반납할 때만(=이 실행 전체가 끝날 때만) LastRun에 반영됩니다 —
 	// 리플레이 샤드처럼 여러 멤버 중 일부만 먼저 끝나는 경우 아직 실행 중인
-	// 것으로 남아야 합니다.
-	Release(ctx context.Context, sessionID string, outcome RunOutcome) error
+	// 것으로 남아야 합니다. finalized는 이번 반납이 그 "마지막 멤버"였는지를
+	// 알려줍니다 — 호출부(releaseSessionHandler)가 세션 종료 시점에만 해야
+	// 하는 후처리(미종결 주문 정리, 2026-08-19)를 트리거하는 데 씁니다.
+	// finalized=true일 때만 record가 채워집니다(그 세션의 owner/시작·종료
+	// 시각 — 정리 로직이 mode/구간을 계산하는 데 필요).
+	Release(ctx context.Context, sessionID string, outcome RunOutcome) (record RunRecord, finalized bool, err error)
 	// LastRun은 가장 최근 실행의 기록을 반환합니다. 지금까지 한 번도 실행된
 	// 적이 없으면 found=false(에러 아님).
 	LastRun(ctx context.Context) (RunRecord, bool, error)
@@ -320,23 +324,24 @@ func (s *RedisStore) Heartbeat(ctx context.Context, sessionID string) error {
 // 반영합니다(리플레이 샤드처럼 아직 남은 멤버가 있으면 이 실행은 안 끝난
 // 것이므로 LastRun을 안 건드립니다). sessionID가 이미 반납됐거나 존재한 적
 // 없으면 ErrNotActive입니다.
-func (s *RedisStore) Release(ctx context.Context, sessionID string, outcome RunOutcome) error {
+func (s *RedisStore) Release(ctx context.Context, sessionID string, outcome RunOutcome) (RunRecord, bool, error) {
 	runID, member, ok := splitSessionID(sessionID)
 	if !ok {
-		return ErrNotActive
+		return RunRecord{}, false, ErrNotActive
 	}
 	res, err := s.client.Eval(ctx, releaseScript, []string{activeKey, membersKey(runID), metaKey}, runID, member).Result()
 	if err != nil {
-		return fmt.Errorf("세션 반납 실패: %w", err)
+		return RunRecord{}, false, fmt.Errorf("세션 반납 실패: %w", err)
 	}
 	n, _ := res.(int64)
 	if n == 0 {
-		return ErrNotActive
+		return RunRecord{}, false, ErrNotActive
 	}
 	if n == 2 {
-		s.finalizeLastRun(ctx, runID, outcome)
+		record := s.finalizeLastRun(ctx, runID, outcome)
+		return record, true, nil
 	}
-	return nil
+	return RunRecord{}, false, nil
 }
 
 // finalizeLastRun은 LastRun 레코드에 종료 시각/상태/메시지를 채웁니다. 기존에
@@ -345,7 +350,7 @@ func (s *RedisStore) Release(ctx context.Context, sessionID string, outcome RunO
 // 호출부가 모르는 값이라 다시 못 채움), 그래서 기존 값을 먼저 읽어와 채웁니다.
 // 조회가 실패해도(레코드가 이미 없어졌거나 등) 최소한 상태/메시지는 남깁니다 —
 // "완료됐다"는 사실 자체가 "시작 시각을 못 보여준다"보다 훨씬 중요합니다.
-func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome RunOutcome) {
+func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome RunOutcome) RunRecord {
 	record := RunRecord{RunID: runID, Status: outcome.Status, EndedAt: time.Now().UTC(), Message: outcome.Message}
 	if body, err := s.client.Get(ctx, lastRunKey).Bytes(); err == nil {
 		var existing RunRecord
@@ -357,6 +362,7 @@ func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome 
 	if body, err := json.Marshal(record); err == nil {
 		s.client.Set(ctx, lastRunKey, body, 0)
 	}
+	return record
 }
 
 // LastRun은 가장 최근 실행 기록을 반환합니다. 한 번도 실행된 적이 없으면

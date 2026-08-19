@@ -14,18 +14,20 @@ import (
 // fakeQuerier는 실제 MySQL 없이 핸들러를 검증하기 위한 query.Querier
 // 구현체입니다 — orderapi/server_test.go의 fakePublisher와 같은 패턴.
 type fakeQuerier struct {
-	trace      query.OrderTrace
-	traceFound bool
-	traceErr   error
-	engines    []query.EngineAssignment
-	enginesErr error
-	metrics    query.DashboardMetrics
-	metricsErr error
-	summary    query.OrderSummary
-	summaryErr error
-	gotMode    string
-	gotFrom    time.Time
-	gotTo      time.Time
+	trace         query.OrderTrace
+	traceFound    bool
+	traceErr      error
+	engines       []query.EngineAssignment
+	enginesErr    error
+	metrics       query.DashboardMetrics
+	metricsErr    error
+	summary       query.OrderSummary
+	summaryErr    error
+	unresolved    []query.UnresolvedOrder
+	unresolvedErr error
+	gotMode       string
+	gotFrom       time.Time
+	gotTo         time.Time
 }
 
 func (f *fakeQuerier) TraceOrder(ctx context.Context, orderID string) (query.OrderTrace, bool, error) {
@@ -43,6 +45,11 @@ func (f *fakeQuerier) DashboardMetrics(ctx context.Context) (query.DashboardMetr
 func (f *fakeQuerier) OrderSummary(ctx context.Context, mode string, from, to time.Time) (query.OrderSummary, error) {
 	f.gotMode, f.gotFrom, f.gotTo = mode, from, to
 	return f.summary, f.summaryErr
+}
+
+func (f *fakeQuerier) UnresolvedOrders(ctx context.Context, mode string, from, to time.Time) ([]query.UnresolvedOrder, error) {
+	f.gotMode, f.gotFrom, f.gotTo = mode, from, to
+	return f.unresolved, f.unresolvedErr
 }
 
 func newTraceRequest(orderID string) *http.Request {
@@ -257,6 +264,72 @@ func TestOrderSummaryHandler(t *testing.T) {
 		q := &fakeQuerier{summaryErr: context.DeadlineExceeded}
 		w := httptest.NewRecorder()
 		orderSummaryHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+	})
+}
+
+func TestUnresolvedOrdersHandler(t *testing.T) {
+	t.Run("missing mode", func(t *testing.T) {
+		q := &fakeQuerier{}
+		w := httptest.NewRecorder()
+		unresolvedOrdersHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/unresolved?from=2026-08-19T00:00:00Z", nil))
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing from", func(t *testing.T) {
+		q := &fakeQuerier{}
+		w := httptest.NewRecorder()
+		unresolvedOrdersHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/unresolved?mode=REPLAY", nil))
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("returns unresolved orders", func(t *testing.T) {
+		q := &fakeQuerier{unresolved: []query.UnresolvedOrder{
+			{OrderID: "ord_1", Market: "KRW-BTC"},
+			{OrderID: "ord_2", Market: "KRW-ETH"},
+		}}
+		w := httptest.NewRecorder()
+		url := "/v1/orders/unresolved?mode=REPLAY&from=2026-08-19T09:02:11Z&to=2026-08-19T09:14:37Z"
+		unresolvedOrdersHandler(q)(w, httptest.NewRequest(http.MethodGet, url, nil))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+		}
+		if q.gotMode != "REPLAY" || q.gotFrom.IsZero() || q.gotTo.IsZero() {
+			t.Fatalf("unexpected args passed to querier: mode=%s from=%v to=%v", q.gotMode, q.gotFrom, q.gotTo)
+		}
+		var got map[string][]query.UnresolvedOrder
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("response not JSON: %v", err)
+		}
+		if len(got["orders"]) != 2 || got["orders"][0].OrderID != "ord_1" {
+			t.Fatalf("unexpected orders: %+v", got)
+		}
+	})
+
+	t.Run("empty result is not an error", func(t *testing.T) {
+		q := &fakeQuerier{unresolved: nil}
+		w := httptest.NewRecorder()
+		unresolvedOrdersHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/unresolved?mode=PAPER_TRADING&from=2026-08-19T00:00:00Z", nil))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		q := &fakeQuerier{unresolvedErr: context.DeadlineExceeded}
+		w := httptest.NewRecorder()
+		unresolvedOrdersHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/unresolved?mode=REPLAY&from=2026-08-19T00:00:00Z", nil))
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)

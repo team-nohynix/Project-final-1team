@@ -15,16 +15,18 @@ import (
 // fakeSessionStore는 실제 Redis 없이 세션 핸들러를 검증하기 위한
 // session.Store 구현체입니다.
 type fakeSessionStore struct {
-	claimInfo    session.Info
-	claimErr     error
-	heartbeatErr error
-	releaseErr   error
-	lastRunRec   session.RunRecord
-	lastRunFound bool
-	lastRunErr   error
-	prevRunRec   session.RunRecord
-	prevRunFound bool
-	prevRunErr   error
+	claimInfo        session.Info
+	claimErr         error
+	heartbeatErr     error
+	releaseErr       error
+	releaseRecord    session.RunRecord
+	releaseFinalized bool
+	lastRunRec       session.RunRecord
+	lastRunFound     bool
+	lastRunErr       error
+	prevRunRec       session.RunRecord
+	prevRunFound     bool
+	prevRunErr       error
 
 	lastRunID       string
 	lastHeartbeatID string
@@ -45,10 +47,13 @@ func (f *fakeSessionStore) Heartbeat(ctx context.Context, sessionID string) erro
 	return f.heartbeatErr
 }
 
-func (f *fakeSessionStore) Release(ctx context.Context, sessionID string, outcome session.RunOutcome) error {
+func (f *fakeSessionStore) Release(ctx context.Context, sessionID string, outcome session.RunOutcome) (session.RunRecord, bool, error) {
 	f.lastReleaseID = sessionID
 	f.lastOutcome = outcome
-	return f.releaseErr
+	if f.releaseErr != nil {
+		return session.RunRecord{}, false, f.releaseErr
+	}
+	return f.releaseRecord, f.releaseFinalized, nil
 }
 
 func (f *fakeSessionStore) LastRun(ctx context.Context) (session.RunRecord, bool, error) {
@@ -59,11 +64,14 @@ func (f *fakeSessionStore) PreviousRun(ctx context.Context) (session.RunRecord, 
 	return f.prevRunRec, f.prevRunFound, f.prevRunErr
 }
 
+// newSessionMux는 미종결 주문 정리(sessioncleanup.go)를 건너뛰는 기본
+// 구성으로 만듭니다(recorderURL 빈 문자열) — 그 정리 로직 자체를 검증하는
+// 테스트는 releaseSessionHandler를 직접 호출해서 recorderURL을 채웁니다.
 func newSessionMux(store session.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(store))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(store))
-	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store))
+	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store, &fakePublisher{}, &http.Client{}, ""))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(store))
 	return mux

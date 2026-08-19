@@ -91,30 +91,9 @@ func dashboardMetricsHandler(q query.Querier) http.HandlerFunc {
 // 없어 정확한 집계가 됩니다.
 func orderSummaryHandler(q query.Querier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mode := r.URL.Query().Get("mode")
-		if mode != "PAPER_TRADING" && mode != "REPLAY" {
-			writeError(w, http.StatusBadRequest, "INVALID_MODE", "mode는 PAPER_TRADING 또는 REPLAY여야 합니다.")
+		mode, from, to, ok := parseModeFromTo(w, r)
+		if !ok {
 			return
-		}
-
-		fromStr := r.URL.Query().Get("from")
-		if fromStr == "" {
-			writeError(w, http.StatusBadRequest, "MISSING_FROM", "from은 필수입니다 (RFC3339).")
-			return
-		}
-		from, err := time.Parse(time.RFC3339, fromStr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "INVALID_FROM", "from 형식이 올바르지 않습니다 (RFC3339).")
-			return
-		}
-
-		var to time.Time
-		if toStr := r.URL.Query().Get("to"); toStr != "" {
-			to, err = time.Parse(time.RFC3339, toStr)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "INVALID_TO", "to 형식이 올바르지 않습니다 (RFC3339).")
-				return
-			}
 		}
 
 		summary, err := q.OrderSummary(r.Context(), mode, from, to)
@@ -125,4 +104,61 @@ func orderSummaryHandler(q query.Querier) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, summary)
 	}
+}
+
+// unresolvedOrdersHandler는 GET /v1/orders/unresolved?mode=...&from=...&to=...를
+// 처리합니다 — orderapi가 세션 종료 시점에 그 세션이 남긴 미종결(ACCEPTED/
+// PARTIALLY_FILLED) 주문을 취소하기 위해 부릅니다(2026-08-19, 부하테스트
+// 반복으로 매칭 엔진 인메모리 오더북에 미체결 주문이 계속 쌓여 OOMKilled까지
+// 간 사고 대응). 파라미터 규칙은 orderSummaryHandler(4.7)와 완전히 동일 —
+// 세션 가드 덕분에 mode+구간만으로 그 세션의 주문을 정확히 구분할 수 있어
+// 별도 세션 식별 컬럼이 필요 없습니다.
+func unresolvedOrdersHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mode, from, to, ok := parseModeFromTo(w, r)
+		if !ok {
+			return
+		}
+
+		orders, err := q.UnresolvedOrders(r.Context(), mode, from, to)
+		if err != nil {
+			log.Printf("미종결 주문 조회 실패 (mode=%s): %v", mode, err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "미종결 주문 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string][]query.UnresolvedOrder{"orders": orders})
+	}
+}
+
+// parseModeFromTo는 orderSummaryHandler/unresolvedOrdersHandler가 공유하는
+// 쿼리 파라미터 파싱입니다. ok=false면 이미 에러 응답을 썼으니 호출부는 그냥
+// return하면 됩니다.
+func parseModeFromTo(w http.ResponseWriter, r *http.Request) (mode string, from, to time.Time, ok bool) {
+	mode = r.URL.Query().Get("mode")
+	if mode != "PAPER_TRADING" && mode != "REPLAY" {
+		writeError(w, http.StatusBadRequest, "INVALID_MODE", "mode는 PAPER_TRADING 또는 REPLAY여야 합니다.")
+		return "", time.Time{}, time.Time{}, false
+	}
+
+	fromStr := r.URL.Query().Get("from")
+	if fromStr == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FROM", "from은 필수입니다 (RFC3339).")
+		return "", time.Time{}, time.Time{}, false
+	}
+	var err error
+	from, err = time.Parse(time.RFC3339, fromStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_FROM", "from 형식이 올바르지 않습니다 (RFC3339).")
+		return "", time.Time{}, time.Time{}, false
+	}
+
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		to, err = time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_TO", "to 형식이 올바르지 않습니다 (RFC3339).")
+			return "", time.Time{}, time.Time{}, false
+		}
+	}
+
+	return mode, from, to, true
 }
