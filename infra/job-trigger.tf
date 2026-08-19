@@ -30,9 +30,15 @@ resource "aws_sqs_queue" "job_trigger" {
 }
 
 data "archive_file" "job_trigger_lambda" {
-  type        = "zip"
-  source_file = "${path.module}/lambda/job-trigger/index.py"
-  output_path = "${path.module}/lambda/job-trigger.zip"
+  type = "zip"
+  # source_file(파일 경로)를 쓰면 zip 엔트리에 그 파일의 파일시스템 mtime이 그대로
+  # 박힌다 — git checkout은 커밋 시각이 아니라 체크아웃한 "지금"을 mtime으로 찍으므로,
+  # 로컬/CI/서로 다른 CI 실행마다 mtime이 달라져서 매번 output_base64sha256이 바뀌고
+  # aws_lambda_function.job_trigger가 코드 내용이 같은데도 계속 업데이트 대상으로
+  # 잡혔다(2026-08-19). source_content로 문자열을 직접 넘기면 mtime에 안 걸린다.
+  source_content_filename = "index.py"
+  source_content          = file("${path.module}/lambda/job-trigger/index.py")
+  output_path             = "${path.module}/lambda/job-trigger.zip"
 }
 
 data "aws_iam_policy_document" "lambda_job_trigger_assume" {
