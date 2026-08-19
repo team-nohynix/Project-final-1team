@@ -891,7 +891,14 @@
       "options": {
         "colorMode": "background",
         "textMode": "value_and_name",
-        "orientation": "horizontal"
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -1010,7 +1017,8 @@
           "dimensions": {
             "Cluster Name": "team1-truss-msk"
           },
-          "statistic": "Average"
+          "statistic": "Average",
+          "label": "Kafka 브로커"
         },
         {
           "refId": "B",
@@ -1020,7 +1028,8 @@
           "dimensions": {
             "DBInstanceIdentifier": "team1-truss-db-instance-1"
           },
-          "statistic": "Average"
+          "statistic": "Average",
+          "label": "MySQL (RDS)"
         },
         {
           "refId": "C",
@@ -1030,7 +1039,8 @@
           "dimensions": {
             "CacheClusterId": "team1-truss-redis-001"
           },
-          "statistic": "Average"
+          "statistic": "Average",
+          "label": "Redis 캐시"
         }
       ]
     }
