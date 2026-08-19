@@ -200,6 +200,15 @@ resource "aws_instance" "monitoring_v2" {
     volume_type = "gp3"
   }
 
+  # data.aws_ami.al2023가 most_recent=true라, AWS가 새 AL2023 AMI를 낼 때마다
+  # ami 값이 바뀌어서 plan/apply가 이 살아있는 인스턴스를 강제로 replace하려 든다
+  # (2026-08-19, CI apply 승인 직전에 발견) — user_data로 재현 가능하니 AMI는
+  # 최초 생성 시점 값으로 고정하고, 나중에 의도적으로 새 AMI를 쓰고 싶으면
+  # 이 lifecycle 블록을 지우고 명시적으로 재생성한다.
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = {
     Team = "team1"
     Name = "team1-monitoring"
