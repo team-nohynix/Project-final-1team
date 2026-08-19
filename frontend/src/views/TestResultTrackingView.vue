@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { ref, onBeforeUnmount } from 'vue'
+import { ref, onBeforeUnmount, onMounted } from 'vue'
 
 // input
 const traceId = ref('')
 
-// lightweight placeholders for other UI blocks (keeps page stable)
-const experiment = ref<any>({ id: '--', name: '', rate: '--', duration: '--', markets: '--', status: '상태 확인 전' })
-const summary = ref<any>({ total: null, accepted: null, rejected: null, errors: null })
-const nfrs = ref<any[]>([])
-const faults = ref<any[]>([])
+// run / summary state (replaces earlier placeholders)
+const runInfo = ref<any | null>(null)
+const runLoading = ref(false)
+const summary = ref<any>({ accepted: null, filled: null, unfilled: null })
+
+// constants and labels
+const OWNER_LABEL: Record<string, string> = {
+  trader: '페이퍼 트레이딩',
+  replayengine: '주문 재생',
+}
 
 // UI states: 'idle' | 'loading' | 'success' | 'error'
 const uiState = ref<'idle' | 'loading' | 'success' | 'error'>('idle')
@@ -16,6 +21,9 @@ const searchMessage = ref('')
 
 // response holder
 const traceData = ref<any | null>(null)
+
+// polling handle for last-run
+let pollInterval: number | null = null
 
 // Abort and latest-response guard
 let currentController: AbortController | null = null
@@ -137,7 +145,98 @@ onBeforeUnmount(() => {
     try { currentController.abort() } catch (_) {}
     currentController = null
   }
+  if (pollInterval) {
+    try { clearInterval(pollInterval) } catch (_) {}
+    pollInterval = null
+  }
 })
+
+onMounted(() => {
+  // fetch most recent run once on mount
+  fetchLastRun()
+})
+
+function prettyDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '--'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  const parts = []
+  if (h) parts.push(`${h}h`)
+  if (m) parts.push(`${m}m`)
+  parts.push(`${s}s`)
+  return parts.join(' ')
+}
+
+async function fetchLastRun() {
+  runLoading.value = true
+  try {
+    const res = await fetch('/order-api/v1/sessions/last-run')
+    if (res.status === 404) {
+      runInfo.value = null
+      // stop polling if any
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+      return
+    }
+    if (!res.ok) {
+      runInfo.value = null
+      return
+    }
+    const data = await res.json()
+    runInfo.value = data
+
+    // if in progress, start polling every 3s
+    if (data && data.status === 'IN_PROGRESS') {
+      if (!pollInterval) {
+        pollInterval = window.setInterval(async () => {
+          try {
+            const r = await fetch('/order-api/v1/sessions/last-run')
+            if (!r.ok) return
+            const d = await r.json()
+            runInfo.value = d
+            if (d.status !== 'IN_PROGRESS') {
+              if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+              // once completed, fetch summary for final numbers
+              fetchSummary()
+            }
+          } catch (_) {}
+        }, 3000)
+      }
+    } else {
+      // completed/failed: fetch summary
+      fetchSummary()
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+    }
+  } catch (e) {
+    runInfo.value = null
+  } finally {
+    runLoading.value = false
+  }
+}
+
+async function fetchSummary() {
+  // require runInfo
+  if (!runInfo.value) return
+  const owner = runInfo.value.owner
+  const mode = owner === 'trader' ? 'PAPER_TRADING' : owner === 'replayengine' ? 'REPLAY' : ''
+  if (!mode) return
+
+  const params = new URLSearchParams()
+  params.append('mode', mode)
+  if (runInfo.value.startedAt) params.append('from', runInfo.value.startedAt)
+  if (runInfo.value.endedAt) params.append('to', runInfo.value.endedAt)
+  try {
+    const res = await fetch(`/recorder-api/v1/orders/summary?${params.toString()}`)
+    if (!res.ok) {
+      summary.value = { accepted: null, filled: null, unfilled: null }
+      return
+    }
+    const data = await res.json()
+    summary.value = data
+  } catch (e) {
+    summary.value = { accepted: null, filled: null, unfilled: null }
+  }
+}
 </script>
 
 <template>
@@ -150,71 +249,85 @@ onBeforeUnmount(() => {
 
     <div class="experiment-card">
       <div class="exp-left">
-        <div class="exp-id">Experiment #{{ experiment?.id ?? '--' }}</div>
-        <div class="exp-desc">{{ experiment?.name ?? '실험 정보 없음' }} · {{ experiment?.rate ?? '--' }} · {{ experiment?.duration ?? '--' }} · {{ experiment?.markets ?? '--' }} markets</div>
+        <div class="exp-id">최근 실행</div>
+        <div class="exp-desc">
+          <template v-if="runInfo">
+            {{ OWNER_LABEL[runInfo.owner] || runInfo.owner }} · {{ runInfo.status === 'IN_PROGRESS' ? '진행중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status }}
+            <div style="margin-top:6px; color:#9fb0c2; font-size:13px">
+              시작: {{ toKST(runInfo.startedAt) }}
+              <span v-if="runInfo.endedAt"> · 종료: {{ toKST(runInfo.endedAt) }}</span>
+              <span style="margin-left:8px">소요: {{ runInfo && runInfo.startedAt ? prettyDuration(((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000) : '--' }}</span>
+            </div>
+          </template>
+          <template v-else>
+            실행 이력 없음
+          </template>
+        </div>
       </div>
-      <div class="exp-right"><div class="badge pass">{{ experiment?.status ?? '상태 확인 전' }}</div></div>
+      <div class="exp-right">
+        <div v-if="runInfo" :class="['badge', runInfo.status === 'IN_PROGRESS' ? 'running' : runInfo.status === 'COMPLETED' ? 'pass' : 'failed']" style="padding:8px 14px; font-weight:700; border-radius:18px">
+          {{ runInfo.status === 'IN_PROGRESS' ? '진행중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status }}
+        </div>
+        <div v-else class="badge pass">-</div>
+      </div>
     </div>
 
     <div class="summary-grid">
       <div class="summary-card">
         <span class="dot" style="background:#3478f6"></span>
-        <div class="title">전체 입력 주문</div>
-        <div class="value">{{ summary.total != null ? summary.total.toLocaleString() : '--' }}</div>
+        <div class="title">접수 (Accepted)</div>
+        <div class="value">{{ summary.accepted != null ? Number(summary.accepted).toLocaleString() : '--' }}</div>
       </div>
       <div class="summary-card">
         <span class="dot" style="background:#2ed39a"></span>
-        <div class="title">접수 주문</div>
-        <div class="value">{{ summary.accepted != null ? summary.accepted.toLocaleString() : '--' }}</div>
+        <div class="title">체결 (Filled)</div>
+        <div class="value">{{ summary.filled != null ? Number(summary.filled).toLocaleString() : '--' }}</div>
+        <div style="margin-top:8px; color:#9fb0c2; font-size:13px">체결률: <strong v-if="summary.accepted">{{ summary.accepted ? ((summary.filled || 0) / summary.accepted * 100).toFixed(2) : '0.00' }}%</strong><span v-else>--</span></div>
+        <div style="margin-top:10px">
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" :style="{ width: summary.accepted ? Math.min(100, ((summary.filled||0) / (summary.accepted||1) * 100)) + '%' : '0%' }"></div>
+          </div>
+        </div>
       </div>
       <div class="summary-card">
         <span class="dot" style="background:#ff9f43"></span>
-        <div class="title">과부하 거절(429)</div>
-        <div class="value">{{ summary.rejected != null ? summary.rejected.toLocaleString() : '--' }}</div>
-      </div>
-      <div class="summary-card">
-        <span class="dot" style="background:#ff4b4b"></span>
-        <div class="title">데이터 오류</div>
-        <div class="value">{{ summary.errors != null ? summary.errors : '--' }}</div>
+        <div class="title">미체결 (Unfilled)</div>
+        <div class="value">{{ summary.unfilled != null ? Number(summary.unfilled).toLocaleString() : '--' }}</div>
+        <div style="margin-top:10px">
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" :style="{ width: summary.accepted ? Math.min(100, ((summary.unfilled||0) / (summary.accepted||1) * 100)) + '%' : '0%' , background: '#ff9f43' }"></div>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="mid-cards">
       <div class="left">
-        <h4 class="card-title">비기능 요구사항 검증</h4>
-        <table class="nfr-table">
-          <thead>
-            <tr>
-              <th>항목</th>
-              <th>측정값</th>
-              <th>결과</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="nfrs.length === 0">
-              <td colspan="3" class="nfr-val">데이터 없음</td>
-            </tr>
-            <tr v-for="(n,i) in nfrs" :key="i">
-              <td class="nfr-name">{{ n.name }}</td>
-              <td class="nfr-val">{{ n.value }}</td>
-              <td class="nfr-res"><span class="badge pass">통과</span></td>
-            </tr>
-          </tbody>
-        </table>
+        <h4 class="card-title">목표 대비 처리 성능</h4>
+        <div style="display:flex; flex-direction:column; gap:12px">
+          <div>
+            <div style="color:#9fb0c2; font-size:13px">평균 처리량 (평균 TPS)</div>
+            <div style="font-weight:800; font-size:20px; margin-top:6px">{{ summary.accepted != null && runInfo && runInfo.startedAt ? ( ((summary.accepted||0) / Math.max(1, ((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000))).toFixed(2) : '--' }} req/s</div>
+            <div class="progress-bar-track" style="margin-top:8px">
+              <div class="progress-bar-fill" :style="{ width: summary.accepted && runInfo && runInfo.startedAt ? Math.min(100, ((summary.accepted||0) / Math.max(1, ((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000)) / 10000 * 100) + '%' : '0%' }"></div>
+            </div>
+            <div style="color:#9fb0c2; margin-top:6px">목표: 10,000건/초</div>
+          </div>
+
+          <div>
+            <div style="color:#9fb0c2; font-size:13px">체결률</div>
+            <div style="font-weight:800; font-size:20px; margin-top:6px">{{ summary.accepted ? ((summary.filled||0) / (summary.accepted||1) * 100).toFixed(2) + '%' : '--' }}</div>
+            <div class="progress-bar-track" style="margin-top:8px">
+              <div class="progress-bar-fill" :style="{ width: summary.accepted ? Math.min(100, ((summary.filled||0) / (summary.accepted||1) * 100) / 90 * 100) + '%' : '0%' }"></div>
+            </div>
+            <div style="color:#9fb0c2; margin-top:6px">목표: 90% <!-- 임시 목표치, 팀이 확정 전까지 주석으로 남김 --></div>
+          </div>
+        </div>
       </div>
 
       <div class="right">
-        <h4 class="card-title">장애 주입 결과</h4>
-        <div class="fault-list">
-          <div v-if="faults.length === 0" class="fault-row">데이터 없음</div>
-          <div v-else>
-            <div v-for="(f,i) in faults" :key="i" class="fault-row">
-              <div class="f-name">{{ f.name }}</div>
-              <div class="f-time">{{ f.time }}</div>
-              <span class="badge recovered">{{ f.result }}</span>
-            </div>
-          </div>
-        </div>
+        <h4 class="card-title">요약</h4>
+        <div style="color:#9fb0c2">실측값과 목표값을 비교합니다. 실행 정보가 없거나 집계가 이루어지지 않으면 "데이터 없음"으로 표시됩니다.</div>
       </div>
     </div>
 
@@ -236,6 +349,29 @@ onBeforeUnmount(() => {
         <div v-else-if="uiState === 'success'">
           <div v-if="!traceData" class="center-msg">데이터 없음</div>
           <div v-else class="order-detail panel">
+            <!-- 3-step timeline: Submitted -> Filled -> Canceled -->
+            <div class="timeline">
+              <div class="tl-step">
+                <div class="circle" :style="{ background: '#3478f6' }">1</div>
+                <div class="tl-name">접수</div>
+                <div class="tl-time">{{ toKST(traceData.submittedAt) }}</div>
+              </div>
+
+              <div class="tl-step">
+                <div class="circle" :style="{ background: (traceData.executions && traceData.executions.length ? '#2ed39a' : '#2c3a4a') }">2</div>
+                <div class="tl-name">체결</div>
+                <div class="tl-time">
+                  <template v-if="traceData.executions && traceData.executions.length">{{ toKST(traceData.executions[traceData.executions.length - 1].executedAt) }}</template>
+                  <template v-else>해당 없음</template>
+                </div>
+              </div>
+
+              <div class="tl-step">
+                <div class="circle" :style="{ background: (traceData.canceledAt ? '#ff6b6b' : '#2c3a4a') }">3</div>
+                <div class="tl-name">취소</div>
+                <div class="tl-time">{{ traceData.canceledAt ? toKST(traceData.canceledAt) : '해당 없음' }}</div>
+              </div>
+            </div>
             <div class="order-row"><strong>Order ID:</strong> {{ traceData.orderId }}</div>
             <div class="order-row"><strong>Market:</strong> {{ traceData.market || '--' }}</div>
             <div class="order-row"><strong>Side:</strong> {{ STATUS_LABEL[traceData.side] ? traceData.side : traceData.side }}</div>
@@ -272,10 +408,12 @@ onBeforeUnmount(() => {
   max-width: none;
   min-width: 0;
   box-sizing: border-box;
+  /* section gap used between top-level sections */
+  --section-gap: 16px;
 }
 
 .trt-page > * + * {
-  margin-top: 16px;
+  margin-top: var(--section-gap);
 }
 
 .page-header h2 {
@@ -309,23 +447,27 @@ onBeforeUnmount(() => {
 .exp-desc { color: #9fb0c2; margin-top: 6px; font-size: 13px }
 .badge.pass { background: #072a1a; color: #2ed39a; padding: 6px 12px; border-radius: 20px; font-weight: 700; font-size: 12px }
 .badge.recovered { background: #072a1a; color: #2ed39a; padding: 4px 12px; border-radius: 20px; font-weight: 700; font-size: 12px }
+.badge.running { background: #2b2a10; color: #ffd166 }
+.badge.failed { background: #2b0f12; color: #ff6b6b }
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  /* three summary cards side-by-side */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
 }
 .summary-card {
   position: relative;
   background: #0d1b2a;
   border: 1px solid #172a3e;
   border-radius: 12px;
-  padding: 18px;
-  min-height: 90px;
+  padding: 18px 20px;
+  min-height: 140px; /* unify card height baseline */
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  /* distribute content so cards with extra controls keep balanced layout */
+  justify-content: space-between;
 }
 .summary-card .dot {
   position: absolute;
@@ -342,6 +484,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 65% 35%;
   gap: 16px;
+  /* stretch children to same height so left/right visually match */
   align-items: stretch;
 }
 .mid-cards .left,
@@ -354,6 +497,9 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  /* distribute content evenly so both boxes look consistent */
+  justify-content: space-between;
+  line-height: 1.45;
 }
 .card-title { margin: 0 0 12px; font-weight: 700; font-size: 15px }
 
@@ -398,6 +544,14 @@ onBeforeUnmount(() => {
   border-radius: 12px;
 }
 
+/* Make vertical spacing between main sections consistent */
+.experiment-card,
+.summary-grid,
+.mid-cards,
+.trace-card {
+  /* already have internal padding; ensure consistent outer spacing handled by --section-gap */
+}
+
 .trace-controls { display: flex; gap: 10px; align-items: center }
 .trace-input {
   flex: 1;
@@ -433,7 +587,7 @@ onBeforeUnmount(() => {
 
 .timeline {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 16px;
 }
 .tl-step {
