@@ -297,11 +297,15 @@ jobs:
       - name: network stack plan
         working-directory: infra/network
         run: |
+          set -o pipefail
           terraform init -input=false
           terraform plan -no-color | tee "$GITHUB_STEP_SUMMARY"
       - name: root stack plan
         working-directory: infra
+        env:
+          TF_VAR_monitoring_grafana_admin_password: ${{ secrets.MONITORING_GRAFANA_ADMIN_PASSWORD }}
         run: |
+          set -o pipefail
           terraform init -input=false
           terraform plan -no-color | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -324,6 +328,8 @@ jobs:
           terraform apply -auto-approve -input=false
       - name: root stack apply
         working-directory: infra
+        env:
+          TF_VAR_monitoring_grafana_admin_password: ${{ secrets.MONITORING_GRAFANA_ADMIN_PASSWORD }}
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false
