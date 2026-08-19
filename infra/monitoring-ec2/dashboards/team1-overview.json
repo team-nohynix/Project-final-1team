@@ -498,7 +498,12 @@
           "expr": "orders_total{status=\"canceled\"}",
           "legendFormat": "canceled"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "취소 0건 (정상)"
+        }
+      }
     },
     {
       "id": 18,
@@ -897,7 +902,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "noValue": "데이터 없음"
         },
         "overrides": [
           {
@@ -924,6 +930,10 @@
               {
                 "id": "displayName",
                 "value": "Kafka 브로커 (SumOffsetLag)"
+              },
+              {
+                "id": "noValue",
+                "value": "랙 없음 (정상 — MSK 유휴 시 미발행)"
               }
             ]
           },
