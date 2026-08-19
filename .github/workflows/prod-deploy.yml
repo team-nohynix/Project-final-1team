@@ -313,7 +313,11 @@ jobs:
     needs: [detect-changes, terraform-plan]
     if: needs.detect-changes.outputs.infra == 'true'
     runs-on: ubuntu-latest
-    environment: infra-apply
+    # 2026-08-19: 원래 environment: infra-apply로 GitHub required reviewers 승인
+    # 게이트를 걸어뒀는데(사람 승인 없이는 apply 못 하게), 사용자 요청으로 자동
+    # 실행하도록 뗐다 — 이 계정이 여러 팀 공유이고 이 role이 iam:*/ec2:*/eks:*
+    # 등 광범위한 쓰기 권한을 갖고 있어서, plan을 사람이 안 보고 그대로 적용되는
+    # 리스크를 감수하는 선택임을 알고 진행.
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
