@@ -61,23 +61,57 @@ func (s *s3Storage) LoadStream(market string, start, end time.Time) (StreamFile,
 	return st, err
 }
 
+// headExists는 key가 S3에 이미 있는지 HeadObject로 확인합니다 — putIfAbsent(저장
+// 직전 확인)와 Exists(수집 시작 전 확인) 둘 다 이걸 씁니다.
+func (s *s3Storage) headExists(key string) (bool, error) {
+	_, err := s.client.HeadObject(context.Background(), &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err == nil {
+		return true, nil
+	}
+	var notFound *types.NotFound
+	if errors.As(err, &notFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("S3 HeadObject 확인 실패: %w", err)
+}
+
+func (s *s3Storage) Exists(market string, start, end time.Time) (ExistsResult, error) {
+	var res ExistsResult
+
+	batchKey := s.objectKey(market, start, end, "batch")
+	res.BatchPath = s.uri(batchKey)
+	batchExists, err := s.headExists(batchKey)
+	if err != nil {
+		return ExistsResult{}, err
+	}
+	res.BatchExists = batchExists
+
+	streamKey := s.objectKey(market, start, end, "stream")
+	res.StreamPath = s.uri(streamKey)
+	streamExists, err := s.headExists(streamKey)
+	if err != nil {
+		return ExistsResult{}, err
+	}
+	res.StreamExists = streamExists
+
+	return res, nil
+}
+
 // putIfAbsent는 CLAUDE.md의 멱등성 설계대로, 같은 키의 파일이 이미 있으면
 // 재생성/재업로드 없이 기존 파일을 그대로 서빙합니다.
 func (s *s3Storage) putIfAbsent(v any, market string, start, end time.Time, kind string) (string, error) {
 	ctx := context.Background()
 	key := s.objectKey(market, start, end, kind)
 
-	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err == nil {
-		return s.uri(key), nil
+	exists, err := s.headExists(key)
+	if err != nil {
+		return "", err
 	}
-
-	var notFound *types.NotFound
-	if !errors.As(err, &notFound) {
-		return "", fmt.Errorf("S3 HeadObject 확인 실패: %w", err)
+	if exists {
+		return s.uri(key), nil
 	}
 
 	body, err := json.MarshalIndent(v, "", "  ")

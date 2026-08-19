@@ -30,7 +30,6 @@ const selected = ref('KRW-BTC')
 
 // orderbook data will be fetched from API; initial mock storage removed
 
-// Recent trades API not implemented yet; show placeholder in UI
 
 // Reactive state for fetched orderbook
 const orderbook = ref({ bids: [], asks: [], market: '', timestamp: '' })
@@ -140,7 +139,7 @@ watch(selected, (nv) => {
   fetchOrderbookFor(nv, { background: false, isInit: true })
 })
 
-// Right panel is display-only for recent trades in demo mode
+ 
 
 // Helpers for formatted displays and parsing
 const formatShort = (n) => {
@@ -273,18 +272,7 @@ const apiBadgeClass = computed(() => {
         </div>
       </main>
 
-      <aside class="col col-trades">
-        <div class="right-card">
-          <div class="right-card-header">
-            <h4>최근 체결</h4>
-          </div>
-
-          <div class="trades-list">
-            <div class="empty-trades">데이터 없음</div>
-          </div>
-          
-        </div>
-      </aside>
+      <!-- Recent trades panel removed -->
     </section>
   </div>
 </template>
@@ -400,9 +388,7 @@ const apiBadgeClass = computed(() => {
   flex: 1;
   min-width: 640px;
 }
-.col-trades {
-  width: 300px;
-}
+/* .col-trades removed */
 
 .markets-list {
   display: flex;
@@ -530,22 +516,6 @@ const apiBadgeClass = computed(() => {
   margin-bottom: 8px;
 }
 
-.trade-item.two-line {
-  display: block;
-  padding: 8px 6px;
-  border-bottom: 1px solid rgba(23, 49, 65, 0.25);
-}
-.t-first-line {
-  display: flex;
-  justify-content: flex-start;
-  align-items: center;
-}
-.t-second-line {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 6px;
-}
 .ai-note.yellow {
   background: rgba(255, 243, 205, 0.06);
   color: #ffd86b;
@@ -553,16 +523,7 @@ const apiBadgeClass = computed(() => {
   border-radius: 8px;
 }
 
-.trades-list {
-  background: #071a24;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid #16323b;
-  /* expand to fill right-card remaining height and scroll internally */
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
+/* trades-list removed with recent trades panel */
 
 .center-msg {
   display: flex;
@@ -582,70 +543,13 @@ const apiBadgeClass = computed(() => {
   border: 1px solid #18464d;
   cursor: pointer;
 }
-.empty-trades {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: #9fb0c1;
-}
-.trade-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 6px;
-  border-bottom: 1px solid rgba(23, 49, 65, 0.25);
-}
-.t-left {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-.t-price.buy {
-  color: #2ed39a;
-}
-.t-price.sell {
-  color: #ff6b6b;
-}
-.t-qty {
-  color: #9fb0c1;
-}
-.t-time {
-  color: #6f98a6;
-  font-size: 12px;
-}
 
-.right-card {
-  background: #071a24;
-  border: 1px solid #16323b;
-  border-radius: 12px;
-  padding: 12px;
-  /* layout as column so header stays on top and trades fill remaining space */
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-}
-.right-card-header {
-  margin-bottom: 8px;
-}
 .divider-hr {
   height: 1px;
   background: rgba(23, 49, 65, 0.25);
   margin: 12px 0;
 }
-.ai-order {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.trades-note {
-  margin-top: 8px;
-  padding: 8px;
-  background: #071a24;
-  color: #9fb0c1;
-  border-radius: 8px;
-  border: 1px solid #16323b;
-}
+/* recent trades styles removed */
 
 @media (max-width: 1100px) {
   .content {
