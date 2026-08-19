@@ -29,10 +29,16 @@ data "aws_iam_policy_document" "github_actions_terraform_plan_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # 2026-08-18: GitHub sub 클레임 포맷 변경으로 owner/repo 둘 다 불변 숫자 ID가 붙음
+    # (cicd.tf의 github_actions_assume 조건 주석 참고) — 이 두 role도 같은 이유로
+    # 전체 CI/CD가 실패하고 있었다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod"]
+      values = [
+        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
+        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
+      ]
     }
   }
 }
@@ -66,10 +72,16 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
+    # 2026-08-18: GitHub sub 클레임 포맷 변경으로 owner/repo 둘 다 불변 숫자 ID가 붙음
+    # (cicd.tf의 github_actions_assume 조건 주석 참고) — 이 두 role도 같은 이유로
+    # 전체 CI/CD가 실패하고 있었다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod"]
+      values = [
+        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
+        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
+      ]
     }
     # 이 조건이 실제 게이트 — GitHub Environment "infra-apply"에 필수 리뷰어를
     # 설정해두면(저장소 Settings에서 수동 설정), 그 environment를 쓰는 job은
