@@ -79,6 +79,12 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
+          # orderapi와 같은 이유(2026-08-20) — ALB가 종료 중인 파드를 타겟 그룹에서 빼는
+          # 데 걸리는 시간만큼 SIGTERM 처리를 늦춘다.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 8"]
 ---
 # 조회 API(GET /v1/trace/{orderId}, GET /v1/matching/engines, :8082 고정) 노출용.
 # 2026-08-12까지 Service가 아예 없어서 클러스터 내부에서도 호출할 방법이 없었음
