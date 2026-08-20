@@ -48,6 +48,8 @@ kubectl run mysql-client --rm -i --restart=Never --namespace=backend --image=mys
 
 `recorder/schema.sql`이 이미 고쳐져 있고(위 스키마 적용 방식 그대로 재실행하면 됨), 위에서 확인했듯 이제 재실행해도 안전하다. **실 RDS에 이 파일을 다시 적용하는 것만 남았다** — 위 "실행" 섹션의 3번 명령을 그대로 다시 실행하면 된다(같은 `<recorder DB 이름>`으로). 새로 생기는 테이블/기존 인덱스는 전부 건드리지 않고 `idx_trade_order_mode_submitted`만 새로 추가된다.
 
+(참고: 같은 날 추가된 `idx_trade_order_status`는 Jaden Yang이 이미 실 RDS에 직접 무중단 적용을 끝내둔 상태라, 이 재적용에서는 `create_index_if_absent`가 "이미 있음"으로 보고 건너뛴다 — 새로 생기는 건 `idx_trade_order_mode_submitted` 하나뿐이라는 뜻.)
+
 ```bash
 # 1. RDS 자격증명 가져오기
 SECRET=$(aws secretsmanager get-secret-value \

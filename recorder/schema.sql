@@ -81,6 +81,15 @@ CALL create_index_if_absent('trade_order', 'idx_trade_order_source_order', 'sour
 -- status IN (...) 조건까지 이 인덱스 하나로 커버하기 위함 — OrderSummary는
 -- status를 집계(SUM CASE)에만 쓰고 조건절엔 안 쓰지만, 인덱스에 있어도 손해가 없다.
 CALL create_index_if_absent('trade_order', 'idx_trade_order_mode_submitted', 'mode, submitted_at, status');
+-- 2026-08-20 (Jaden Yang): recorder_pending_orders 게이지가 주기적으로 돌리는
+-- `WHERE status IN (...)`가 market_code 없이 status만 걸러서
+-- idx_trade_order_market_status(선행 컬럼 market_code)를 못 쓰고 전체
+-- 인덱스(200만+ 행)를 훑고 있었다 — trade_order가 그날 부하 테스트로
+-- 200만 행까지 불어나면서 MySQL CPU 포화의 한 원인이 됨(EXPLAIN으로 확인,
+-- rows 1,973,617 -> 64,783로 감소). 라이브 DB에 먼저 적용(ALGORITHM=INPLACE
+-- LOCK=NONE, 46초, 무중단) 후 스키마에 반영. 원래 커밋(d69e4e0, dev 브랜치)이
+-- 같은 날 진행된 schema.sql 재작성 작업과 머지되며 충돌로 유실됐던 것을 복구.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_status', 'status');
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
