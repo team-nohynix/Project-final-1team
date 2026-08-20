@@ -1,0 +1,41 @@
+# orderapi/matching-engine/recorder는 전부 레플리카 1개(matching-engine/recorder는
+# KEDA가 1~5로 자동 스케일하지만 평시엔 바닥값 1)라, PDB 없이는 Karpenter의 노드
+# 통합(consolidation)이 아무 제약 없이 그 하나뿐인 파드를 evict할 수 있었다 —
+# 2026-08-20, orderapi가 "Evicted pod: Underutilized"로 축출된 뒤 재스케줄(이미지
+# pull+시작+readiness 통과)되는 30~40초 동안 ALB에 건강한 타겟이 0개가 되어
+# GET /v1/sessions/last-run이 503을 반환, 프론트에 "세션 조회 실패"로 노출됐다.
+# minAvailable: 1은 지금처럼 레플리카가 1개일 때 그 유일한 파드를 자발적 축출
+# (Karpenter consolidation, kubectl drain 등) 대상에서 제외시킨다 — 노드 하드웨어
+# 장애 같은 불가피한 경우는 막지 못한다(PDB는 voluntary disruption에만 적용).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orderapi
+  namespace: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: orderapi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: matching-engine
+  namespace: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: matching-engine
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: recorder
+  namespace: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: recorder
