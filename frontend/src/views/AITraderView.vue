@@ -7,8 +7,8 @@ const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
 const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 // 재생 배속 옵션 (프론트에서 선택만 제공)
-const speed = ref(100)
-const speedOptions = [1, 10, 50, 100]
+const speed = ref(60)
+const speedOptions = [1, 10, 50, 60, 100]
 
 // 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
 const formatDateYYYYMMDD = (date: Date) => {
@@ -798,6 +798,13 @@ const cleanupUnresolvedOrders = async () => {
           <p class="date-hint">
             선택한 날짜의 KST 00:00부터 다음 날 KST 00:00까지 20개 마켓의 시세를 수집합니다.
           </p>
+        </div>
+
+        <div class="form-field">
+          <label>재생 배속 (속도)</label>
+          <select v-model.number="speed">
+            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
+          </select>
         </div>
 
         <div class="collection-section">
