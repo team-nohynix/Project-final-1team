@@ -60,13 +60,22 @@ spec:
           # 2026-08-20: 트레이더 Job이 짧은 시간에 대량 주문을 동시 제출할 때(실측: 같은 초에
           # 50건 이상) 512Mi를 넘겨 OOMKilled됨(exit 137) — 프론트 "페이퍼 트레이딩 실행 실패"의
           # 실제 원인. matching-engine과 같은 이유로 1Gi로 상향.
+          #
+          # 2026-08-20(밤, 100배속 자동 반복검증 중): 1Gi로도 다시 OOMKilled(23분 실행,
+          # exit 137) — 이번엔 순간 동시 제출량이 아니라 orderapi가 접수된 주문을 전부
+          # order.Store(취소 처리용, orderId->*Order 맵)와 idempotency.Store에 세션이
+          # 끝날 때까지 무기한 들고 있는 구조라서, 100배속 세션 하나에서 주문이 수만 건
+          # 누적되면 그 자체로 메모리를 다 씀 — 근본적으로는 이 두 인메모리 저장소가
+          # 무한정 커지는 게 진짜 원인이고(팀 논의 필요, 처리 완료된 주문을 주기적으로
+          # 비우는 방식으로 고쳐야 함), 오늘 밤은 우선 한도를 넉넉히 올려 이 세션
+          # 길이/물량에서는 안 터지게 함.
           resources:
             requests:
               cpu: 200m
-              memory: 512Mi
+              memory: 1Gi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 3Gi
           # readinessProbe가 없으면 Kafka/Redis 연결을 맺기 전(main.go의 http.ListenAndServe
           # 이전 단계)에도 파드가 즉시 Ready로 잡혀서, ALB가 그 틈에 트래픽을 보내면 502가
           # 난다(2026-08-19, 팀원이 재배포 직후 GET /v1/sessions/last-run 502 리포트 —
