@@ -50,6 +50,13 @@ spec:
             # 폴백 → trader는 mkdir 권한 에러로 기록 유실, replay-preview는 빈 결과).
             - name: ORDER_RECORDS_BUCKET
               value: "team1-truss-order-records"
+            # 2026-08-20: orderapi/sessioncleanup.go(2026-08-19 커밋, 세션 종료 시
+            # 미종결 주문 자동 취소)가 RECORDER_URL이 없으면 조용히 스킵하는데,
+            # 이 값이 여태 빠져 있어서 그 기능이 배포된 뒤로도 계속 no-op이었다 —
+            # 페이퍼 트레이딩을 반복할 때마다 처리 대기 주문이 계속 쌓이던 진짜
+            # 원인. recorder Service(같은 backend 네임스페이스, 8082) 가리키게 채움.
+            - name: RECORDER_URL
+              value: "http://recorder:8082"
           # 2026-08-20: 트레이더 Job이 짧은 시간에 대량 주문을 동시 제출할 때(실측: 같은 초에
           # 50건 이상) 512Mi를 넘겨 OOMKilled됨(exit 137) — 프론트 "페이퍼 트레이딩 실행 실패"의
           # 실제 원인. matching-engine과 같은 이유로 1Gi로 상향.
