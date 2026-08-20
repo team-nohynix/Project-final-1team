@@ -13,6 +13,33 @@
 -- 명시적으로 다루므로(orderapi의 nowISO() 등), MySQL TIMESTAMP의 세션 타임존 기반
 -- 자동 변환이나 2038년 한계가 오히려 불필요한 변수라 DATETIME이 더 안전하다.
 
+-- 2026-08-20: create_index_if_absent 헬퍼 — 일반 CREATE INDEX는 MySQL에 IF NOT
+-- EXISTS 문법이 없어서(PostgreSQL과 다름), 이미 적용된 DB에 이 파일을 재실행하면
+-- "이미 있음" 에러로 멈춘다. trade_order.mode+submitted_at 인덱스를 추가하면서
+-- (아래 참고) 재실행 테스트를 해보고서야 기존 인덱스들도 재실행에 안전하지
+-- 않았다는 걸 발견해서(docs/recorder-schema-bootstrap.md의 "재실행해도 안전함"
+-- 설명이 실제로는 안 맞았던 부분), 이 파일의 모든 CREATE INDEX를 이 헬퍼를 거치는
+-- 방식으로 통일했다. DELIMITER 전환이 필요한 이유: 이 프로시저 본문 안에 세미콜론이
+-- 여러 개 있는데, mysql CLI는 기본적으로 세미콜론마다 문장을 끊어 보내므로
+-- DELIMITER를 바꿔두지 않으면 CREATE PROCEDURE 자체가 중간에 잘려서 문법 에러가
+-- 난다(실제로 겪고 고침). 이 스크립트는 항상 mysql CLI로만 적용하므로(위 안내,
+-- Go 마이그레이션 도구를 거치지 않음) DELIMITER를 써도 안전하다.
+DROP PROCEDURE IF EXISTS create_index_if_absent;
+DELIMITER //
+CREATE PROCEDURE create_index_if_absent(IN tbl VARCHAR(64), IN idx VARCHAR(64), IN idx_def VARCHAR(512))
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE table_schema = DATABASE() AND table_name = tbl AND index_name = idx
+    ) THEN
+        SET @sql = CONCAT('CREATE INDEX ', idx, ' ON ', tbl, ' (', idx_def, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END //
+DELIMITER ;
+
 CREATE TABLE IF NOT EXISTS market (
     market_code   VARCHAR(20) PRIMARY KEY,
     korean_name   VARCHAR(50) NOT NULL,
@@ -43,8 +70,17 @@ CREATE TABLE IF NOT EXISTS trade_order (
     source_order_id     VARCHAR(64) NULL,
     CONSTRAINT fk_trade_order_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
-CREATE INDEX idx_trade_order_market_status ON trade_order (market_code, status);
-CREATE INDEX idx_trade_order_source_order ON trade_order (source_order_id);
+CALL create_index_if_absent('trade_order', 'idx_trade_order_market_status', 'market_code, status');
+CALL create_index_if_absent('trade_order', 'idx_trade_order_source_order', 'source_order_id');
+-- 2026-08-20: query.OrderSummary/UnresolvedOrders(mode+submitted_at 구간 조회 —
+-- CLAUDE.md의 "Session-end unresolved-order cleanup" 참고)가 이 인덱스 없이
+-- trade_order 전체를 풀스캔하고 있었다. 세션 정리가 세션 종료마다 자동으로
+-- 도는 기능이 되면서(2026-08-20 RECORDER_URL 배선 완료) 이 풀스캔이 반복
+-- 트리거돼 RDS 인스턴스 CPU가 99%에 붙는 실제 장애로 이어졌다(CloudWatch
+-- CPUUtilization으로 확인). status도 같이 넣은 이유는 UnresolvedOrders의
+-- status IN (...) 조건까지 이 인덱스 하나로 커버하기 위함 — OrderSummary는
+-- status를 집계(SUM CASE)에만 쓰고 조건절엔 안 쓰지만, 인덱스에 있어도 손해가 없다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_mode_submitted', 'mode, submitted_at, status');
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
@@ -69,9 +105,9 @@ CREATE TABLE IF NOT EXISTS execution (
     CONSTRAINT fk_execution_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
 -- FR-13 "최근 순으로 거래 내역을 조회" 페이지네이션용.
-CREATE INDEX idx_execution_market_executed_at ON execution (market_code, executed_at DESC);
-CREATE INDEX idx_execution_buy_order  ON execution (buy_order_id);
-CREATE INDEX idx_execution_sell_order ON execution (sell_order_id);
+CALL create_index_if_absent('execution', 'idx_execution_market_executed_at', 'market_code, executed_at DESC');
+CALL create_index_if_absent('execution', 'idx_execution_buy_order', 'buy_order_id');
+CALL create_index_if_absent('execution', 'idx_execution_sell_order', 'sell_order_id');
 
 -- FR-11 마켓 재분배 이력. matching이 assignments 토픽에 배정/반납 이벤트를
 -- 발행하고(matching/kafkaclient/assignment_producer.go), 기록기가 그걸 구독해
@@ -87,7 +123,11 @@ CREATE TABLE IF NOT EXISTS matching_engine_assignment (
     released_at         DATETIME(3) NULL,
     CONSTRAINT fk_assignment_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
-CREATE INDEX idx_assignment_market_open ON matching_engine_assignment (market_code, released_at);
+CALL create_index_if_absent('matching_engine_assignment', 'idx_assignment_market_open', 'market_code, released_at');
+
+-- 인덱스 생성이 전부 끝났으니 헬퍼 프로시저는 정리합니다 — schema.sql은 테이블/
+-- 인덱스/시드 데이터의 모음이라는 의미를 유지하려는 것뿐, 남겨둬도 해는 없습니다.
+DROP PROCEDURE IF EXISTS create_index_if_absent;
 
 -- 20개 마켓 마스터 데이터 시드 (backend/upbit.TargetMarkets, orderapi/validate.TargetMarkets와
 -- 같은 20개 목록 — 모듈 독립 원칙에 따라 이 파일에도 값을 그대로 적어둔다).
