@@ -63,6 +63,18 @@ data "aws_iam_policy_document" "sa_ingest_api_policy" {
     actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.job_trigger.arn]
   }
+  # GET /v1/jobs/replay-preview(orderapi/replaypreview.go)가 trader가 남긴 주문 기록을
+  # 읽는다 — sa-replay-engine과 같은 읽기 전용 권한(2026-08-20, startJobHandler가
+  # orderBucket 기본값을 채우도록 고치면서 같이 발견: 이 권한이 원래 빠져 있어서
+  # ORDER_RECORDS_BUCKET을 채워도 이 엔드포인트는 AccessDenied가 났을 것).
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.order_records.arn}/*"]
+  }
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.order_records.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "sa_ingest_api" {
