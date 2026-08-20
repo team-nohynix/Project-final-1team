@@ -95,6 +95,15 @@ func main() {
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 
+	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트도 등록하지 않습니다 —
+	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
+	// 수만 건을 동기 처리할 수 있어 releaseSessionHandler보다 훨씬 넉넉한
+	// 타임아웃의 별도 클라이언트를 씁니다.
+	if cfg.RecorderURL != "" {
+		cleanupHTTPClient := &http.Client{Timeout: 5 * time.Minute}
+		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", cleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+	}
+
 	// ORDER_RECORDS_BUCKET이 비어있으면(로컬 개발 등) trader/replayengine과
 	// 같은 기본값 규칙으로 로컬 ./orders 디렉터리를 읽습니다 — config.go 참고.
 	var orderRecordsStorage orderrecords.Storage

@@ -133,6 +133,7 @@ func main() {
 	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier))
 	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
 	mux.HandleFunc("GET /v1/orders/unresolved", unresolvedOrdersHandler(querier))
+	mux.HandleFunc("GET /v1/orders/unresolved/all", allUnresolvedOrdersHandler(querier))
 
 	mux.Handle("GET /metrics", promhttp.Handler())
 	go func() {

@@ -130,6 +130,23 @@ func unresolvedOrdersHandler(q query.Querier) http.HandlerFunc {
 	}
 }
 
+// allUnresolvedOrdersHandler는 GET /v1/orders/unresolved/all을 처리합니다 —
+// 프론트의 수동 "미종결 주문 일괄 정리" 버튼이 orderapi를 거쳐 부릅니다
+// (2026-08-20). unresolvedOrdersHandler(4.9)와 달리 mode/from/to 제한이
+// 없습니다 — 이번 세션 하나가 아니라 과거 여러 세션이 누적으로 남긴 백로그
+// 전체를 대상으로 합니다.
+func allUnresolvedOrdersHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		orders, err := q.AllUnresolvedOrders(r.Context())
+		if err != nil {
+			log.Printf("전체 미종결 주문 조회 실패: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "전체 미종결 주문 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string][]query.UnresolvedOrder{"orders": orders})
+	}
+}
+
 // parseModeFromTo는 orderSummaryHandler/unresolvedOrdersHandler가 공유하는
 // 쿼리 파라미터 파싱입니다. ok=false면 이미 에러 응답을 썼으니 호출부는 그냥
 // return하면 됩니다.
