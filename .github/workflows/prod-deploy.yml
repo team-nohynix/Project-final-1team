@@ -65,6 +65,16 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # base 미지정 시 dorny/paths-filter가 (push 이벤트의 직전 커밋이 아니라)
+          # main과 prod의 merge-base를 기준으로 diff를 계산한다 — 이 저장소의 main은
+          # 한참 방치돼 있어서(2026-08-20 기준 merge-base가 그날 작업 시작 전 커밋),
+          # 그날 하루 동안 recorder/orderapi/matching 등을 한 번이라도 건드렸으면
+          # 그 뒤로는 그 파일들과 전혀 무관한 push(예: 대시보드 JSON만 수정)에도
+          # 계속 "바뀜"으로 잡혀 매번 전체 백엔드가 불필요하게 재배포됐다 — 실측:
+          # orderapi-deployment.yaml 한 파일만 바뀐 push에서도 build-push-recorder가
+          # 돌아 recorder가 재배포됨, 100배속 부하테스트 도중 랙 급증으로 이어짐.
+          # push 이벤트의 직전 커밋과 비교하도록 명시한다.
+          base: ${{ github.event.before }}
           filters: |
             frontend: ['frontend/**']
             backend: ['backend/**']
