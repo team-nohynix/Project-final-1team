@@ -2,7 +2,7 @@
   "title": "Team1 AI Trader - 실시간 메트릭",
   "uid": "team1-overview",
   "schemaVersion": 39,
-  "version": 28,
+  "version": 29,
   "refresh": "30s",
   "time": {
     "from": "now-1h",
@@ -1722,6 +1722,258 @@
               "legendFormat": "{{service}}"
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "시세 수집기 (backend / collector)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 98
+      },
+      "collapsed": false
+    },
+    {
+      "id": 501,
+      "title": "Running 파드",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 99
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", pod=~\"^backend-.*\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "id": 502,
+      "title": "재시작 누적",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 99
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "none",
+        "text": {
+          "valueSize": 30
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"collector\", pod=~\"^backend-.*\"})",
+          "legendFormat": "restarts"
+        }
+      ]
+    },
+    {
+      "id": 503,
+      "title": "CPU (core)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 103
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"collector\", container!=\"\", pod=~\"^backend-.*\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 504,
+      "title": "메모리 (working set)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 103
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"collector\", container!=\"\", pod=~\"^backend-.*\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 510,
+      "type": "row",
+      "title": "AI 트레이더 (trader, 실행 중일 때만 표시)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 109
+      },
+      "collapsed": false
+    },
+    {
+      "id": 511,
+      "title": "Running 파드",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 110
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"ai-trader\", phase=\"Running\", pod=~\"^ai-trader-.*\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "id": 512,
+      "title": "재시작 누적",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 110
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "none",
+        "text": {
+          "valueSize": 30
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"ai-trader\", pod=~\"^ai-trader-.*\"})",
+          "legendFormat": "restarts"
+        }
+      ]
+    },
+    {
+      "id": 513,
+      "title": "CPU (core)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 114
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"ai-trader\", container!=\"\", pod=~\"^ai-trader-.*\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 514,
+      "title": "메모리 (working set)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 114
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"ai-trader\", container!=\"\", pod=~\"^ai-trader-.*\"})",
+          "legendFormat": "{{pod}}"
         }
       ]
     }
