@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"orderapi/kafkaclient"
 	"orderapi/session"
 )
 
@@ -124,7 +126,11 @@ type releaseRequest struct {
 // releaseSessionHandler는 DELETE /v1/sessions/{sessionId}를 처리합니다. 이미
 // 반납됐거나 존재하지 않는 세션도 404로 명확히 알려줍니다(취소 처리와 달리, 아무
 // 상태도 안 남기므로 idempotent-no-op으로 200을 줄 이유가 없습니다).
-func releaseSessionHandler(store session.Store) http.HandlerFunc {
+//
+// producer/httpClient/recorderURL은 그룹의 마지막 멤버가 반납할 때(=이 실행
+// 전체가 끝날 때)만 도는 미종결 주문 정리(2026-08-19, sessioncleanup.go
+// 참고)에 씁니다 — recorderURL이 비어있으면 그 정리 자체를 건너뜁니다.
+func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, httpClient *http.Client, recorderURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -141,7 +147,8 @@ func releaseSessionHandler(store session.Store) http.HandlerFunc {
 			outcome.Status = session.RunStatusFailed
 		}
 
-		if err := store.Release(r.Context(), sessionID, outcome); err != nil {
+		record, finalized, err := store.Release(r.Context(), sessionID, outcome)
+		if err != nil {
 			if errors.Is(err, session.ErrNotActive) {
 				writeError(w, reqID, http.StatusNotFound, "SESSION_NOT_ACTIVE", "해당 세션은 이미 해제됐거나 존재하지 않습니다.")
 				return
@@ -153,6 +160,13 @@ func releaseSessionHandler(store session.Store) http.HandlerFunc {
 		sessionEventsCounter.WithLabelValues("released").Inc()
 		log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, outcome.Status)
 		w.WriteHeader(http.StatusNoContent)
+
+		// 클라이언트(trader/replayengine)에게는 이미 204로 응답을 마쳤습니다 —
+		// 정리는 best-effort 백그라운드 작업이라 응답을 기다리게 하지 않습니다.
+		// r.Context()는 응답이 끝나면 곧 취소되므로 별도 컨텍스트를 씁니다.
+		if finalized {
+			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, record)
+		}
 	}
 }
 

@@ -94,6 +94,21 @@ type Querier interface {
 	// 세션 가드가 트레이더/리플레이 엔진을 동시에 하나만 실행되게 막아서,
 	// [from,to) 구간에 다른 실행의 주문이 섞일 수 없기 때문입니다.
 	OrderSummary(ctx context.Context, mode string, from, to time.Time) (OrderSummary, error)
+	// UnresolvedOrders는 mode+[from,to) 구간에서 아직 안 끝난(ACCEPTED/
+	// PARTIALLY_FILLED) 주문의 ID+마켓 목록을 반환합니다 — orderapi가 세션
+	// 종료 시점에 그 세션이 남긴 미종결 주문을 취소하는 데 씁니다(2026-08-19,
+	// 부하테스트 반복으로 매칭 엔진 인메모리 오더북에 미체결 주문이 계속
+	// 쌓여 OOMKilled까지 간 사고 대응). OrderSummary와 같은 이유로 구간
+	// 지정만으로 정확합니다(세션 가드가 겹침을 막음) — 별도 세션 식별 컬럼
+	// 없이도 이 세션 소속 주문을 정확히 구분할 수 있습니다.
+	UnresolvedOrders(ctx context.Context, mode string, from, to time.Time) ([]UnresolvedOrder, error)
+}
+
+// UnresolvedOrder는 UnresolvedOrders 응답의 항목 하나입니다. Market은
+// orderapi가 PublishCancel(Kafka 파티션 키)에 필요해서 같이 줍니다.
+type UnresolvedOrder struct {
+	OrderID string `json:"orderId"`
+	Market  string `json:"market"`
 }
 
 // OrderSummary는 GET /v1/orders/summary의 응답입니다. Accepted는 그 구간에
@@ -425,4 +440,37 @@ func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to t
 		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", err)
 	}
 	return s, nil
+}
+
+// UnresolvedOrders는 mode+[from,to) 구간에서 아직 ACCEPTED/PARTIALLY_FILLED
+// 상태인 주문의 ID+마켓을 전부 반환합니다. to가 zero value면 OrderSummary와
+// 같은 이유로 지금 시각을 씁니다.
+func (q *MySQLQuerier) UnresolvedOrders(ctx context.Context, mode string, from, to time.Time) ([]UnresolvedOrder, error) {
+	if to.IsZero() {
+		to = time.Now().UTC()
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT order_id, market_code
+		FROM trade_order
+		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+			AND status IN ('ACCEPTED', 'PARTIALLY_FILLED')
+	`, mode, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("미종결 주문 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	orders := []UnresolvedOrder{}
+	for rows.Next() {
+		var o UnresolvedOrder
+		if err := rows.Scan(&o.OrderID, &o.Market); err != nil {
+			return nil, fmt.Errorf("미종결 주문 스캔 실패: %w", err)
+		}
+		orders = append(orders, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("미종결 주문 조회 실패: %w", err)
+	}
+	return orders, nil
 }

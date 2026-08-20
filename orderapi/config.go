@@ -19,6 +19,7 @@ type Config struct {
 	RedisTLSEnabled    bool
 	JobTriggerQueueURL string
 	OrderRecordsBucket string
+	RecorderURL        string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -102,6 +103,15 @@ func LoadConfig() Config {
 	// 핵심 기능(주문 접수/취소)과는 무관하므로 필수로 요구하지 않습니다.
 	orderRecordsBucket := os.Getenv("ORDER_RECORDS_BUCKET")
 
+	// RECORDER_URL도 선택입니다 — 값이 있으면 세션이 완전히 끝나는(그룹의
+	// 마지막 멤버가 반납하는) 시점에 recorder의 GET /v1/orders/unresolved로
+	// 그 세션이 남긴 미종결 주문을 물어봐서 취소합니다(2026-08-19, 부하테스트
+	// 반복으로 매칭 엔진 인메모리 오더북에 미체결 주문이 계속 쌓여 OOMKilled까지
+	// 간 사고 대응). 비어있으면 이 정리 로직을 건너뜁니다 — orderapi의 핵심
+	// 기능과는 무관해서, 로컬 개발 환경에 recorder가 안 떠 있어도 orderapi는
+	// 정상 동작해야 합니다.
+	recorderURL := os.Getenv("RECORDER_URL")
+
 	return Config{
 		Port:               port,
 		KafkaBroker:        broker,
@@ -112,6 +122,7 @@ func LoadConfig() Config {
 		RedisPassword:      redisPassword,
 		RedisTLSEnabled:    redisTLSEnabled,
 		JobTriggerQueueURL: jobTriggerQueueURL,
+		RecorderURL:        recorderURL,
 		OrderRecordsBucket: orderRecordsBucket,
 	}
 }
