@@ -305,8 +305,9 @@ resource "aws_s3_bucket_policy" "frontend" {
 # ALB는 Terraform이 아니라 ALB Controller가 k8s/backend/orderapi-ingress.yaml
 # 적용 시 만든다 — 여기서는 그 ALB를 태그(Ingress의 alb.ingress.kubernetes.io/tags
 # 어노테이션과 값이 같아야 함)로 찾아서 DNS/CloudFront 배관만 잇는다. 프론트가
-# 상대경로 /order-api/*로 호출하므로(frontend/src/views/OrderManagementView.vue 등,
-# 실제 소스 확인함) CloudFront가 그 경로를 이 ALB로 프록시해야 한다 — CloudFront
+# 상대경로 /order-api/*로 호출하므로(frontend/src/views/MarketOrderBookView.vue,
+# LoadTestReplayView.vue, AITraderView.vue, TestResultTrackingView.vue 등,
+# 2026-08-20 재확인) CloudFront가 그 경로를 이 ALB로 프록시해야 한다 — CloudFront
 # Function으로 /order-api 접두사를 벗겨서 넘긴다.
 
 data "aws_lb" "orderapi" {
