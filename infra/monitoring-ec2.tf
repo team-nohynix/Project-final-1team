@@ -32,6 +32,9 @@ locals {
     grafana_datasource_yml         = file("${path.module}/monitoring-ec2/grafana-datasource.yml")
     grafana_dashboard_provider_yml = file("${path.module}/monitoring-ec2/grafana-dashboard-provider.yml")
     grafana_dashboard_json         = file("${path.module}/monitoring-ec2/dashboards/team1-overview.json")
+    # 프론트 "시스템 종합 현황" 화면과 똑같이 생긴 별도 대시보드(2026-08-19) — 대시보드
+    # provider가 폴더 전체를 보므로 파일만 늘리면 됨(grafana-dashboard-provider.yml 참고).
+    grafana_system_overview_json   = file("${path.module}/monitoring-ec2/dashboards/system-overview.json")
     docker_compose_yml             = local.monitoring_docker_compose_yml
   })
 }
