@@ -7,8 +7,8 @@ const defaultScenarioName = 'BTC 급등락 페이퍼 트레이딩'
 const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 // 재생 배속 옵션 (프론트에서 선택만 제공)
-const speed = ref(100)
-const speedOptions = [1, 10, 50, 100]
+const speed = ref(60)
+const speedOptions = [1, 10, 50, 60, 100]
 
 // 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
 const formatDateYYYYMMDD = (date: Date) => {
@@ -22,6 +22,14 @@ const todayDate = formatDateYYYYMMDD(new Date())
 // UI messages
 const infoMessage = ref('')
 const errorMessage = ref('')
+
+// 미종결 주문 일괄 정리 (2026-08-20) — 과거 여러 세션이 누적으로 남긴
+// ACCEPTED/PARTIALLY_FILLED 주문을 한 번에 취소한다. 세션 종료 자동 정리
+// (orderapi/sessioncleanup.go)는 "방금 끝난 세션 몫"만 처리하므로, 그 전에
+// 쌓인 백로그는 이 버튼으로 수동 처리해야 한다.
+const cleanupLoading = ref(false)
+const cleanupMessage = ref('')
+const cleanupIsError = ref(false)
 
 // 과거 시세 수집 상태 (백엔드 API 미확정 — 프론트 상태만 준비)
 const collectionStatus = ref('idle') // 'idle' | 'collecting' | 'completed' | 'failed'
@@ -729,6 +737,31 @@ onMounted(async () => {
     saveStateToSession()
   }
 })
+
+const cleanupUnresolvedOrders = async () => {
+  if (cleanupLoading.value) return
+  const ok = window.confirm('미종결(접수/부분체결) 주문을 전부 취소 처리합니다. 되돌릴 수 없습니다. 계속할까요?')
+  if (!ok) return
+
+  cleanupLoading.value = true
+  cleanupMessage.value = ''
+  cleanupIsError.value = false
+  try {
+    const res = await fetch('/order-api/v1/admin/cleanup-unresolved-orders', { method: 'POST' })
+    if (!res.ok) {
+      let body = null
+      try { body = await res.json() } catch (e) {}
+      throw new Error(body?.message || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    cleanupMessage.value = `${data.total}건 중 ${data.canceled}건 취소 완료`
+  } catch (e) {
+    cleanupIsError.value = true
+    cleanupMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    cleanupLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -765,6 +798,13 @@ onMounted(async () => {
           <p class="date-hint">
             선택한 날짜의 KST 00:00부터 다음 날 KST 00:00까지 20개 마켓의 시세를 수집합니다.
           </p>
+        </div>
+
+        <div class="form-field">
+          <label>재생 배속 (속도)</label>
+          <select v-model.number="speed">
+            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
+          </select>
         </div>
 
         <div class="collection-section">
@@ -923,6 +963,17 @@ onMounted(async () => {
         </div>
       </aside>
     </div>
+
+    <section class="cleanup-section">
+      <div class="cleanup-text">
+        <h4>미종결 주문 일괄 정리</h4>
+        <p>과거 실행들이 남긴 접수/부분체결 상태 주문을 전부 취소합니다. 세션이 끝날 때마다 자동으로 그 실행 몫은 정리되지만, 그 이전에 쌓인 건 이 버튼으로 처리해야 합니다.</p>
+      </div>
+      <button class="btn-dark" :disabled="cleanupLoading" @click="cleanupUnresolvedOrders">
+        {{ cleanupLoading ? '정리 중...' : '일괄 정리' }}
+      </button>
+      <div v-if="cleanupMessage" :class="['cleanup-message', { error: cleanupIsError }]">{{ cleanupMessage }}</div>
+    </section>
   </div>
 </template>
 
@@ -1218,6 +1269,46 @@ onMounted(async () => {
 @media (max-width: 900px) {
   .content-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+.cleanup-section {
+  display: flex;
+  margin-top: 24px;
+  padding: 16px 20px;
+  align-items: center;
+  gap: 16px;
+  background: #0d1b2a;
+  border: 1px solid #172a3e;
+  border-radius: 12px;
+}
+.cleanup-text {
+  flex: 1;
+}
+.cleanup-text h4 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  color: #d7e8fb;
+}
+.cleanup-text p {
+  margin: 0;
+  color: #9fb0c2;
+  font-size: 12px;
+}
+.cleanup-message {
+  color: #2ed39a;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.cleanup-message.error {
+  color: #ff6b6b;
+}
+
+@media (max-width: 900px) {
+  .cleanup-section {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 </style>

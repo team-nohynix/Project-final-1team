@@ -96,6 +96,61 @@ func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recor
 	log.Printf("세션 정리 완료 — 미종결 주문 %d/%d건 취소 발행 (runId=%s, mode=%s)", canceled, len(orders), record.RunID, mode)
 }
 
+// cleanupAllUnresolvedOrdersHandler는 POST /v1/admin/cleanup-unresolved-orders를
+// 처리합니다 — 프론트의 수동 "미종결 주문 일괄 정리" 버튼(2026-08-20)이
+// 부릅니다. cleanupUnresolvedOrders(세션 종료 시 자동, 그 세션 몫만)와 달리
+// mode/기간 제한 없이 지금 시점에 남아있는 미종결 주문 전부를 대상으로 하고,
+// 프론트가 결과 건수를 바로 보여줘야 해서 백그라운드 고루틴이 아니라
+// 동기적으로 처리하고 취소 건수를 응답합니다. 오래 걸릴 수 있어(수만 건이면
+// 개별 Kafka publish가 누적됨) 호출부 HTTP 클라이언트는 넉넉한 타임아웃을
+// 잡아야 합니다.
+func cleanupAllUnresolvedOrdersHandler(httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		if recorderURL == "" {
+			writeError(w, reqID, http.StatusServiceUnavailable, "RECORDER_URL_NOT_CONFIGURED", "RECORDER_URL이 설정되어 있지 않습니다.")
+			return
+		}
+
+		u := recorderURL + "/v1/orders/unresolved/all"
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+		if err != nil {
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "요청 생성에 실패했습니다.")
+			return
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			log.Printf("전체 미종결 주문 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusBadGateway, "RECORDER_UNAVAILABLE", "recorder 조회에 실패했습니다.")
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			writeError(w, reqID, http.StatusBadGateway, "RECORDER_UNAVAILABLE", fmt.Sprintf("recorder가 %d를 반환함", resp.StatusCode))
+			return
+		}
+		var body unresolvedOrdersResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			writeError(w, reqID, http.StatusBadGateway, "RECORDER_UNAVAILABLE", "recorder 응답 파싱에 실패했습니다.")
+			return
+		}
+
+		canceledAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+		canceled := 0
+		for _, o := range body.Orders {
+			if err := producer.PublishCancel(r.Context(), o.OrderID, o.Market, canceledAt); err != nil {
+				log.Printf("일괄 정리 중 취소 발행 실패 (orderId=%s): %v", o.OrderID, err)
+				continue
+			}
+			canceled++
+		}
+		log.Printf("미종결 주문 일괄 정리 완료 — %d/%d건 취소 발행", canceled, len(body.Orders))
+		writeJSON(w, http.StatusOK, map[string]int{"canceled": canceled, "total": len(body.Orders)})
+	}
+}
+
 func fetchUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL, mode string, from, to time.Time) ([]unresolvedOrder, error) {
 	u := fmt.Sprintf("%s/v1/orders/unresolved?mode=%s&from=%s&to=%s",
 		recorderURL,

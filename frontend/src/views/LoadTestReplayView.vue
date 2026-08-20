@@ -5,8 +5,8 @@ import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 const selectedDate = ref('') // YYYY-MM-DD
 
 // target speed multiplier (numeric)
-const speed = ref(100)
-const speedOptions = [1, 10, 50, 100]
+const speed = ref(60)
+const speedOptions = [1, 10, 50, 60, 100]
 
 // shardCount replaces pod selection: number of replay shards (1..20)
 const shardCount = ref(1)

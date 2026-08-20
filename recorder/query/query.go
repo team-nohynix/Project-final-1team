@@ -102,6 +102,12 @@ type Querier interface {
 	// 지정만으로 정확합니다(세션 가드가 겹침을 막음) — 별도 세션 식별 컬럼
 	// 없이도 이 세션 소속 주문을 정확히 구분할 수 있습니다.
 	UnresolvedOrders(ctx context.Context, mode string, from, to time.Time) ([]UnresolvedOrder, error)
+	// AllUnresolvedOrders는 mode/기간 제한 없이 지금 ACCEPTED/PARTIALLY_FILLED
+	// 상태인 주문 전부를 반환합니다. UnresolvedOrders와 달리 "이번에 막 끝난
+	// 세션 하나"가 아니라 "과거 여러 세션이 누적으로 남긴 백로그 전체"를 한
+	// 번에 정리하는 용도(2026-08-20, 프론트 수동 정리 버튼)라 세션 가드가
+	// 보장하는 구간 분리가 필요 없습니다 — 그냥 지금 시점의 미종결 전부입니다.
+	AllUnresolvedOrders(ctx context.Context) ([]UnresolvedOrder, error)
 }
 
 // UnresolvedOrder는 UnresolvedOrders 응답의 항목 하나입니다. Market은
@@ -471,6 +477,33 @@ func (q *MySQLQuerier) UnresolvedOrders(ctx context.Context, mode string, from, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("미종결 주문 조회 실패: %w", err)
+	}
+	return orders, nil
+}
+
+// AllUnresolvedOrders는 mode/기간 제한 없이 지금 ACCEPTED/PARTIALLY_FILLED
+// 상태인 주문 전부의 ID+마켓을 반환합니다.
+func (q *MySQLQuerier) AllUnresolvedOrders(ctx context.Context) ([]UnresolvedOrder, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT order_id, market_code
+		FROM trade_order
+		WHERE status IN ('ACCEPTED', 'PARTIALLY_FILLED')
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("전체 미종결 주문 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	orders := []UnresolvedOrder{}
+	for rows.Next() {
+		var o UnresolvedOrder
+		if err := rows.Scan(&o.OrderID, &o.Market); err != nil {
+			return nil, fmt.Errorf("전체 미종결 주문 스캔 실패: %w", err)
+		}
+		orders = append(orders, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("전체 미종결 주문 조회 실패: %w", err)
 	}
 	return orders, nil
 }
