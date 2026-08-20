@@ -69,6 +69,10 @@ cat > /etc/grafana/provisioning/dashboards/team1-overview.json <<'DASHEOF'
 ${grafana_dashboard_json}
 DASHEOF
 
+cat > /etc/grafana/provisioning/dashboards/system-overview.json <<'SYSDASHEOF'
+${grafana_system_overview_json}
+SYSDASHEOF
+
 cat > /etc/docker-compose.yml <<'COMPOSEEOF'
 ${docker_compose_yml}
 COMPOSEEOF
