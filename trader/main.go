@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"trader/bot"
@@ -81,17 +84,42 @@ func run() (err error) {
 			cancel()
 		})
 	})
+
+	// SIGTERM 핸들러가 없으면 Kubernetes가 파드를 지울 때(Job 정리, Karpenter
+	// 노드 축출, kubectl delete 등) kubelet이 보내는 SIGTERM에 대해 Go 런타임
+	// 기본 동작(즉시 종료)이 그대로 발동해 아래 defer(세션 반납)가 전혀
+	// 실행되지 않는다 — orderapi:session:lastrun이 IN_PROGRESS로 영영 고아가
+	// 남는 문제를 2026-08-20에 실측으로 겪었다(트레이더 파드/Job이 흔적도 없이
+	// 사라졌는데 세션은 계속 IN_PROGRESS). SIGTERM/SIGINT를 받으면 "정지 기능"과
+	// 동일한 정상 종료 경로(cancel → 각 마켓 재생이 ctx.Canceled로 빠르게
+	// 리턴 → defer가 STOPPED로 세션 반납)를 타게 만든다 — Dockerfile의
+	// ENTRYPOINT가 exec-form이라 이 프로세스가 PID 1로 시그널을 직접 받는다.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	var sigWG sync.WaitGroup
+	sigWG.Go(func() {
+		select {
+		case sig := <-sigCh:
+			log.Printf("종료 시그널 수신(%v) — 세션을 정상 반납하며 종료합니다", sig)
+			stopped = true
+			cancel()
+		case <-ctx.Done():
+		}
+	})
 	defer func() {
+		signal.Stop(sigCh)
 		stopHeartbeat()
 		heartbeatWG.Wait()
+		sigWG.Wait()
 
 		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
 		// 문자열입니다 — 모듈 간 타입 비공유 원칙에 따라 문자열 그대로
 		// 다시 씁니다(orderapi가 실제로 검사하는 값은 releaseRequest.Status
-		// 필드뿐이라 상수 공유가 필요 없습니다). stopHeartbeat()+Wait()가
-		// 끝난 뒤에 읽으므로 stopped를 별도 동기화 없이 읽어도 안전합니다 —
-		// 하트비트 고루틴이 stopped를 쓰는 것도 그 Wait() 이전에만 일어나고,
-		// WaitGroup이 그 이후의 happens-before를 보장합니다.
+		// 필드뿐이라 상수 공유가 필요 없습니다). stopHeartbeat()+Wait()/
+		// sigWG.Wait()가 끝난 뒤에 읽으므로 stopped를 별도 동기화 없이 읽어도
+		// 안전합니다 — 하트비트/시그널 고루틴이 stopped를 쓰는 것도 각자의
+		// Wait() 이전에만 일어나고, WaitGroup이 그 이후의 happens-before를
+		// 보장합니다.
 		status := "COMPLETED"
 		message := resultMessage
 		if stopped {

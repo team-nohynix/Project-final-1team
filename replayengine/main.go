@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"replayengine/orderstore"
@@ -90,14 +93,35 @@ func run() (err error) {
 			cancel()
 		})
 	})
+
+	// SIGTERM 핸들러가 없으면 Kubernetes가 파드를 지울 때(Job 정리, Karpenter
+	// 노드 축출 등) kubelet이 보내는 SIGTERM에 Go 런타임 기본 동작(즉시 종료)이
+	// 그대로 발동해 아래 defer(세션 반납)가 전혀 실행되지 않는다 —
+	// orderapi:session:lastrun이 IN_PROGRESS로 영영 고아가 남는다(trader에서
+	// 2026-08-20에 실측, replayengine도 구조가 같아 동일 취약점). SIGTERM/
+	// SIGINT를 "중지 기능"과 같은 정상 종료 경로로 흘려보낸다.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	var sigWG sync.WaitGroup
+	sigWG.Go(func() {
+		select {
+		case sig := <-sigCh:
+			log.Printf("종료 시그널 수신(%v) — 세션을 정상 반납하며 종료합니다", sig)
+			stopped = true
+			cancel()
+		case <-ctx.Done():
+		}
+	})
 	defer func() {
+		signal.Stop(sigCh)
 		stopHeartbeat()
 		heartbeatWG.Wait()
+		sigWG.Wait()
 
 		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
 		// 문자열입니다 — 모듈 간 타입 비공유 원칙, trader/main.go와 동일.
-		// stopHeartbeat()+Wait() 이후에 읽으므로 stopped를 별도 동기화 없이
-		// 읽어도 안전합니다(WaitGroup이 happens-before를 보장).
+		// stopHeartbeat()+Wait()/sigWG.Wait() 이후에 읽으므로 stopped를 별도
+		// 동기화 없이 읽어도 안전합니다(WaitGroup이 happens-before를 보장).
 		status := "COMPLETED"
 		message := resultMessage
 		if stopped {
