@@ -73,20 +73,40 @@ func run() (err error) {
 	}
 	log.Printf("세션 클레임 완료 (sessionId=%s, runId=%q)", sessionID, *runID)
 
+	// 전체 리플레이의 수명 주기를 취소 가능하게 만듭니다(2026-08-20, "중지"
+	// 버튼 지원 전에는 context.Background()로 취소 불가능했습니다) — 하트비트
+	// 고루틴이 정지 요청을 받으면 이 cancel을 불러 모든 마켓 재생 고루틴을
+	// 정상 종료시킵니다(각 replayMarket은 이미 ctx.Done()을 보고 있음). 하트비트를
+	// 시작하기 전에 만들어둬야 cancel을 넘겨줄 수 있습니다.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stopped bool
+
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	var heartbeatWG sync.WaitGroup
 	heartbeatWG.Go(func() {
-		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds)
+		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds, func() {
+			stopped = true
+			cancel()
+		})
 	})
 	defer func() {
 		stopHeartbeat()
 		heartbeatWG.Wait()
 
-		// "COMPLETED"/"FAILED"는 orderapi/session.RunStatusCompleted/Failed와
-		// 같은 문자열입니다 — 모듈 간 타입 비공유 원칙, trader/main.go와 동일.
+		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
+		// 문자열입니다 — 모듈 간 타입 비공유 원칙, trader/main.go와 동일.
+		// stopHeartbeat()+Wait() 이후에 읽으므로 stopped를 별도 동기화 없이
+		// 읽어도 안전합니다(WaitGroup이 happens-before를 보장).
 		status := "COMPLETED"
 		message := resultMessage
-		if err != nil {
+		if stopped {
+			status = "STOPPED"
+			message = "사용자 요청으로 정지됨"
+			if resultMessage != "" {
+				message = resultMessage + " (사용자 요청으로 정지됨)"
+			}
+		} else if err != nil {
 			status = "FAILED"
 			message = err.Error()
 		}
@@ -97,7 +117,6 @@ func run() (err error) {
 		}
 	}()
 
-	ctx := context.Background()
 	var wg sync.WaitGroup
 	skipped, started := 0, 0
 

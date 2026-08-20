@@ -87,6 +87,8 @@ func main() {
 	mux.HandleFunc("GET /v1/markets/{market}/orderbook", orderbookHandler(redisClient))
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(sessionStore))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(sessionStore))
+	// 프론트 "중지" 버튼(2026-08-20) — sessionId가 아니라 runId로 받습니다(sessionhandlers.go 참고).
+	mux.HandleFunc("POST /v1/sessions/{runId}/stop", stopRunHandler(sessionStore))
 	// 세션 종료 시 미종결 주문 정리(2026-08-19, sessioncleanup.go 참고)가
 	// recorder를 부르는 데 씁니다 — 별도 요청마다 새 클라이언트를 만들 필요
 	// 없이 하나 공유합니다.

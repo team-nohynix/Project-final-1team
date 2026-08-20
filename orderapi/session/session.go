@@ -69,13 +69,29 @@ const (
 	// activeKey와 마찬가지로 반납 시 지워지지 않고, 다음다음 Claim이 새 그룹을
 	// 만들 때만 다시 밀려납니다.
 	prevRunKey = "orderapi:session:prevrun"
+
+	// stopKeyPrefix+runID는 "이 그룹은 정지 요청됨" 플래그입니다(2026-08-20,
+	// 프론트 "중지" 버튼 지원). 활성 그룹의 exclusivity를 보장하는
+	// activeKey/membersKey와 달리 원자적 스크립트로 묶여있지 않습니다 —
+	// 이 값은 정확성에 관여하지 않는(있어도 그만, 없어도 그만인) 순수
+	// 신호값이라 GET/SET을 따로 해도 안전합니다. TTL을 세션과 같은 값으로
+	// 둬서, 하트비트가 이 값을 한 번도 못 보고 그룹이 먼저 죽는 극단적인
+	// 경우에도 self-healing으로 알아서 사라집니다(이 프로젝트 전반의
+	// "TTL이 정확성의 최종 안전장치" 철학과 동일).
+	stopKeyPrefix = "orderapi:session:stop:"
 )
 
-// RunStatus 값 — 프론트가 그대로 표시할 수 있는 3가지뿐입니다.
+func stopKey(runID string) string { return stopKeyPrefix + runID }
+
+// RunStatus 값 — 프론트가 그대로 표시할 수 있는 4가지뿐입니다. STOPPED는
+// 2026-08-20에 추가됐습니다(사용자가 "중지" 버튼으로 실행을 직접 중단시킨
+// 경우 — FAILED와 구분해야 프론트가 "에러로 죽었다"와 "사용자가 멈췄다"를
+// 다르게 표시할 수 있습니다).
 const (
 	RunStatusInProgress = "IN_PROGRESS"
 	RunStatusCompleted  = "COMPLETED"
 	RunStatusFailed     = "FAILED"
+	RunStatusStopped    = "STOPPED"
 )
 
 // RunOutcome은 Release 호출부(trader/replayengine)가 "이번 실행이 어떻게
@@ -154,7 +170,18 @@ type Store interface {
 	// 그룹을 만들어 그 안에서 단독 멤버가 됩니다). 이미 다른 runID/owner의
 	// 그룹이 활성 상태면 *ConflictError를 반환합니다.
 	Claim(ctx context.Context, owner, runID string) (Info, error)
-	Heartbeat(ctx context.Context, sessionID string) error
+	// Heartbeat는 세션 TTL을 갱신하면서, 이 그룹에 정지 요청이 들어와 있는지도
+	// 같이 확인합니다(2026-08-20, RequestStop 참고) — 호출부(trader/replayengine의
+	// RunHeartbeat)가 이미 이 주기로 서버와 왕복하고 있으므로, 별도 폴링 루프
+	// 없이 이 왕복에 얹어서 신호를 전달합니다.
+	Heartbeat(ctx context.Context, sessionID string) (stopRequested bool, err error)
+	// RequestStop은 runID 그룹에 정지 신호를 보냅니다. 그 그룹이 지금 활성
+	// 상태가 아니면(이미 끝났거나 존재한 적 없으면) ErrNotActive입니다. 실제
+	// 정지는 즉시 일어나지 않고, 그 그룹의 다음 하트비트 왕복(최악의 경우
+	// TTL/3, 기본값 기준 약 10초) 때 반영됩니다 — 정지 요청 자체는 프로세스를
+	// 직접 건드리지 않는 순수 신호이기 때문입니다(하트비트가 이미 폴링하고
+	// 있는 것을 재사용).
+	RequestStop(ctx context.Context, runID string) error
 	// Release는 이 멤버를 그룹에서 반납합니다. outcome은 그룹의 마지막
 	// 멤버가 반납할 때만(=이 실행 전체가 끝날 때만) LastRun에 반영됩니다 —
 	// 리플레이 샤드처럼 여러 멤버 중 일부만 먼저 끝나는 경우 아직 실행 중인
@@ -303,18 +330,45 @@ return 1
 
 // Heartbeat는 세션(멤버)이 속한 그룹의 TTL을 갱신합니다. sessionID 형식이
 // 이상하거나(구분자 없음) 그 그룹이 더는 활성 상태가 아니면 ErrNotActive를
-// 반환합니다.
-func (s *RedisStore) Heartbeat(ctx context.Context, sessionID string) error {
+// 반환합니다. TTL 갱신에 성공하면 stopKey(runID)도 같이 확인해 정지 요청
+// 여부를 돌려줍니다 — 이 조회는 원자적 스크립트 밖에서 별도 GET으로 하는데,
+// stopKey는 정확성에 관여하지 않는 신호값이라(위 stopKeyPrefix 주석 참고)
+// TTL 갱신과 같은 트랜잭션으로 묶일 필요가 없습니다. 조회 자체가 실패해도
+// (Redis 순간 장애 등) 하트비트 자체를 실패시키지 않고 "정지 요청 없음"으로
+// fail-open합니다 — 다음 하트비트 주기에 다시 확인되므로 신호를 완전히
+// 놓치지 않습니다.
+func (s *RedisStore) Heartbeat(ctx context.Context, sessionID string) (bool, error) {
 	runID, _, ok := splitSessionID(sessionID)
 	if !ok {
-		return ErrNotActive
+		return false, ErrNotActive
 	}
 	res, err := s.client.Eval(ctx, heartbeatScript, []string{activeKey, membersKey(runID)}, runID, int(s.ttl.Seconds())).Result()
 	if err != nil {
-		return fmt.Errorf("세션 하트비트 실패: %w", err)
+		return false, fmt.Errorf("세션 하트비트 실패: %w", err)
 	}
 	if n, _ := res.(int64); n == 0 {
+		return false, ErrNotActive
+	}
+	stopRequested, err := s.client.Exists(ctx, stopKey(runID)).Result()
+	if err != nil {
+		return false, nil
+	}
+	return stopRequested > 0, nil
+}
+
+// RequestStop은 runID 그룹에 정지 신호를 보냅니다. activeKey가 지금 이
+// runID를 가리키고 있을 때만 신호를 세팅합니다 — 이미 끝났거나 존재한 적
+// 없는 runID에 신호를 세팅해봐야 아무도 못 볼 고아 키만 남기 때문입니다.
+func (s *RedisStore) RequestStop(ctx context.Context, runID string) error {
+	current, err := s.client.Get(ctx, activeKey).Result()
+	if err == redis.Nil || current != runID {
 		return ErrNotActive
+	}
+	if err != nil {
+		return fmt.Errorf("정지 요청 실패: %w", err)
+	}
+	if err := s.client.Set(ctx, stopKey(runID), "1", s.ttl).Err(); err != nil {
+		return fmt.Errorf("정지 요청 실패: %w", err)
 	}
 	return nil
 }

@@ -92,6 +92,14 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 	}
 }
 
+// heartbeatResponse는 PUT /v1/sessions/{sessionId}/heartbeat의 응답
+// 본문입니다(2026-08-20, 이전에는 빈 본문 204만 줬습니다). StopRequested가
+// true면 호출부(trader/replayengine의 RunHeartbeat)가 자기 재생을 스스로
+// 정상 종료합니다 — POST /v1/sessions/{runId}/stop 참고.
+type heartbeatResponse struct {
+	StopRequested bool `json:"stopRequested"`
+}
+
 // heartbeatSessionHandler는 PUT /v1/sessions/{sessionId}/heartbeat를 처리합니다.
 func heartbeatSessionHandler(store session.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +107,8 @@ func heartbeatSessionHandler(store session.Store) http.HandlerFunc {
 		w.Header().Set("X-Request-Id", reqID)
 		sessionID := r.PathValue("sessionId")
 
-		if err := store.Heartbeat(r.Context(), sessionID); err != nil {
+		stopRequested, err := store.Heartbeat(r.Context(), sessionID)
+		if err != nil {
 			if errors.Is(err, session.ErrNotActive) {
 				writeError(w, reqID, http.StatusNotFound, "SESSION_NOT_ACTIVE", "해당 세션은 더 이상 활성 상태가 아닙니다 — 만료됐거나 다른 세션이 시작됐을 수 있습니다.")
 				return
@@ -109,6 +118,35 @@ func heartbeatSessionHandler(store session.Store) http.HandlerFunc {
 			return
 		}
 		sessionEventsCounter.WithLabelValues("heartbeat").Inc()
+		writeJSON(w, http.StatusOK, heartbeatResponse{StopRequested: stopRequested})
+	}
+}
+
+// stopRunHandler는 POST /v1/sessions/{runId}/stop을 처리합니다 — 프론트
+// "중지" 버튼용(2026-08-20). sessionId(멤버 단위)가 아니라 runId(그룹 단위)로
+// 받습니다 — 프론트는 GET /v1/sessions/last-run에서 runId를 이미 알고
+// 있지만, trader/replayengine 프로세스 내부에만 있는 opaque한 sessionId는
+// 알 방법이 없기 때문입니다. 실제 정지는 즉시 일어나지 않고 다음 하트비트
+// 왕복 때 반영됩니다(session.RequestStop 문서 참고) — 그 사이 재생 중인
+// 마켓들은 계속 진행되다가, 신호를 받는 순간 정상 종료 경로(주문 기록
+// flush, 세션 반납, 미종결 주문 정리)를 그대로 탑니다.
+func stopRunHandler(store session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+		runID := r.PathValue("runId")
+
+		if err := store.RequestStop(r.Context(), runID); err != nil {
+			if errors.Is(err, session.ErrNotActive) {
+				writeError(w, reqID, http.StatusNotFound, "NO_ACTIVE_RUN", "현재 진행 중인 실행이 없거나 이미 종료됐습니다.")
+				return
+			}
+			log.Printf("정지 요청 실패 (runId=%s): %v", runID, err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "정지 요청 처리에 실패했습니다.")
+			return
+		}
+		sessionEventsCounter.WithLabelValues("stop_requested").Inc()
+		log.Printf("정지 요청 접수 (runId=%s)", runID)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

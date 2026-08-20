@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -63,22 +64,43 @@ func run() (err error) {
 	}
 	log.Printf("세션 클레임 완료 (sessionId=%s)", sessionID)
 
+	// 전체 재생의 수명 주기를 취소 가능하게 만듭니다 — 정상 종료(모든 마켓
+	// 재생 완료, 아래 wg.Wait() 직후) 시점과 사용자 정지 요청(2026-08-20,
+	// "중지" 버튼 지원) 시점 둘 다 이 cancel() 하나로 처리합니다. 하트비트
+	// 고루틴이 이 cancel을 호출할 수 있어야 하므로, 하트비트를 시작하기 전에
+	// 만들어둡니다.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stopped bool
+
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	var heartbeatWG sync.WaitGroup
 	heartbeatWG.Go(func() {
-		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds)
+		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds, func() {
+			stopped = true
+			cancel()
+		})
 	})
 	defer func() {
 		stopHeartbeat()
 		heartbeatWG.Wait()
 
-		// "COMPLETED"/"FAILED"는 orderapi/session.RunStatusCompleted/Failed와
-		// 같은 문자열입니다 — 모듈 간 타입 비공유 원칙에 따라 문자열 그대로
+		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
+		// 문자열입니다 — 모듈 간 타입 비공유 원칙에 따라 문자열 그대로
 		// 다시 씁니다(orderapi가 실제로 검사하는 값은 releaseRequest.Status
-		// 필드뿐이라 상수 공유가 필요 없습니다).
+		// 필드뿐이라 상수 공유가 필요 없습니다). stopHeartbeat()+Wait()가
+		// 끝난 뒤에 읽으므로 stopped를 별도 동기화 없이 읽어도 안전합니다 —
+		// 하트비트 고루틴이 stopped를 쓰는 것도 그 Wait() 이전에만 일어나고,
+		// WaitGroup이 그 이후의 happens-before를 보장합니다.
 		status := "COMPLETED"
 		message := resultMessage
-		if err != nil {
+		if stopped {
+			status = "STOPPED"
+			message = "사용자 요청으로 정지됨"
+			if resultMessage != "" {
+				message = resultMessage + " (사용자 요청으로 정지됨)"
+			}
+		} else if err != nil {
 			status = "FAILED"
 			message = err.Error()
 		}
@@ -134,9 +156,9 @@ func run() (err error) {
 		return fmt.Errorf("Bedrock 클라이언트 생성 실패: %w", err)
 	}
 
-	// 전체 마켓 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
-	ctx, cancel := context.WithCancel(context.Background())
-
+	// ctx/cancel은 위에서 이미 만들어뒀습니다(하트비트가 정지 요청 시 이
+	// cancel을 부를 수 있어야 해서 세션 클레임 직후로 옮김) — 전체 마켓
+	// 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
 	var globalWG sync.WaitGroup
 	globalWG.Go(func() {
 		replay.RunGlobalBots(ctx, states, submitter, bedrockClient)
@@ -148,9 +170,11 @@ func run() (err error) {
 
 	// 마켓당 고루틴 1개, 전부 NewHTTPClient가 만든 단일 클라이언트를 공유합니다.
 	// 한 마켓의 실패가 다른 마켓 재생을 막지 않도록 에러는 로그로만 남기고 계속 진행합니다.
+	// ctx가 취소된 채로(context.Canceled) 끝난 것은 정지 요청에 의한 정상적인
+	// 조기 종료이지 실패가 아니므로 failed에 넣지 않습니다.
 	for _, entry := range manifest.Markets {
 		wg.Go(func() {
-			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market]); err != nil {
+			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market]); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[%s] 재생 실패: %v", entry.Market, err)
 				mu.Lock()
 				failed = append(failed, entry.Market)

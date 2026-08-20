@@ -99,23 +99,35 @@ func (c Client) Claim(ctx context.Context, owner, runID string) (sessionID strin
 	return claimed.SessionID, claimed.TTLSeconds, nil
 }
 
-// Heartbeat는 세션 TTL을 갱신합니다.
-func (c Client) Heartbeat(ctx context.Context, sessionID string) error {
+// heartbeatResponse는 orderapi/sessionhandlers.go의 heartbeatResponse와 같은
+// 모양입니다(모듈 간 타입 비공유 원칙에 따라 독립적으로 다시 선언).
+type heartbeatResponse struct {
+	StopRequested bool `json:"stopRequested"`
+}
+
+// Heartbeat는 세션 TTL을 갱신하고, orderapi가 이 그룹에 정지 요청을 받아뒀는지
+// 같이 돌려받습니다(2026-08-20, "중지" 버튼 지원) — RunHeartbeat가 이미 이
+// 주기로 서버와 왕복하고 있으므로, 별도 폴링 없이 이 응답에 얹혀서 옵니다.
+func (c Client) Heartbeat(ctx context.Context, sessionID string) (stopRequested bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+"/v1/sessions/"+sessionID+"/heartbeat", nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
-	io.ReadAll(resp.Body) // 커넥션 재사용을 위해 끝까지 읽음(submitter.go와 같은 이유)
+	body, _ := io.ReadAll(resp.Body) // 커넥션 재사용을 위해 끝까지 읽음(submitter.go와 같은 이유)
 
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("세션 하트비트 실패 (status=%d)", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("세션 하트비트 실패 (status=%d)", resp.StatusCode)
 	}
-	return nil
+	var parsed heartbeatResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false, fmt.Errorf("세션 하트비트 응답 파싱 실패: %w", err)
+	}
+	return parsed.StopRequested, nil
 }
 
 // Release는 세션을 명시적으로 반납합니다. 정상 종료 경로에서 호출합니다 —
@@ -151,7 +163,12 @@ func (c Client) Release(ctx context.Context, sessionID, status, message string) 
 // RunHeartbeat는 ctx가 끝날 때까지 주기적으로 Heartbeat를 호출합니다. 간격을
 // ttlSeconds의 1/3로 잡는 이유는, 네트워크 지연이나 한두 번의 실패로 곧바로
 // 세션이 만료되지 않을 여유를 두기 위함입니다.
-func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds int) {
+//
+// onStopRequested는 orderapi가 정지 요청을 받아뒀다고 처음 알려온 순간 딱
+// 한 번 호출됩니다(2026-08-20, "중지" 버튼 지원) — main.go가 여기에 재생
+// 전체를 취소하는 cancel()을 넘겨줍니다. 그 뒤로도 하트비트 자체는 ctx가
+// 끝날 때까지(=재생이 실제로 정리되고 세션을 반납할 때까지) 계속 돕니다.
+func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds int, onStopRequested func()) {
 	interval := time.Duration(ttlSeconds) * time.Second / 3
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -159,13 +176,21 @@ func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds in
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var stopNotified bool
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := c.Heartbeat(ctx, sessionID); err != nil {
+			stopRequested, err := c.Heartbeat(ctx, sessionID)
+			if err != nil {
 				log.Printf("세션 하트비트 실패 (sessionId=%s): %v", sessionID, err)
+				continue
+			}
+			if stopRequested && !stopNotified {
+				stopNotified = true
+				log.Printf("정지 요청 수신 (sessionId=%s) — 재생을 정상 종료합니다", sessionID)
+				onStopRequested()
 			}
 		}
 	}

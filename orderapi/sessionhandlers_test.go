@@ -15,23 +15,26 @@ import (
 // fakeSessionStore는 실제 Redis 없이 세션 핸들러를 검증하기 위한
 // session.Store 구현체입니다.
 type fakeSessionStore struct {
-	claimInfo        session.Info
-	claimErr         error
-	heartbeatErr     error
-	releaseErr       error
-	releaseRecord    session.RunRecord
-	releaseFinalized bool
-	lastRunRec       session.RunRecord
-	lastRunFound     bool
-	lastRunErr       error
-	prevRunRec       session.RunRecord
-	prevRunFound     bool
-	prevRunErr       error
+	claimInfo         session.Info
+	claimErr          error
+	heartbeatErr      error
+	heartbeatStopFlag bool
+	releaseErr        error
+	releaseRecord     session.RunRecord
+	releaseFinalized  bool
+	lastRunRec        session.RunRecord
+	lastRunFound      bool
+	lastRunErr        error
+	prevRunRec        session.RunRecord
+	prevRunFound      bool
+	prevRunErr        error
+	requestStopErr    error
 
 	lastRunID       string
 	lastHeartbeatID string
 	lastReleaseID   string
 	lastOutcome     session.RunOutcome
+	lastStopRunID   string
 }
 
 func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string) (session.Info, error) {
@@ -42,9 +45,17 @@ func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string) (sess
 	return f.claimInfo, nil
 }
 
-func (f *fakeSessionStore) Heartbeat(ctx context.Context, sessionID string) error {
+func (f *fakeSessionStore) Heartbeat(ctx context.Context, sessionID string) (bool, error) {
 	f.lastHeartbeatID = sessionID
-	return f.heartbeatErr
+	if f.heartbeatErr != nil {
+		return false, f.heartbeatErr
+	}
+	return f.heartbeatStopFlag, nil
+}
+
+func (f *fakeSessionStore) RequestStop(ctx context.Context, runID string) error {
+	f.lastStopRunID = runID
+	return f.requestStopErr
 }
 
 func (f *fakeSessionStore) Release(ctx context.Context, sessionID string, outcome session.RunOutcome) (session.RunRecord, bool, error) {
@@ -71,6 +82,7 @@ func newSessionMux(store session.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(store))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(store))
+	mux.HandleFunc("POST /v1/sessions/{runId}/stop", stopRunHandler(store))
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store, &fakePublisher{}, &http.Client{}, ""))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(store))
@@ -160,11 +172,72 @@ func TestHeartbeatSessionSuccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
 	if store.lastHeartbeatID != "sess_1" {
 		t.Errorf("Heartbeat에 전달된 sessionID = %q, want sess_1", store.lastHeartbeatID)
+	}
+	var got heartbeatResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if got.StopRequested {
+		t.Errorf("stopRequested = true, want false (정지 요청 안 한 경우)")
+	}
+}
+
+func TestHeartbeatSessionStopRequested(t *testing.T) {
+	store := &fakeSessionStore{heartbeatStopFlag: true}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/sessions/sess_1/heartbeat", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got heartbeatResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if !got.StopRequested {
+		t.Errorf("stopRequested = false, want true (RequestStop이 이미 불린 그룹)")
+	}
+}
+
+func TestStopRunSuccess(t *testing.T) {
+	store := &fakeSessionStore{}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/run_1/stop", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204, body=%s", rec.Code, rec.Body.String())
+	}
+	if store.lastStopRunID != "run_1" {
+		t.Errorf("RequestStop에 전달된 runID = %q, want run_1", store.lastStopRunID)
+	}
+}
+
+func TestStopRunNoActiveRun(t *testing.T) {
+	store := &fakeSessionStore{requestStopErr: session.ErrNotActive}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/run_gone/stop", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+	var got errorResponse
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got.ErrorCode != "NO_ACTIVE_RUN" {
+		t.Errorf("errorCode = %q, want NO_ACTIVE_RUN", got.ErrorCode)
 	}
 }
 
