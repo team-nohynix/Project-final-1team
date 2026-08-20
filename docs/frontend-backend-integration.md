@@ -80,7 +80,8 @@
 ### 3.5 "AI 트레이더 실행 결과" 화면 — **2026-08-13에 새로 생김**
 팀에서 확정한 필드 4가지(실행 상태/주문 접수·체결·미체결 수/시작·종료 시각 및 실행 시간/오류 메시지)를 지원하는 엔드포인트 세 개가 새로 생겼다. `trader`/`replayengine`이 실행을 시작·종료할 때 자동으로 남기는 값이라 프론트가 직접 계산할 게 없다.
 
-- **실행 상태 + 시작/종료 시각 + 오류 메시지** → `orderapi`의 `GET /v1/sessions/last-run` (4.6 참고). `실행 중`은 응답 `status`가 `"IN_PROGRESS"`(`endedAt` 없음)일 때, `완료`/`실패`는 각각 `"COMPLETED"`/`"FAILED"`(`endedAt` 있음)일 때다. 실행 시간은 `endedAt - startedAt`으로 프론트에서 계산하면 된다. 실행이 한 번도 없었으면 404 `NO_RUN_YET`.
+- **실행 상태 + 시작/종료 시각 + 오류 메시지** → `orderapi`의 `GET /v1/sessions/last-run` (4.6 참고). `실행 중`은 응답 `status`가 `"IN_PROGRESS"`(`endedAt` 없음)일 때, 끝났으면 `"COMPLETED"`/`"FAILED"`/`"STOPPED"`(2026-08-20 추가, 아래 4.10 참고) 중 하나(`endedAt` 있음)다. 실행 시간은 `endedAt - startedAt`으로 프론트에서 계산하면 된다. 실행이 한 번도 없었으면 404 `NO_RUN_YET`.
+- **"중지" 버튼** → `orderapi`의 `POST /v1/sessions/{runId}/stop` (4.10 참고, 2026-08-20 신설). `runId`는 위 `last-run` 응답의 `runId` 필드를 그대로 쓰면 된다. 즉시 멈추는 게 아니라 다음 하트비트 주기(최악의 경우 약 10초) 안에 반영되므로, 프론트는 버튼을 누른 뒤 `last-run`을 계속 폴링해 `status`가 `STOPPED`로 바뀌는 걸로 실제 정지 완료를 확인하는 걸 권장.
 - **주문 접수/체결/미체결 수** → `recorder`의 `GET /v1/orders/summary?mode=...&from=...&to=...` (4.7 참고) — `from`/`to`는 위 `last-run` 응답의 `startedAt`/`endedAt`을 그대로 넘기면 된다(실행 중이라 `endedAt`이 없으면 `to`를 생략 — 지금까지 누적치로 응답). 이 구간 지정이 정확한 이유는 `orderapi`의 세션 가드가 트레이더/리플레이 엔진을 동시에 하나만 실행되게 막아서, `[startedAt, endedAt)` 구간에 다른 실행의 주문이 섞일 수 없기 때문이다.
 - **실행 파라미터**(날짜/배속 등)는 이 API들에 없다 — 사용자 요청대로, 결과 화면 옆 요청 UI에 이미 그대로 있으니 따로 안 내려줌.
 - **"생성 주문 수"/"거절 수"는 의도적으로 뺐다** — `trader`가 봇의 원시 판단(생성) 건수를 API로 노출하지 않고(로그에만 남음), 거절된 주문은 Kafka에 아예 도달하지 않아 시스템 어디에도 흔적이 남지 않는다(구조적으로 관측 불가능). `accepted`/`filled`/`unfilled` 세 값만 있고, `accepted`엔 취소된 주문도 포함되므로 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소분 차이).
@@ -294,6 +295,8 @@ GET /order-api/v1/sessions/last-run
 ```
 한 번도 실행된 적 없으면 404 `{"errorCode":"NO_RUN_YET", ...}`. 실행 도중 크래시(정상 종료 경로를 못 타서 `trader`/`replayengine`이 결과를 못 남긴 경우)는 `status`가 계속 `IN_PROGRESS`로 남아있을 수 있다 — 이 값은 세션 자체의 배타적 잠금(TTL 30초)과는 별개로 영구 보관되는 기록이라 자동으로 안 바뀐다. 실제 로컬 Redis로 클레임 직후(`IN_PROGRESS`) → `DELETE /v1/sessions/{id}`로 `COMPLETED`/`FAILED` 반납 → 이 값이 정확히 반영되는 것까지 확인함.
 
+`status`는 2026-08-20부터 `"STOPPED"`도 나올 수 있다 — 사용자가 4.10의 정지 버튼으로 실행을 직접 중단시킨 경우다(`FAILED`는 에러로 죽은 것과 구분).
+
 **참고 — `DELETE /v1/sessions/{sessionId}`(주문 취소용 `DELETE /v1/orders/{id}`와 다른 엔드포인트)도 2026-08-13에 요청 본문을 받도록 바뀌었다.** `trader`/`replayengine`이 정상 종료할 때 보내는 요청이라 프론트가 직접 호출할 일은 없지만, 세션 API 응답 모양이 바뀐 배경으로 참고: 본문 `{"status":"COMPLETED"|"FAILED","message":"..."}` (둘 다 선택, 본문 자체가 없으면 `COMPLETED`로 기본 처리 — 기존 프론트/스크립트가 이 엔드포인트를 이미 호출하고 있었더라도 깨지지 않음).
 
 ### 4.7 주문 접수/체결/미체결 집계 — `GET /v1/orders/summary` (2026-08-13 신설, `recorder`)
@@ -325,7 +328,7 @@ GET /v1/jobs/replay-preview?date=2026-08-19
 ### 4.9 직전 실행 조회 — `GET /v1/sessions/previous-run` (2026-08-19 신설, `orderapi`)
 
 ```
-GET /v1/sessions/previous-run
+GET /order-api/v1/sessions/previous-run
 ```
 응답 모양은 4.6의 `last-run`과 완전히 동일:
 ```json
@@ -340,6 +343,23 @@ GET /v1/sessions/previous-run
 ```
 "지금 진행 중인/방금 끝난 실행"이 아니라 **그 바로 이전 실행**을 준다 — 새 실행이 시작되는 순간 `last-run`이 그 실행 것으로 즉시 바뀌기 때문에, "진행 중 화면"과 "직전 실행과 비교"를 동시에 보여주려면 이 별도 엔드포인트가 필요하다. 실행이 2번 미만이었으면(한 번도 없었거나 첫 실행 도중이면) 404 `NO_PREVIOUS_RUN`. `owner`가 `"trader"`일 수도 있으니(직전이 페이퍼 트레이딩이었던 경우), 재생 화면에서 비교 대상으로 쓰기 전에 `owner === "replayengine"`인지 프론트에서 먼저 확인하는 걸 권장 — 아니면 그냥 "직전 재생 실행 없음"으로 처리. 실제 로컬 Redis로 첫 실행 완료 → 404 아님 확인 → 두 번째 실행 시작 → 그 순간 `last-run`은 새 실행, `previous-run`은 정확히 첫 실행으로 갈리는 것까지 확인함.
 
+### 4.10 실행 중지 — `POST /v1/sessions/{runId}/stop` (2026-08-20 신설, `orderapi`)
+
+```
+POST /order-api/v1/sessions/run_abc123/stop
+```
+요청 본문 없음. 성공 시 204(본문 없음). `runId`는 `GET /order-api/v1/sessions/last-run`(4.6) 응답의 `runId` 필드를 그대로 쓰면 된다 — 프론트가 별도로 발급/관리하는 값이 아니다.
+
+```json
+// 404 — 이미 끝났거나 애초에 실행 중인 게 없을 때
+{ "errorCode": "NO_ACTIVE_RUN", "message": "현재 진행 중인 실행이 없거나 이미 종료됐습니다.", "requestId": "..." }
+```
+
+**즉시 멈추지 않는다.** `trader`/`replayengine`은 `orderapi`와 이미 주기적으로 하트비트를 주고받고 있는데(약 10초 간격), 이 정지 요청은 그 다음 하트비트 응답에 실려 전달된다 — 그 신호를 받은 프로세스가 재생 중이던 모든 마켓 고루틴을 정상적으로 마무리하고(진행 중이던 주문 제출은 끝까지 완료), 평소 종료 때와 똑같은 경로(주문 기록 저장, 세션 반납, 미종결 주문 자동 정리)를 그대로 밟는다. 그래서:
+- **버튼을 누른 직후 곧바로 `last-run`이 `STOPPED`로 안 바뀔 수 있다** — 최악의 경우 하트비트 주기(~10초) + 정리 작업 시간만큼 걸린다. 프론트는 `last-run`을 폴링해서 `status`가 실제로 `STOPPED`로 바뀌는 시점을 "정지 완료"로 표시하는 걸 권장(버튼 클릭 자체를 완료로 표시하지 말 것).
+- **매칭 엔진/기록기로 이미 넘어간 주문은 이 정지가 지우지 않는다.** 그중 미체결로 남은 것들은 세션 반납 시점의 기존 미종결 주문 정리 로직(FR-09 측정 정합성을 지키기 위해 취소로 처리, 삭제가 아님)이 그대로 처리한다 — 이미 체결된 주문은 건드리지 않는다(측정 결과 훼손 방지).
+- 이미 종료된 실행이나 존재한 적 없는 `runId`에 보내면 404 `NO_ACTIVE_RUN`이며, 재시도해도 안전하다(멱등).
+
 ## 요약
 
 - **바로 연결 가능**: 시세 조회, 호가창 조회, 주문 접수/취소 (5개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
@@ -348,5 +368,6 @@ GET /v1/sessions/previous-run
 - **2026-08-12에 새로 생김**: 트레이스 조회(`GET /v1/trace/{orderId}`), 매칭 엔진 목록(`GET /v1/matching/engines`) — 둘 다 `recorder`, 응답 모양은 프론트 목업과 다르니 화면 쪽 재설계 필요(4.3/4.4 참고)
 - **2026-08-13에 새로 생김**: AI 트레이더 실행 결과 화면용 세 엔드포인트 — `orderapi`의 `GET /v1/sessions/last-run`(실행 상태/시작·종료 시각/오류 메시지, 4.6 참고)과 `recorder`의 `GET /v1/orders/summary`(주문 접수/체결/미체결 수, 4.7 참고). 둘 다 프론트가 직접 계산할 게 없는, 그대로 쓸 수 있는 응답(3.5 참고)
 - **2026-08-19에 새로 생김**: 부하 시나리오 미리보기 화면용 두 엔드포인트 — `orderapi`의 `GET /v1/jobs/replay-preview`(재생 예정 건수 + 배속 1 기준 소요 시간, 프론트가 speed로 나눠 씀, 4.8 참고)와 `GET /v1/sessions/previous-run`(직전 실행 기록, `last-run`과 같은 모양, 4.9 참고). 이 화면은 접수/체결만 보여주고 미체결은 의도적으로 뺌(3.6 참고)
+- **2026-08-20에 새로 생김**: "중지" 버튼용 `orderapi`의 `POST /v1/sessions/{runId}/stop`(4.10 참고) — `trader`/`replayengine`을 정상 종료 경로 그대로 멈춘다(즉시는 아니고 다음 하트비트 주기 내). `last-run`의 `status`에 `"STOPPED"` 값이 새로 추가됨(4.6 참고)
 - **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
 - **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성
