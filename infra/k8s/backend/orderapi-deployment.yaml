@@ -74,6 +74,15 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
+          # readinessProbe는 "새 파드가 준비되기 전에 트래픽을 받는" 쪽은 막아주지만,
+          # "오래된 파드가 종료되기 시작한 뒤에도 ALB가 잠깐 더 트래픽을 보내는" 반대쪽
+          # 틈은 못 막는다(2026-08-20, readinessProbe 배포 이후에도 재배포 때 502가
+          # 재현돼서 발견) — SIGTERM을 받자마자 바로 죽지 않고 몇 초 버텨서, 그 사이
+          # ALB가 타겟 그룹에서 이 파드를 실제로 빼도록 시간을 준다.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 8"]
 ---
 apiVersion: v1
 kind: Service
