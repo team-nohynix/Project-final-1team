@@ -38,7 +38,7 @@ func TestStartJobHandler(t *testing.T) {
 		pub := &fakeJobPublisher{}
 		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"jobType":"ai-trader","date":"2026-08-11","speed":60}`))
 		w := httptest.NewRecorder()
-		startJobHandler(pub)(w, req)
+		startJobHandler(pub, "")(w, req)
 
 		if w.Code != http.StatusAccepted {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
@@ -51,11 +51,36 @@ func TestStartJobHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("missing orderBucket falls back to server default", func(t *testing.T) {
+		pub := &fakeJobPublisher{}
+		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"jobType":"ai-trader","date":"2026-08-11"}`))
+		w := httptest.NewRecorder()
+		startJobHandler(pub, "team1-truss-order-records")(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
+		}
+		if pub.lastReq.OrderBucket != "team1-truss-order-records" {
+			t.Fatalf("OrderBucket = %q, want default to be filled in", pub.lastReq.OrderBucket)
+		}
+	})
+
+	t.Run("explicit orderBucket in request is not overridden", func(t *testing.T) {
+		pub := &fakeJobPublisher{}
+		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"jobType":"ai-trader","date":"2026-08-11","orderBucket":"caller-chosen-bucket"}`))
+		w := httptest.NewRecorder()
+		startJobHandler(pub, "team1-truss-order-records")(w, req)
+
+		if pub.lastReq.OrderBucket != "caller-chosen-bucket" {
+			t.Fatalf("OrderBucket = %q, want caller's explicit value preserved", pub.lastReq.OrderBucket)
+		}
+	})
+
 	t.Run("invalid jobType is rejected before publish", func(t *testing.T) {
 		pub := &fakeJobPublisher{}
 		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"jobType":"bogus","date":"2026-08-11"}`))
 		w := httptest.NewRecorder()
-		startJobHandler(pub)(w, req)
+		startJobHandler(pub, "")(w, req)
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -69,7 +94,7 @@ func TestStartJobHandler(t *testing.T) {
 		pub := &fakeJobPublisher{}
 		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`not json`))
 		w := httptest.NewRecorder()
-		startJobHandler(pub)(w, req)
+		startJobHandler(pub, "")(w, req)
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -80,7 +105,7 @@ func TestStartJobHandler(t *testing.T) {
 		pub := &fakeJobPublisher{failNext: true}
 		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"jobType":"replay","date":"2026-08-11"}`))
 		w := httptest.NewRecorder()
-		startJobHandler(pub)(w, req)
+		startJobHandler(pub, "")(w, req)
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)

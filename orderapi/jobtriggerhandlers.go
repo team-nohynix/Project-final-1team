@@ -19,7 +19,14 @@ import (
 // 실패(이미 다른 실행이 진행 중)할 수도 있습니다. 진행 상황 확인은 이
 // 엔드포인트가 아니라 K8s 자체나 별도 세션 상태 조회로 해야 합니다(CLAUDE.md의
 // "읽기 전용 세션 상태 엔드포인트" 제안 — 아직 미구현).
-func startJobHandler(publisher jobtrigger.Publisher) http.HandlerFunc {
+// defaultOrderBucket이 비어있지 않으면, 요청이 orderBucket을 안 보냈을 때
+// 이 값으로 채웁니다 — 프론트가 버킷 이름을 몰라도(알 필요도 없어야 함)
+// trader/replayengine이 항상 같은 곳(ORDER_RECORDS_BUCKET, GET
+// /v1/jobs/replay-preview가 읽는 곳과 동일)에 기록하게 하려는 것입니다.
+// 2026-08-20: 이 기본값이 없어서 실제로 -order-bucket이 한 번도 안 실려
+// trader가 로컬 ./orders로 폴백했고, 그 로컬 쓰기마저 컨테이너 권한 문제로
+// 실패해 주문 기록이 통째로 유실되고 있었다(라이브 Job 실행 인자로 확인).
+func startJobHandler(publisher jobtrigger.Publisher, defaultOrderBucket string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -28,6 +35,9 @@ func startJobHandler(publisher jobtrigger.Publisher) http.HandlerFunc {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, reqID, http.StatusBadRequest, "INVALID_REQUEST", "요청 본문 JSON 파싱 실패")
 			return
+		}
+		if req.OrderBucket == "" {
+			req.OrderBucket = defaultOrderBucket
 		}
 
 		if code, msg, ok := jobtrigger.ValidateRequest(req); !ok {

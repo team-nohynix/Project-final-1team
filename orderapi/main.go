@@ -114,7 +114,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("작업 트리거 SQS 발행자 생성 실패: %v", err)
 		}
-		mux.HandleFunc("POST /v1/jobs", startJobHandler(jobPublisher))
+		mux.HandleFunc("POST /v1/jobs", startJobHandler(jobPublisher, cfg.OrderRecordsBucket))
 		log.Printf("작업 트리거 활성화 (queue=%s)", cfg.JobTriggerQueueURL)
 	} else {
 		log.Printf("JOB_TRIGGER_QUEUE_URL이 없어 POST /v1/jobs 비활성화")

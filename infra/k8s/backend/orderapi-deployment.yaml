@@ -45,6 +45,11 @@ spec:
               value: "true"
             - name: JOB_TRIGGER_QUEUE_URL
               value: "https://sqs.ap-northeast-2.amazonaws.com/727646470302/team1-sqs-job-trigger"
+            # 2026-08-20: 이전엔 아예 안 채워져 있어서 startJobHandler가 orderBucket
+            # 기본값을 줄 수도, replay-preview가 S3를 읽을 수도 없었다(둘 다 로컬
+            # 폴백 → trader는 mkdir 권한 에러로 기록 유실, replay-preview는 빈 결과).
+            - name: ORDER_RECORDS_BUCKET
+              value: "team1-truss-order-records"
           # 2026-08-20: 트레이더 Job이 짧은 시간에 대량 주문을 동시 제출할 때(실측: 같은 초에
           # 50건 이상) 512Mi를 넘겨 OOMKilled됨(exit 137) — 프론트 "페이퍼 트레이딩 실행 실패"의
           # 실제 원인. matching-engine과 같은 이유로 1Gi로 상향.
