@@ -70,6 +70,8 @@ function saveStateToSession() {
       // execution / paper trading
       executionStatus: executionStatus.value,
       paperTradingResult: paperTradingResult.value,
+      runStartedAt: runStartedAt.value,
+      runEndedAt: runEndedAt.value,
       executionError: executionError.value,
       previousRunId: previousRunId.value,
       awaitingNewRun: awaitingNewRun.value,
@@ -134,6 +136,19 @@ const collectionButtonDisabled = computed(() => {
 const collectionTargetDate = computed(() => {
   // Prefer server-provided date in collectedData when available, otherwise the requestedCollectDate
   return (collectedData.value && collectedData.value.date) || requestedCollectDate.value || ''
+})
+
+// Paper trading order summary type and typed accessor
+interface OrderSummary { accepted: number; filled: number; unfilled: number }
+const typedPaperTradingResult = computed<OrderSummary | null>(() => {
+  const val = paperTradingResult.value as any
+  if (!val) return null
+  // best-effort: expect numeric fields
+  return {
+    accepted: Number(val.accepted || 0),
+    filled: Number(val.filled || 0),
+    unfilled: Number(val.unfilled || 0),
+  }
 })
 
 const collectionRangeDisplay = computed(() => {
@@ -386,6 +401,8 @@ const resetExecution = () => {
   executionError.value = ''
   previousRunId.value = ''
   awaitingNewRun.value = false
+  runStartedAt.value = null
+  runEndedAt.value = null
 }
 
 // ---- Paper trading: integrate with POST /order-api/v1/jobs, GET /order-api/v1/sessions/last-run,
@@ -400,6 +417,9 @@ const storedRunId = ref('')
 const previousRunId = ref('')
 // whether we're currently waiting for a newly-queued run to appear
 const awaitingNewRun = ref(false)
+// execution run timestamps (ISO strings)
+const runStartedAt = ref<string | null>(null)
+const runEndedAt = ref<string | null>(null)
 
 const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
@@ -525,6 +545,8 @@ const pollLastRun = async () => {
     const status = data.status
     const startedAt = data.startedAt ?? null
     const endedAt = data.endedAt ?? null
+    runStartedAt.value = startedAt
+    runEndedAt.value = endedAt
     if (status === 'IN_PROGRESS') {
       executionStatus.value = 'running'
       infoMessage.value = data.message || ''
@@ -671,6 +693,8 @@ onMounted(async () => {
       // Execution state
       executionStatus.value = stored.executionStatus ?? executionStatus.value
       paperTradingResult.value = stored.paperTradingResult ?? paperTradingResult.value
+      runStartedAt.value = stored.runStartedAt ?? runStartedAt.value
+      runEndedAt.value = stored.runEndedAt ?? runEndedAt.value
       executionError.value = stored.executionError ?? executionError.value
       previousRunId.value = stored.previousRunId ?? previousRunId.value
       awaitingNewRun.value = stored.awaitingNewRun ?? awaitingNewRun.value
@@ -848,6 +872,23 @@ onMounted(async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
+            <div v-if="typedPaperTradingResult" class="result-stats">
+              <div class="stat">
+                <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                <div class="stat-label">접수</div>
+              </div>
+              <div class="stat">
+                <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                <div class="stat-label">체결</div>
+              </div>
+              <div class="stat">
+                <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                <div class="stat-label">미체결</div>
+              </div>
+            </div>
+            <div class="result-meta">
+              시작: {{ formatRFC3339ToKST(runStartedAt) }} • 경과: {{ computeElapsed(runStartedAt) }}
+            </div>
           </template>
 
           <template v-else-if="executionStatus === 'error'">
@@ -858,8 +899,26 @@ onMounted(async () => {
           </template>
 
           <template v-else-if="executionStatus === 'success'">
-            <div class="result-desc">백엔드에서 실행 결과를 받았습니다.</div>
-            <!-- TODO: 백엔드 응답 명세(paperTradingResult) 확정 후 상세 결과 UI 구현 -->
+            <div v-if="typedPaperTradingResult">
+              <div class="result-stats">
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-label">접수</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-label">체결</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-label">미체결</div>
+                </div>
+              </div>
+              <div class="result-meta">
+                {{ formatRFC3339ToKST(runStartedAt) }} ~ {{ formatRFC3339ToKST(runEndedAt) }} • 총 소요: {{ computeElapsed(runStartedAt, runEndedAt) }}
+              </div>
+            </div>
+            <div v-else class="result-desc">주문 집계를 불러오지 못했습니다.</div>
           </template>
         </div>
       </aside>
@@ -1125,6 +1184,35 @@ onMounted(async () => {
   background: #3f86ff;
   border-radius: 999px;
   transition: width 0.4s ease;
+}
+
+/* Result stats */
+.result-stats {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  margin: 12px 0;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #d7e8fb;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  font-size: 12px;
+  color: #9fb0c2;
+}
+.result-meta {
+  font-size: 12px;
+  color: #9fb0c2;
+  margin-top: 8px;
 }
 
 @media (max-width: 900px) {
