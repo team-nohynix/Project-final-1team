@@ -17,6 +17,13 @@
 # 적용해도 아직 예전 이미지가 떠 있는 동안은 값이 0으로 보인다(HPA가 지표 자체는
 # 정상적으로 읽지만 데이터가 없을 뿐) — matching-latest 이미지가 metrics.go 포함해서
 # 재빌드/재배포된 뒤에야 실제로 스케일링이 동작한다.
+#
+# 2026-08-20: serverAddress가 예전 in-cluster kube-prometheus-stack을 가리키고
+# 있었는데, 그 Prometheus를 자체 호스팅 EC2로 완전히 이전(monitoring-ec2.tf)하면서
+# 지워버려서 KEDA가 DNS lookup부터 계속 실패하고 있었다(kubectl describe
+# scaledobject로 확인: "dial tcp: lookup ...monitoring.svc.cluster.local ...
+# no such host") — READY=False로 오토스케일링 자체가 죽어있던 진짜 원인. 새
+# Prometheus(EC2, EIP+도메인)를 가리키도록 고침.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -32,7 +39,7 @@ spec:
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus-prometheus.monitoring.svc.cluster.local:9090
+        serverAddress: http://monitor.jhyang.click:9090
         metricName: matching_engine_total_lag
         query: sum(matching_engine_lag)
         threshold: "500"
