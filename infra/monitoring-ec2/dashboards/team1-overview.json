@@ -2,7 +2,7 @@
   "title": "Team1 AI Trader - 실시간 메트릭",
   "uid": "team1-overview",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 14,
   "refresh": "30s",
   "time": {
     "from": "now-1h",
@@ -13,20 +13,32 @@
       "id": 100,
       "type": "row",
       "title": "개요",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "collapsed": false
     },
     {
-      "id": 1,
-      "title": "타겟 상태",
+      "id": 501,
+      "title": "orderapi 상태",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 10, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 16, "valueSize": 24 }
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -34,65 +46,248 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "장애", "color": "red" },
-                "1": { "text": "정상", "color": "green" }
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
               }
             }
           ],
           "thresholds": {
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           }
         }
       },
       "targets": [
-        { "expr": "up{job=\"k8s-services\", service=~\".*-metrics\"}", "legendFormat": "{{service}}" }
+        {
+          "expr": "up{job=\"k8s-services\", service=\"orderapi-metrics\"}",
+          "legendFormat": "orderapi-metrics"
+        }
+      ]
+    },
+    {
+      "id": 502,
+      "title": "매칭 엔진 상태",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"matching-engine-metrics\"}",
+          "legendFormat": "matching-engine-metrics"
+        }
+      ]
+    },
+    {
+      "id": 503,
+      "title": "기록기 상태",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"recorder-metrics\"}",
+          "legendFormat": "recorder-metrics"
+        }
       ]
     },
     {
       "id": 7,
       "title": "활성 노드 수",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 10, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
       "datasource": "Prometheus",
-      "options": { "text": { "titleSize": 16, "valueSize": 36 } },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 26
+        }
+      },
       "targets": [
-        { "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)", "legendFormat": "nodes up" }
+        {
+          "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)",
+          "legendFormat": "nodes"
+        }
       ]
     },
     {
       "id": 205,
       "title": "실행 중인 Pod",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 4, "x": 14, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
       "datasource": "Prometheus",
-      "options": { "colorMode": "value", "textMode": "value_and_name" },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 26
+        }
+      },
       "fieldConfig": {
         "defaults": {
           "decimals": 0,
-          "thresholds": { "steps": [ { "color": "purple", "value": null } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
         }
       },
       "targets": [
-        { "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"})", "legendFormat": "pods" }
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"})",
+          "legendFormat": "pods"
+        }
       ]
     },
     {
       "id": 6,
-      "title": "backend 파드 재시작 누적",
+      "title": "파드 재시작 누적 (backend 전체)",
       "type": "table",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 1
+      },
       "datasource": "Prometheus",
       "fieldConfig": {
         "defaults": {
-          "custom": { "align": "left", "cellOptions": { "type": "color-background" } },
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "color-background"
+            }
+          },
           "thresholds": {
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         }
@@ -108,31 +303,48 @@
         {
           "id": "organize",
           "options": {
-            "excludeByName": { "Time": true, "__name__": true },
-            "renameByName": { "pod": "파드", "Value": "재시작 횟수" }
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "pod": "파드",
+              "Value": "재시작 횟수"
+            }
           }
         }
       ]
     },
-
     {
       "id": 111,
       "type": "row",
       "title": "① 주문 접수 API (orderapi)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
       "collapsed": false
     },
     {
       "id": 301,
-      "title": "orderapi 상태",
+      "title": "상태",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 8 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 14, "valueSize": 18 }
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -140,105 +352,74 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "장애", "color": "red" },
-                "1": { "text": "정상", "color": "green" }
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
               }
             }
           ],
-          "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "targets": [ { "expr": "up{job=\"k8s-services\", service=\"orderapi-metrics\"}", "legendFormat": "orderapi" } ]
-    },
-    {
-      "id": 2,
-      "title": "주문 누적 접수량 (orders_total)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 8 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "orders_total", "legendFormat": "{{status}}" } ]
-    },
-    {
-      "id": 8,
-      "title": "주문 접수 속도 (건/초)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 8 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "rate(orders_total[1m])", "legendFormat": "{{status}}" } ]
-    },
-    {
-      "id": 302,
-      "title": "주문 접수 API CPU 사용량 (core)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
-      "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"backend\", container!=\"\", pod=~\"^orderapi-.*\"}[2m]))",
-          "legendFormat": "{{pod}}"
+          "expr": "up{job=\"k8s-services\", service=\"orderapi-metrics\"}",
+          "legendFormat": "orderapi"
         }
       ]
-    },
-    {
-      "id": 303,
-      "title": "주문 접수 API 메모리 사용량 (working set)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
-      "datasource": "Prometheus",
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "targets": [
-        {
-          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\", pod=~\"^orderapi-.*\"})",
-          "legendFormat": "{{pod}}"
-        }
-      ]
-    },
-    {
-      "id": 304,
-      "title": "주문 접수 API 파드 상태 (Running=1)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 23 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^orderapi-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 305,
-      "title": "주문 접수 API 재시작 횟수 추이",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 23 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^orderapi-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 18,
-      "title": "세션 이벤트 (클레임/충돌/하트비트/반납)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 23 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "rate(session_events_total[1m])", "legendFormat": "{{action}}" } ]
-    },
-
-    {
-      "id": 112,
-      "type": "row",
-      "title": "② Kafka (MSK)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
-      "collapsed": false
     },
     {
       "id": 209,
-      "title": "Kafka 브로커 (orderapi-executions lag)",
+      "title": "Kafka 컨슈머 랙 (executions)",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 31 },
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "options": { "colorMode": "background", "textMode": "value_and_name", "orientation": "horizontal" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 8
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 18
+        }
+      },
       "fieldConfig": {
         "defaults": {
-          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100000 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100000
+              }
+            ]
+          }
         }
       },
       "targets": [
@@ -253,7 +434,10 @@
           },
           "statistic": "Average",
           "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
           "queryMode": "Metrics",
           "metricQueryType": 0,
           "metricEditorMode": 0,
@@ -261,25 +445,207 @@
         }
       ]
     },
-
+    {
+      "id": 404,
+      "title": "Running 파드",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^orderapi-.*\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "id": 405,
+      "title": "재시작 누적",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^orderapi-.*\"})",
+          "legendFormat": "restarts"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "누적 접수량",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "orders_total",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "접수 속도 (건/초)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(orders_total[1m])",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 402,
+      "title": "CPU (core)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"backend\", container!=\"\", pod=~\"^orderapi-.*\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 403,
+      "title": "메모리 (working set)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\", pod=~\"^orderapi-.*\"})",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "세션 이벤트 (클레임/충돌/하트비트/반납)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(session_events_total[1m])",
+          "legendFormat": "{{action}}"
+        }
+      ]
+    },
     {
       "id": 113,
       "type": "row",
-      "title": "③ 매칭 엔진 (matching-engine)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+      "title": "② 매칭 엔진 (matching-engine)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
       "collapsed": false
     },
     {
       "id": 306,
-      "title": "매칭 엔진 상태",
+      "title": "상태",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 38 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 31
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 14, "valueSize": 18 }
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -287,35 +653,56 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "장애", "color": "red" },
-                "1": { "text": "정상", "color": "green" }
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
               }
             }
           ],
-          "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "targets": [ { "expr": "up{job=\"k8s-services\", service=\"matching-engine-metrics\"}", "legendFormat": "matching-engine" } ]
-    },
-    {
-      "id": 3,
-      "title": "매칭엔진 컨슈머 랙",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 38 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "matching_engine_lag", "legendFormat": "lag" } ]
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"matching-engine-metrics\"}",
+          "legendFormat": "matching-engine"
+        }
+      ]
     },
     {
       "id": 307,
-      "title": "매칭 엔진 백프레셔 활성 상태",
+      "title": "백프레셔",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 38 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 31
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 14, "valueSize": 20 }
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -323,21 +710,316 @@
             {
               "type": "value",
               "options": {
-                "0": { "text": "정상", "color": "green" },
-                "1": { "text": "활성 (주문 거절 중)", "color": "red" }
+                "0": {
+                  "text": "정상",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "거부 중",
+                  "color": "red"
+                }
               }
             }
           ],
-          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "targets": [ { "expr": "matching_backpressure_active", "legendFormat": "matching" } ]
+      "targets": [
+        {
+          "expr": "matching_backpressure_active",
+          "legendFormat": "matching"
+        }
+      ]
     },
     {
-      "id": 308,
-      "title": "매칭 엔진 CPU 사용량 (core)",
+      "id": 312,
+      "title": "레플리카 수",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 31
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"matching-engine\"}",
+          "legendFormat": "레플리카"
+        }
+      ]
+    },
+    {
+      "id": 313,
+      "title": "스케일 상태 (2분)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 31
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "text": {
+          "valueSize": 22
+        },
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": -1000,
+                "to": -0.01,
+                "result": {
+                  "text": "▼ 감소 중",
+                  "color": "blue"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": -0.01,
+                "to": 0.01,
+                "result": {
+                  "text": "안정",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.01,
+                "to": 1000,
+                "result": {
+                  "text": "▲ 증가 중",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "delta(kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"matching-engine\"}[2m])",
+          "legendFormat": "증감"
+        }
+      ]
+    },
+    {
+      "id": 408,
+      "title": "Running 파드",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 31
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^matching-engine-.*\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "id": 409,
+      "title": "재시작 누적",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 31
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^matching-engine-.*\"})",
+          "legendFormat": "restarts"
+        }
+      ]
+    },
+    {
+      "id": 211,
+      "title": "Redis CPU% (오더북 스냅샷)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 31
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 18
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "region": "ap-northeast-2",
+          "namespace": "AWS/ElastiCache",
+          "metricName": "EngineCPUUtilization",
+          "dimensions": {
+            "CacheClusterId": "team1-truss-redis-001"
+          },
+          "statistic": "Average",
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "matchExact": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "컨슈머 랙",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 46 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "matching_engine_lag",
+          "legendFormat": "lag"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "마켓 배정/반납 누적 (FR-11 리밸런싱)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "matching_market_assignments_total",
+          "legendFormat": "{{action}}"
+        }
+      ]
+    },
+    {
+      "id": 406,
+      "title": "CPU (core)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
       "datasource": "Prometheus",
       "targets": [
         {
@@ -347,12 +1029,21 @@
       ]
     },
     {
-      "id": 309,
-      "title": "매칭 엔진 메모리 사용량 (working set)",
+      "id": 407,
+      "title": "메모리 (working set)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 46 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
       "datasource": "Prometheus",
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\", pod=~\"^matching-engine-.*\"})",
@@ -361,97 +1052,356 @@
       ]
     },
     {
-      "id": 310,
-      "title": "매칭 엔진 파드 상태 (Running=1)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 53 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^matching-engine-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 311,
-      "title": "매칭 엔진 재시작 횟수 추이",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 53 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^matching-engine-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 19,
-      "title": "매칭엔진 마켓 배정/반납 누적 (FR-11 리밸런싱)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 53 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "matching_market_assignments_total", "legendFormat": "{{action}}" } ]
-    },
-    {
-      "id": 312,
-      "title": "매칭 엔진 레플리카 수 (실시간)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "fillOpacity": 25, "lineWidth": 2, "showPoints": "always" }
-        }
+      "id": 114,
+      "type": "row",
+      "title": "③ 기록기 (recorder)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
       },
-      "targets": [
-        { "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"matching-engine\"}", "legendFormat": "레플리카 수" }
-      ]
+      "collapsed": false
     },
     {
-      "id": 313,
-      "title": "매칭 엔진 스케일 상태 (최근 2분 증감)",
+      "id": 314,
+      "title": "상태",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 48
+      },
       "datasource": "Prometheus",
       "options": {
         "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "장애",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"recorder-metrics\"}",
+          "legendFormat": "recorder"
+        }
+      ]
+    },
+    {
+      "id": 315,
+      "title": "백프레셔",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 48
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "text": {
+          "valueSize": 30
+        },
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "정상",
+                  "color": "green"
+                },
+                "1": {
+                  "text": "거부 중",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_backpressure_active",
+          "legendFormat": "recorder"
+        }
+      ]
+    },
+    {
+      "id": 320,
+      "title": "레플리카 수",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
         "graphMode": "area",
-        "text": { "titleSize": 14, "valueSize": 20 }
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"recorder\"}",
+          "legendFormat": "레플리카"
+        }
+      ]
+    },
+    {
+      "id": 321,
+      "title": "스케일 상태 (2분)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 48
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "text": {
+          "valueSize": 22
+        },
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
           "decimals": 0,
           "mappings": [
-            { "type": "range", "options": { "from": -1000, "to": -0.01, "result": { "text": "▼ 스케일 인 중 (감소)", "color": "blue" } } },
-            { "type": "range", "options": { "from": -0.01, "to": 0.01, "result": { "text": "안정", "color": "green" } } },
-            { "type": "range", "options": { "from": 0.01, "to": 1000, "result": { "text": "▲ 스케일 아웃 중 (증가)", "color": "orange" } } }
+            {
+              "type": "range",
+              "options": {
+                "from": -1000,
+                "to": -0.01,
+                "result": {
+                  "text": "▼ 감소 중",
+                  "color": "blue"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": -0.01,
+                "to": 0.01,
+                "result": {
+                  "text": "안정",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.01,
+                "to": 1000,
+                "result": {
+                  "text": "▲ 증가 중",
+                  "color": "orange"
+                }
+              }
+            }
           ]
         }
       },
       "targets": [
-        { "expr": "delta(kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"matching-engine\"}[2m])", "legendFormat": "증감" }
+        {
+          "expr": "delta(kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"recorder\"}[2m])",
+          "legendFormat": "증감"
+        }
       ]
     },
     {
-      "id": 211,
-      "title": "Redis 캐시 (매칭 엔진 오더북 스냅샷, CPU%)",
+      "id": 412,
+      "title": "Running 파드",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 68 },
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "options": { "colorMode": "background", "textMode": "value_and_name", "orientation": "horizontal" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^recorder-.*\"})",
+          "legendFormat": "running"
+        }
+      ]
+    },
+    {
+      "id": 413,
+      "title": "재시작 누적",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^recorder-.*\"})",
+          "legendFormat": "restarts"
+        }
+      ]
+    },
+    {
+      "id": 210,
+      "title": "MySQL CPU% (RDS)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 48
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 18
+        }
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 80 } ] }
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
         }
       },
       "targets": [
         {
           "region": "ap-northeast-2",
-          "namespace": "AWS/ElastiCache",
-          "metricName": "EngineCPUUtilization",
-          "dimensions": { "CacheClusterId": "team1-truss-redis-001" },
+          "namespace": "AWS/RDS",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "DBInstanceIdentifier": "team1-truss-db-instance-1"
+          },
           "statistic": "Average",
           "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
           "queryMode": "Metrics",
           "metricQueryType": 0,
           "metricEditorMode": 0,
@@ -459,83 +1409,218 @@
         }
       ]
     },
-
     {
-      "id": 114,
-      "type": "row",
-      "title": "④ 기록기 (recorder)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 74 },
-      "collapsed": false
-    },
-    {
-      "id": 314,
-      "title": "기록기 상태",
+      "id": 201,
+      "title": "접수 TPS",
       "type": "stat",
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 75 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 56
+      },
       "datasource": "Prometheus",
       "options": {
-        "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 14, "valueSize": 18 }
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": { "text": "장애", "color": "red" },
-                "1": { "text": "정상", "color": "green" }
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
               }
-            }
-          ],
-          "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+            ]
+          }
         }
       },
-      "targets": [ { "expr": "up{job=\"k8s-services\", service=\"recorder-metrics\"}", "legendFormat": "recorder" } ]
+      "targets": [
+        {
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": "TPS"
+        }
+      ]
+    },
+    {
+      "id": 202,
+      "title": "체결 TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 56
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": "TPS"
+        }
+      ]
+    },
+    {
+      "id": 203,
+      "title": "처리 대기",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 56
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_pending_orders",
+          "legendFormat": "건"
+        }
+      ]
+    },
+    {
+      "id": 204,
+      "title": "전체 처리 p99",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 56
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "text": {
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_e2e_p99_latency_ms",
+          "legendFormat": "p99"
+        }
+      ]
     },
     {
       "id": 16,
-      "title": "recorder 컨슈머 랙 (orders/executions)",
+      "title": "컨슈머 랙 (orders/executions)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 75 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
       "datasource": "Prometheus",
-      "targets": [ { "expr": "recorder_consumer_lag", "legendFormat": "{{reader}}" } ]
+      "targets": [
+        {
+          "expr": "recorder_consumer_lag",
+          "legendFormat": "{{reader}}"
+        }
+      ]
     },
     {
-      "id": 315,
-      "title": "기록기 백프레셔 활성 상태",
-      "type": "stat",
-      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 75 },
-      "datasource": "Prometheus",
-      "options": {
-        "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "text": { "titleSize": 14, "valueSize": 20 }
+      "id": 17,
+      "title": "주문 취소 누적",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 60
       },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "orders_total{status=\"canceled\"}",
+          "legendFormat": "canceled"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": { "text": "정상", "color": "green" },
-                "1": { "text": "활성 (주문 거절 중)", "color": "red" }
-              }
-            }
-          ],
-          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+          "noValue": "취소 0건 (정상)"
         }
-      },
-      "targets": [ { "expr": "recorder_backpressure_active", "legendFormat": "recorder" } ]
+      }
     },
     {
-      "id": 316,
-      "title": "기록기 CPU 사용량 (core)",
+      "id": 410,
+      "title": "CPU (core)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 83 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
       "datasource": "Prometheus",
       "targets": [
         {
@@ -545,12 +1630,21 @@
       ]
     },
     {
-      "id": 317,
-      "title": "기록기 메모리 사용량 (working set)",
+      "id": 411,
+      "title": "메모리 (working set)",
       "type": "timeseries",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 83 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
       "datasource": "Prometheus",
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"backend\", container!=\"\", pod=~\"^recorder-.*\"})",
@@ -559,231 +1653,109 @@
       ]
     },
     {
-      "id": 318,
-      "title": "기록기 파드 상태 (Running=1)",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 90 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^recorder-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 319,
-      "title": "기록기 재시작 횟수 추이",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 90 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^recorder-.*\"}", "legendFormat": "{{pod}}" }
-      ]
-    },
-    {
-      "id": 17,
-      "title": "주문 취소 누적",
-      "type": "timeseries",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 90 },
-      "datasource": "Prometheus",
-      "targets": [ { "expr": "orders_total{status=\"canceled\"}", "legendFormat": "canceled" } ],
-      "fieldConfig": { "defaults": { "noValue": "취소 0건 (정상)" } }
-    },
-    {
-      "id": 320,
-      "title": "기록기 레플리카 수 (실시간)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 97 },
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "fillOpacity": 25, "lineWidth": 2, "showPoints": "always" }
-        }
-      },
-      "targets": [
-        { "expr": "kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"recorder\"}", "legendFormat": "레플리카 수" }
-      ]
-    },
-    {
-      "id": 321,
-      "title": "기록기 스케일 상태 (최근 2분 증감)",
-      "type": "stat",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 97 },
-      "datasource": "Prometheus",
-      "options": {
-        "colorMode": "background",
-        "textMode": "value_and_name",
-        "orientation": "horizontal",
-        "graphMode": "area",
-        "text": { "titleSize": 14, "valueSize": 20 }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "mappings": [
-            { "type": "range", "options": { "from": -1000, "to": -0.01, "result": { "text": "▼ 스케일 인 중 (감소)", "color": "blue" } } },
-            { "type": "range", "options": { "from": -0.01, "to": 0.01, "result": { "text": "안정", "color": "green" } } },
-            { "type": "range", "options": { "from": 0.01, "to": 1000, "result": { "text": "▲ 스케일 아웃 중 (증가)", "color": "orange" } } }
-          ]
-        }
-      },
-      "targets": [
-        { "expr": "delta(kube_deployment_status_replicas{exported_namespace=\"backend\", deployment=\"recorder\"}[2m])", "legendFormat": "증감" }
-      ]
-    },
-    {
-      "id": 201,
-      "title": "주문 접수 TPS",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 105 },
-      "datasource": "Prometheus",
-      "options": { "colorMode": "value", "textMode": "value_and_name" },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "thresholds": { "steps": [ { "color": "blue", "value": null } ] }
-        }
-      },
-      "targets": [ { "expr": "recorder_order_accept_tps", "legendFormat": "TPS" } ]
-    },
-    {
-      "id": 202,
-      "title": "체결 TPS",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 105 },
-      "datasource": "Prometheus",
-      "options": { "colorMode": "value", "textMode": "value_and_name" },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 1,
-          "thresholds": { "steps": [ { "color": "green", "value": null } ] }
-        }
-      },
-      "targets": [ { "expr": "recorder_execution_tps", "legendFormat": "TPS" } ]
-    },
-    {
-      "id": 203,
-      "title": "처리 대기 주문",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 105 },
-      "datasource": "Prometheus",
-      "options": { "colorMode": "value", "textMode": "value_and_name" },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "thresholds": { "steps": [ { "color": "orange", "value": null } ] }
-        }
-      },
-      "targets": [ { "expr": "recorder_pending_orders", "legendFormat": "건" } ]
-    },
-    {
-      "id": 204,
-      "title": "전체 처리 p99",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 105 },
-      "datasource": "Prometheus",
-      "options": { "colorMode": "value", "textMode": "value_and_name" },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "unit": "ms",
-          "thresholds": {
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 300 },
-              { "color": "red", "value": 500 }
-            ]
-          }
-        }
-      },
-      "targets": [ { "expr": "recorder_e2e_p99_latency_ms", "legendFormat": "p99" } ]
-    },
-    {
       "id": 206,
-      "title": "주문·체결 처리량 (TPS, 최근 15분)",
+      "title": "주문·체결 TPS 추이 (15분)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 111 },
-      "datasource": "Prometheus",
-      "targets": [
-        { "expr": "recorder_order_accept_tps", "legendFormat": "주문" },
-        { "expr": "recorder_execution_tps", "legendFormat": "체결" }
-      ]
-    },
-
-    {
-      "id": 115,
-      "type": "row",
-      "title": "⑤ MySQL (RDS) — 최종 저장소",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 119 },
-      "collapsed": false
-    },
-    {
-      "id": 210,
-      "title": "MySQL (RDS CPU%)",
-      "type": "stat",
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 120 },
-      "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-      "options": { "colorMode": "background", "textMode": "value_and_name", "orientation": "horizontal" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 80 } ] }
-        }
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 72
       },
+      "datasource": "Prometheus",
       "targets": [
         {
-          "region": "ap-northeast-2",
-          "namespace": "AWS/RDS",
-          "metricName": "CPUUtilization",
-          "dimensions": { "DBInstanceIdentifier": "team1-truss-db-instance-1" },
-          "statistic": "Average",
-          "refId": "A",
-          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
-          "queryMode": "Metrics",
-          "metricQueryType": 0,
-          "metricEditorMode": 0,
-          "matchExact": true
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": "주문"
+        },
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": "체결"
         }
       ]
     },
-
     {
       "id": 116,
       "type": "row",
       "title": "클러스터 / 노드 오토스케일링 (Karpenter)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 126 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
       "collapsed": false
     },
     {
       "id": 13,
-      "title": "활성 노드 수 추이 (Karpenter)",
+      "title": "활성 노드 수 추이",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 127 },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
       "datasource": "Prometheus",
-      "targets": [ { "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)", "legendFormat": "활성 노드 수" } ]
+      "targets": [
+        {
+          "expr": "count(up{job=\"k8s-nodes-cadvisor\"} == 1)",
+          "legendFormat": "활성 노드 수"
+        }
+      ]
     },
-
     {
       "id": 104,
       "type": "row",
       "title": "Go 런타임 (보조 지표)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 135 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
       "collapsed": true,
       "panels": [
         {
           "id": 4,
           "title": "고루틴 수",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 32
+          },
           "datasource": "Prometheus",
-          "targets": [ { "expr": "go_goroutines{service=~\".*-metrics\"}", "legendFormat": "{{service}}" } ]
+          "targets": [
+            {
+              "expr": "go_goroutines{service=~\".*-metrics\"}",
+              "legendFormat": "{{service}}"
+            }
+          ]
         },
         {
           "id": 5,
           "title": "Go 힙 메모리",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 32
+          },
           "datasource": "Prometheus",
-          "fieldConfig": { "defaults": { "unit": "bytes" } },
-          "targets": [ { "expr": "go_memstats_heap_alloc_bytes{service=~\".*-metrics\"}", "legendFormat": "{{service}}" } ]
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            }
+          },
+          "targets": [
+            {
+              "expr": "go_memstats_heap_alloc_bytes{service=~\".*-metrics\"}",
+              "legendFormat": "{{service}}"
+            }
+          ]
         }
       ]
     }
