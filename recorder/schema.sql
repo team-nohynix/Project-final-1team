@@ -90,6 +90,19 @@ CALL create_index_if_absent('trade_order', 'idx_trade_order_mode_submitted', 'mo
 -- LOCK=NONE, 46초, 무중단) 후 스키마에 반영. 원래 커밋(d69e4e0, dev 브랜치)이
 -- 같은 날 진행된 schema.sql 재작성 작업과 머지되며 충돌로 유실됐던 것을 복구.
 CALL create_index_if_absent('trade_order', 'idx_trade_order_status', 'status');
+-- 2026-08-20: recorder/metrics.go의 pollDashboardMetrics(GET /v1/metrics/dashboard와
+-- 같은 쿼리, Grafana 게이지 갱신용으로 10초마다 영원히 실행됨)가 날리는
+-- `WHERE submitted_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`(TPS)와
+-- bucketCounts의 `WHERE submitted_at >= ... GROUP BY ...`(10분 시계열)가 둘 다
+-- submitted_at 단독으로 필터링한다. idx_trade_order_mode_submitted(선행 컬럼
+-- mode)도 idx_trade_order_status(status만)도 이 조건엔 못 쓰여서, 2백만행+
+-- 테이블을 10초마다 통째로 훑고 있었다 — DB CPU가 부하테스트 후 30분 넘게 안
+-- 내려가던 진짜 원인(WriteIOPS가 거의 0인데도 CPU만 계속 높았던 것으로 확인,
+-- recorder가 쓰기 백로그를 처리 중이던 게 아니었음). 이 인덱스가 붙으면 이
+-- 폴링 비용이 테이블 전체 크기가 아니라 실제 조회 윈도우(60초/10분) 안의
+-- 행 수에만 비례하게 되어, 테이블이 계속 커져도 폴링 자체는 계속 저렴하게
+-- 유지된다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_submitted_at', 'submitted_at');
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
@@ -117,6 +130,11 @@ CREATE TABLE IF NOT EXISTS execution (
 CALL create_index_if_absent('execution', 'idx_execution_market_executed_at', 'market_code, executed_at DESC');
 CALL create_index_if_absent('execution', 'idx_execution_buy_order', 'buy_order_id');
 CALL create_index_if_absent('execution', 'idx_execution_sell_order', 'sell_order_id');
+-- 2026-08-20: idx_trade_order_submitted_at과 같은 이유 — pollDashboardMetrics의
+-- `WHERE executed_at >= ... SECOND`(체결 TPS)와 bucketCounts의 executed_at
+-- 단독 필터가 idx_execution_market_executed_at(선행 컬럼 market_code)을 못 쓰고
+-- execution 테이블을 통째로 훑고 있었다.
+CALL create_index_if_absent('execution', 'idx_execution_executed_at', 'executed_at');
 
 -- FR-11 마켓 재분배 이력. matching이 assignments 토픽에 배정/반납 이벤트를
 -- 발행하고(matching/kafkaclient/assignment_producer.go), 기록기가 그걸 구독해
