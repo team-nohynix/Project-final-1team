@@ -164,6 +164,24 @@ AI 트레이더를 띄울 때는 `jobType`만 바꾸면 된다(샤드 개념 없
 { "errorCode": "INVALID_SHARD_COUNT", "message": "shardCount는 1 이상이어야 합니다.", "requestId": "..." }
 ```
 
+#### 4.2.1 `POST /v1/jobs` 필드 ↔ CLI 플래그 레퍼런스 (2026-08-19 정리)
+
+이 요청 필드들은 그대로 `trader`/`replayengine`의 CLI 플래그로 전달된다(`orderapi/jobtrigger` → SQS → Lambda의 `_base_args`/`_build_replay_job`이 1:1로 매핑). 전부 **선택 필드**라 안 보내면 아래 기본값이 그대로 적용된다 — Lambda가 필드 자체를 안 보내면 그 CLI 플래그를 K8s Job args에서 통째로 빼버리고, 그러면 바이너리 자신의 `flag.XXX(...)` 기본값이 적용되는 구조다(중간에 별도로 기본값을 주입하는 코드는 없음).
+
+| 요청 필드 | CLI 플래그 | `ai-trader` | `replay` | 기본값 | 검증 |
+|---|---|---|---|---|---|
+| `jobType` | (해당 없음) | - | - | 없음(필수) | `ai-trader`/`replay`만 허용, 아니면 400 `INVALID_JOB_TYPE` |
+| `date` | `-date` | 적용 | 적용 | 없음(필수) | `YYYY-MM-DD` 아니면 400 `INVALID_DATE` |
+| `speed` | `-speed` | 적용 | 적용 | **60** | 0 이하면 400 `INVALID_SPEED` |
+| `orderBucket` | `-order-bucket` | 적용 | 적용 | `""`(로컬 `./orders`) | 별도 검증 없음 — S3 버킷이 아직 준비 전이라 사실상 항상 기본값(로컬) 사용 |
+| `shardCount` | `-shard-count` | **무시됨** | 적용 | **1** | 1 미만이면 400 `INVALID_SHARD_COUNT`. `ai-trader`는 애초에 샤딩 개념이 없어서 이 필드를 보내도 무시된다(`_build_ai_trader_job`이 아예 안 읽음) |
+| `fromTs` | `-from-ts` | 무시됨 | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. `ai-trader`는 무시됨(FR-27 구간 지정은 재생 전용) |
+| `toTs` | `-to-ts` | 무시됨 | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. `ai-trader`는 무시됨 |
+| (요청 필드 없음) | `-shard-index` | - | 자동 | - | 프론트가 정할 수 없음 — K8s Indexed Job이 파드마다 넣어주는 `JOB_COMPLETION_INDEX`를 그대로 씀 |
+| (요청 필드 없음) | `-run-id` | - | 자동 | - | 프론트가 정할 수 없음 — Lambda가 SQS `messageId` 기반으로 만든 K8s Job 이름을 그대로 씀(그 Job의 파드 전부가 공유) |
+
+**로컬에서 CLI로 직접 돌릴 때도 기본값은 같다** — `go run . -date=2026-08-11`만 줘도 `-speed=60`, `-order-bucket=""`(로컬 디렉터리), `replayengine`이면 추가로 `-shard-count=1`/`-shard-index=0`/`-run-id=""`(단독 실행)/`-from-ts=0`/`-to-ts=0`(구간 제한 없음)이 그대로 적용된다.
+
 ### 4.3 트레이스 조회 — `GET /v1/trace/{orderId}` (2026-08-12 신설, `recorder`)
 
 ```
