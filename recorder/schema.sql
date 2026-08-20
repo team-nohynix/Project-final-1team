@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS trade_order (
 );
 CREATE INDEX idx_trade_order_market_status ON trade_order (market_code, status);
 CREATE INDEX idx_trade_order_source_order ON trade_order (source_order_id);
+-- 2026-08-20: recorder_pending_orders 게이지가 주기적으로 돌리는
+-- `WHERE status IN (...)`가 market_code 없이 status만 걸러서
+-- idx_trade_order_market_status(선행 컬럼 market_code)를 못 쓰고 전체
+-- 인덱스(200만+ 행)를 훑고 있었다 — trade_order가 오늘 부하 테스트로
+-- 200만 행까지 불어나면서 MySQL CPU 포화의 한 원인이 됨(EXPLAIN으로 확인,
+-- rows 1,973,617 -> 64,783로 감소). 라이브 DB에 먼저 적용(ALGORITHM=INPLACE
+-- LOCK=NONE, 46초, 무중단) 후 스키마에 반영.
+CREATE INDEX idx_trade_order_status ON trade_order (status);
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
