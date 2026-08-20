@@ -24,6 +24,18 @@
 # scaledobject로 확인: "dial tcp: lookup ...monitoring.svc.cluster.local ...
 # no such host") — READY=False로 오토스케일링 자체가 죽어있던 진짜 원인. 새
 # Prometheus(EC2, EIP+도메인)를 가리키도록 고침.
+#
+# 2026-08-20 (계속): minReplicaCount=1이 실측 부하테스트에서 반복 장애로
+# 이어졌다 — 버스트가 잦아들면 곧 1개로 축소되는데(축소 속도는 KEDA
+# cooldownPeriod가 아니라 K8s HPA 기본 스케일다운 동작이 결정함 — KEDA는
+# minReplicaCount>0일 땐 cooldownPeriod를 아예 무시한다, kubectl apply 시
+# 경고로 확인됨: "CooldownPeriod is ... only relevant when minReplicaCount = 0"),
+# 다음 버스트가 오면 그 1개 파드가 20개 마켓 물량을 스케일업(15~90초) 될 때까지
+# 혼자 받다가 매번 OOMKilled(재시작 여러 번 실측). 크래시마다 Kafka 컨슈머 그룹
+# 리밸런스로 다른 파드들의 체결 발행까지 잠깐 실패해서 랙/백프레셔로 번졌다.
+# minReplicaCount를 2로 올려 "혼자 다 받는 상황" 자체를 없앤다 — 이게 실제
+# 효과가 있는 수정이고, cooldownPeriod는 이 조건에서 관여하지 않으므로 굳이
+# 값을 바꾸지 않는다(기본값 유지).
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -32,10 +44,8 @@ metadata:
 spec:
   scaleTargetRef:
     name: matching-engine
-  minReplicaCount: 1
+  minReplicaCount: 2
   maxReplicaCount: 5
-  pollingInterval: 15
-  cooldownPeriod: 60
   triggers:
     - type: prometheus
       metadata:
