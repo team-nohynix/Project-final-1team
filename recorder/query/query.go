@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"recorder/store"
@@ -305,30 +306,60 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	// E2E P99: 최근 p99Window 안에 FILLED된 주문마다 (마지막 체결 시각 - 접수
 	// 시각)을 표본 하나로 삼는다. DashboardMetrics 타입 주석 참고 — 완벽한
 	// "시스템 처리 지연"은 아니지만 현재 스키마로 낼 수 있는 최선의 근사치.
-	rows, err := q.db.QueryContext(ctx, `
-		SELECT TIMESTAMPDIFF(MICROSECOND, o.submitted_at, MAX(e.executed_at))
-		FROM trade_order o
-		JOIN execution e ON (e.buy_order_id = o.order_id OR e.sell_order_id = o.order_id)
-		WHERE o.status = 'FILLED' AND o.submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
-		GROUP BY o.order_id
+	//
+	// 원래는 `trade_order o JOIN execution e ON (e.buy_order_id = o.order_id
+	// OR e.sell_order_id = o.order_id)` 한 방 쿼리였다 — OR가 execution의 두
+	// 컬럼에 걸쳐 있어 옵티마이저가 idx_execution_buy_order/
+	// idx_execution_sell_order 어느 쪽도 못 타고 execution 전체(500만행+)를
+	// 매 폴링(10초)마다 스캔했다(2026-08-20, EXPLAIN으로 rows:5,063,699 확인
+	// — pollDashboardMetrics가 DB CPU를 계속 붙잡고 있던 원인). 대신 ①먼저
+	// idx_trade_order_status_submitted로 최근 창의 FILLED 주문만 좁게 골라낸
+	// 뒤 ②execution을 buy_order_id/sell_order_id 각각 자기 인덱스로 따로
+	// 조회해서 Go에서 합친다 — OR-JOIN 자체를 없애 최근 창 크기에만 비례하게
+	// 만든다(schema.sql의 idx_trade_order_status_submitted 주석 참고).
+	orderRows, err := q.db.QueryContext(ctx, `
+		SELECT order_id, submitted_at FROM trade_order
+		WHERE status = 'FILLED' AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
 	`, int(p99Window.Minutes()))
 	if err != nil {
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 조회 실패: %w", err)
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
 	}
-	var latenciesMs []float64
-	for rows.Next() {
-		var microseconds int64
-		if err := rows.Scan(&microseconds); err != nil {
-			rows.Close()
-			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 조회 실패: %w", err)
+	submittedAt := make(map[string]time.Time)
+	var orderIDs []string
+	for orderRows.Next() {
+		var id string
+		var t time.Time
+		if err := orderRows.Scan(&id, &t); err != nil {
+			orderRows.Close()
+			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
 		}
-		latenciesMs = append(latenciesMs, float64(microseconds)/1000.0)
+		submittedAt[id] = t
+		orderIDs = append(orderIDs, id)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 조회 실패: %w", err)
+	if err := orderRows.Err(); err != nil {
+		orderRows.Close()
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
 	}
-	rows.Close()
+	orderRows.Close()
+
+	maxExecutedAt := make(map[string]time.Time, len(orderIDs))
+	if len(orderIDs) > 0 {
+		if err := q.mergeMaxExecutedAt(ctx, "buy_order_id", orderIDs, maxExecutedAt); err != nil {
+			return DashboardMetrics{}, err
+		}
+		if err := q.mergeMaxExecutedAt(ctx, "sell_order_id", orderIDs, maxExecutedAt); err != nil {
+			return DashboardMetrics{}, err
+		}
+	}
+
+	var latenciesMs []float64
+	for _, id := range orderIDs {
+		executedAt, ok := maxExecutedAt[id]
+		if !ok {
+			continue
+		}
+		latenciesMs = append(latenciesMs, float64(executedAt.Sub(submittedAt[id]).Microseconds())/1000.0)
+	}
 	m.E2EP99Ms = percentile99(latenciesMs)
 	m.E2EP99SampleCount = len(latenciesMs)
 
@@ -345,6 +376,40 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	m.Series = series
 
 	return m, nil
+}
+
+// mergeMaxExecutedAt은 column(buy_order_id 또는 sell_order_id)이 orderIDs에
+// 속하는 execution 행들의 executed_at을 조회해 out에 주문별 최댓값으로
+// 병합합니다. buy_order_id/sell_order_id를 OR 하나로 묶지 않고 이렇게 따로
+// 호출해야 각자의 단일 컬럼 인덱스(idx_execution_buy_order/
+// idx_execution_sell_order)를 탈 수 있습니다 — DashboardMetrics 주석 참고.
+// column은 이 파일 안에서 "buy_order_id"/"sell_order_id" 리터럴로만 호출되므로
+// SQL 인젝션 경로가 아닙니다.
+func (q *MySQLQuerier) mergeMaxExecutedAt(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
+	placeholders := strings.Repeat("?,", len(orderIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(orderIDs))
+	for i, id := range orderIDs {
+		args[i] = id
+	}
+	rows, err := q.db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT %s, executed_at FROM execution WHERE %s IN (%s)`, column, column, placeholders,
+	), args...)
+	if err != nil {
+		return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var t time.Time
+		if err := rows.Scan(&id, &t); err != nil {
+			return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
+		}
+		if cur, ok := out[id]; !ok || t.After(cur) {
+			out[id] = t
+		}
+	}
+	return rows.Err()
 }
 
 // metricsSeries는 최근 seriesWindow(10분)를 seriesBucket(1분) 단위로 잘라

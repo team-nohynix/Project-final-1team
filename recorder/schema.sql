@@ -103,6 +103,19 @@ CALL create_index_if_absent('trade_order', 'idx_trade_order_status', 'status');
 -- 행 수에만 비례하게 되어, 테이블이 계속 커져도 폴링 자체는 계속 저렴하게
 -- 유지된다.
 CALL create_index_if_absent('trade_order', 'idx_trade_order_submitted_at', 'submitted_at');
+-- 2026-08-20: pollDashboardMetrics의 E2E p99 지연시간 쿼리가 원래
+-- `trade_order JOIN execution ON (buy_order_id=o.order_id OR sell_order_id=o.order_id)`
+-- 형태였다 — JOIN 조건이 execution의 두 컬럼에 OR로 걸쳐 있어 옵티마이저가
+-- idx_execution_buy_order/idx_execution_sell_order 어느 쪽도 못 타고 execution
+-- 전체(500만행+)를 매 폴링(10초)마다 훑었다(EXPLAIN으로 rows:5,063,699 확인).
+-- recorder/query/query.go의 DashboardMetrics를 "① status='FILLED' AND
+-- submitted_at 최근 창인 주문만 먼저 골라내기 → ② execution을 buy_order_id/
+-- sell_order_id 각각 따로 조회해서 합치기"로 재작성해 OR-JOIN 자체를 없앴다.
+-- 이 인덱스는 ①단계가 status만 걸러 전체 FILLED 이력(테이블이 커질수록 계속
+-- 늘어남)을 스캔하지 않고, 그 안에서도 최근 submitted_at 구간만 바로 짚도록
+-- 한다 — idx_trade_order_status(선행 컬럼 status뿐)만으로는 이 range 조건까지
+-- 커버가 안 된다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_status_submitted', 'status, submitted_at');
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
