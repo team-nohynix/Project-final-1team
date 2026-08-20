@@ -8,7 +8,6 @@ const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 // 재생 배속 옵션 (프론트에서 선택만 제공)
 const speed = ref(60)
-const speedOptions = [1, 10, 50, 60, 100]
 
 // 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
 const formatDateYYYYMMDD = (date: Date) => {
@@ -802,9 +801,17 @@ const cleanupUnresolvedOrders = async () => {
 
         <div class="form-field">
           <label>재생 배속 (속도)</label>
-          <select v-model.number="speed">
-            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
-          </select>
+          <div class="speed-slider-row">
+            <input
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              v-model.number="speed"
+              class="speed-slider"
+            />
+            <span class="speed-slider-value">{{ speed }}×</span>
+          </div>
         </div>
 
         <div class="collection-section">
@@ -1026,6 +1033,47 @@ const cleanupUnresolvedOrders = async () => {
   width: 100%;
   padding: 12px 14px;
   background: #072037;
+
+.speed-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.speed-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: #0f2636;
+  outline: none;
+}
+.speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3f86ff;
+  cursor: pointer;
+  border: 2px solid #e6eef8;
+}
+.speed-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3f86ff;
+  cursor: pointer;
+  border: 2px solid #e6eef8;
+  border: none;
+}
+.speed-slider-value {
+  min-width: 48px;
+  text-align: right;
+  font-weight: 700;
+  color: #7fb2ff;
+  font-variant-numeric: tabular-nums;
+}
   border: 1px solid #163247;
   color: #e6eef8;
   border-radius: 8px;

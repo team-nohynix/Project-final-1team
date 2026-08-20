@@ -6,7 +6,6 @@ const selectedDate = ref('') // YYYY-MM-DD
 
 // target speed multiplier (numeric)
 const speed = ref(60)
-const speedOptions = [1, 10, 50, 60, 100]
 
 // shardCount replaces pod selection: number of replay shards (1..20)
 const shardCount = ref(1)
@@ -371,9 +370,17 @@ onBeforeUnmount(() => {
 
         <div class="form-field">
           <label>재생 배속 (속도)</label>
-          <select v-model.number="speed">
-            <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
-          </select>
+          <div class="speed-slider-row">
+            <input
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              v-model.number="speed"
+              class="speed-slider"
+            />
+            <span class="speed-slider-value">{{ speed }}×</span>
+          </div>
         </div>
 
         <div class="form-field">
@@ -540,6 +547,47 @@ onBeforeUnmount(() => {
   color: #e6eef8;
   border-radius: 8px;
   outline: none;
+}
+
+.speed-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.speed-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: #0f2636;
+  outline: none;
+}
+.speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3f86ff;
+  cursor: pointer;
+  border: 2px solid #e6eef8;
+}
+.speed-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3f86ff;
+  cursor: pointer;
+  border: 2px solid #e6eef8;
+  border: none;
+}
+.speed-slider-value {
+  min-width: 48px;
+  text-align: right;
+  font-weight: 700;
+  color: #7fb2ff;
+  font-variant-numeric: tabular-nums;
 }
 .form-field input[type='number']::-webkit-outer-spin-button,
 .form-field input[type='number']::-webkit-inner-spin-button {
