@@ -53,28 +53,17 @@ systemctl daemon-reload
 systemctl enable --now refresh-eks-token.timer
 /usr/local/bin/refresh-eks-token.sh # 컨테이너 기동 전에 첫 토큰 파일을 미리 만들어 둠
 
-cat > /etc/prometheus/prometheus.yml <<'PROMEOF'
-${prometheus_yml}
-PROMEOF
-
-cat > /etc/grafana/provisioning/datasources/datasource.yml <<'DSEOF'
-${grafana_datasource_yml}
-DSEOF
-
-cat > /etc/grafana/provisioning/dashboards/provider.yml <<'PROVEOF'
-${grafana_dashboard_provider_yml}
-PROVEOF
-
-cat > /etc/grafana/provisioning/dashboards/team1-overview.json <<'DASHEOF'
-${grafana_dashboard_json}
-DASHEOF
-
-cat > /etc/grafana/provisioning/dashboards/system-overview.json <<'SYSDASHEOF'
-${grafana_system_overview_json}
-SYSDASHEOF
-
-cat > /etc/docker-compose.yml <<'COMPOSEEOF'
-${docker_compose_yml}
-COMPOSEEOF
+# 모든 설정 파일은 S3(team1-monitoring-config)에서 받아온다 — 예전엔 이 파일들을
+# user_data에 통째로 박아넣었는데, 대시보드 JSON이 커지면서 EC2의 user_data
+# 16,384바이트 한도를 넘어 인스턴스 생성 자체가 실패했다(2026-08-20). S3로
+# 옮기면 user_data는 이 스크립트만 남아 한도에 걸릴 일이 없고, 설정 내용이
+# 바뀌어도(S3 객체만 갱신) EC2가 재생성되지 않는다 — infra/monitoring-ec2.tf의
+# monitoring_user_data 주석 참고.
+aws s3 cp "s3://${config_bucket}/prometheus.yml" /etc/prometheus/prometheus.yml
+aws s3 cp "s3://${config_bucket}/datasource.yml" /etc/grafana/provisioning/datasources/datasource.yml
+aws s3 cp "s3://${config_bucket}/provider.yml" /etc/grafana/provisioning/dashboards/provider.yml
+aws s3 cp "s3://${config_bucket}/team1-overview.json" /etc/grafana/provisioning/dashboards/team1-overview.json
+aws s3 cp "s3://${config_bucket}/system-overview.json" /etc/grafana/provisioning/dashboards/system-overview.json
+aws s3 cp "s3://${config_bucket}/docker-compose.yml" /etc/docker-compose.yml
 
 cd /etc && docker-compose -f docker-compose.yml up -d

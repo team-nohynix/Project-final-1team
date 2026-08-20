@@ -25,18 +25,96 @@ locals {
     grafana_admin_password = var.monitoring_grafana_admin_password
   })
 
+  # user_data는 여기 나열된 파일 내용을 전부 그대로 박아 넣었었는데, 대시보드
+  # JSON이 커지면서(2026-08-20, 시세 수집기/AI 트레이더 패널 추가 후 61개 패널)
+  # gzip+base64를 거치고도 EC2의 user_data 16,384바이트 한도를 넘어 인스턴스
+  # 생성 자체가 실패했다(RunInstances: "User data is limited to 16384 bytes") —
+  # 대시보드를 조금만 고쳐도 인스턴스가 통째로 재생성되던 문제와 같은 근본
+  # 원인. 이제 이 파일들은 S3(아래 aws_s3_object)에 올려두고, user_data는
+  # 부팅 시 S3에서 내려받기만 한다 — user_data 자체는 몇 줄 안 되니 앞으로
+  # 다시 이 한도에 걸릴 일이 없고, 내용이 바뀌어도(S3 객체만 갱신) EC2가
+  # 재생성되지 않는다.
   monitoring_user_data = templatefile("${path.module}/monitoring-ec2/user-data.sh.tpl", {
-    aws_region                     = "ap-northeast-2"
-    eks_cluster_name               = aws_eks_cluster.team1.name
-    prometheus_yml                 = local.monitoring_prometheus_yml
-    grafana_datasource_yml         = file("${path.module}/monitoring-ec2/grafana-datasource.yml")
-    grafana_dashboard_provider_yml = file("${path.module}/monitoring-ec2/grafana-dashboard-provider.yml")
-    grafana_dashboard_json         = file("${path.module}/monitoring-ec2/dashboards/team1-overview.json")
-    # 프론트 "시스템 종합 현황" 화면과 똑같이 생긴 별도 대시보드(2026-08-19) — 대시보드
-    # provider가 폴더 전체를 보므로 파일만 늘리면 됨(grafana-dashboard-provider.yml 참고).
-    grafana_system_overview_json   = file("${path.module}/monitoring-ec2/dashboards/system-overview.json")
-    docker_compose_yml             = local.monitoring_docker_compose_yml
+    aws_region       = "ap-northeast-2"
+    eks_cluster_name = aws_eks_cluster.team1.name
+    config_bucket    = aws_s3_bucket.monitoring_config.bucket
   })
+}
+
+# --- 모니터링 설정 파일 저장소 (S3) ------------------------------------------
+# EC2 user_data에 직접 박아넣던 걸 여기로 옮겼다 — 이유는 위 monitoring_user_data
+# 주석 참고. 객체 내용이 바뀌면(etag=md5) S3 객체만 갱신되고 EC2는 안 건드린다.
+
+resource "aws_s3_bucket" "monitoring_config" {
+  bucket = "team1-monitoring-config"
+
+  tags = {
+    Team = "team1"
+    Name = "team1-monitoring-config"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "monitoring_config" {
+  bucket = aws_s3_bucket.monitoring_config.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "monitoring_config" {
+  bucket = aws_s3_bucket.monitoring_config.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_object" "monitoring_prometheus_yml" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "prometheus.yml"
+  content = local.monitoring_prometheus_yml
+  etag    = md5(local.monitoring_prometheus_yml)
+}
+
+resource "aws_s3_object" "monitoring_grafana_datasource" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "datasource.yml"
+  content = file("${path.module}/monitoring-ec2/grafana-datasource.yml")
+  etag    = filemd5("${path.module}/monitoring-ec2/grafana-datasource.yml")
+}
+
+resource "aws_s3_object" "monitoring_grafana_provider" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "provider.yml"
+  content = file("${path.module}/monitoring-ec2/grafana-dashboard-provider.yml")
+  etag    = filemd5("${path.module}/monitoring-ec2/grafana-dashboard-provider.yml")
+}
+
+resource "aws_s3_object" "monitoring_dashboard_team1" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "team1-overview.json"
+  content = file("${path.module}/monitoring-ec2/dashboards/team1-overview.json")
+  etag    = filemd5("${path.module}/monitoring-ec2/dashboards/team1-overview.json")
+}
+
+# 프론트 "시스템 종합 현황" 화면과 똑같이 생긴 별도 대시보드(2026-08-19) — 대시보드
+# provider가 폴더 전체를 보므로 객체만 늘리면 됨(grafana-dashboard-provider.yml 참고).
+resource "aws_s3_object" "monitoring_dashboard_system" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "system-overview.json"
+  content = file("${path.module}/monitoring-ec2/dashboards/system-overview.json")
+  etag    = filemd5("${path.module}/monitoring-ec2/dashboards/system-overview.json")
+}
+
+resource "aws_s3_object" "monitoring_docker_compose" {
+  bucket  = aws_s3_bucket.monitoring_config.id
+  key     = "docker-compose.yml"
+  content = local.monitoring_docker_compose_yml
+  etag    = md5(local.monitoring_docker_compose_yml)
 }
 
 data "aws_ami" "al2023" {
@@ -111,6 +189,21 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch_read" {
   name   = "team1-monitoring-cloudwatch-read"
   role   = aws_iam_role.monitoring.id
   policy = data.aws_iam_policy_document.monitoring_cloudwatch_read.json
+}
+
+# 부팅 시 user_data가 S3에서 설정 파일을 내려받는 데 필요(위 monitoring_config
+# 버킷 참고). 읽기 전용.
+data "aws_iam_policy_document" "monitoring_config_read" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.monitoring_config.arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "monitoring_config_read" {
+  name   = "team1-monitoring-config-read"
+  role   = aws_iam_role.monitoring.id
+  policy = data.aws_iam_policy_document.monitoring_config_read.json
 }
 
 resource "aws_iam_instance_profile" "monitoring" {
@@ -210,11 +303,11 @@ resource "aws_eip" "monitoring" {
 # 않도록 새 주소를 쓴다. 기존 orphan(aws_instance.monitoring, aws_security_group.monitoring,
 # data.aws_ami.ubuntu)은 새 인스턴스 정상 동작 확인 후 별도로 정리한다.
 resource "aws_instance" "monitoring_v2" {
-  ami                         = data.aws_ami.al2023.id
-  instance_type               = "t3.small"
-  subnet_id                   = data.terraform_remote_state.network.outputs.subnet_ids.public.a
-  vpc_security_group_ids      = [aws_security_group.team1_sg_monitoring.id]
-  iam_instance_profile        = aws_iam_instance_profile.monitoring.name
+  ami                    = data.aws_ami.al2023.id
+  instance_type          = "t3.small"
+  subnet_id              = data.terraform_remote_state.network.outputs.subnet_ids.public.a
+  vpc_security_group_ids = [aws_security_group.team1_sg_monitoring.id]
+  iam_instance_profile   = aws_iam_instance_profile.monitoring.name
   # gzip 압축 — 대시보드 JSON이 커지면서 평문 user_data가 EC2의 16KB 한도를 넘겨서
   # (2026-08-13) 압축으로 전환. EC2가 gzip 매직바이트를 자동 인식해서 부팅 시 그대로 풀어 실행한다.
   user_data_base64            = base64gzip(local.monitoring_user_data)
