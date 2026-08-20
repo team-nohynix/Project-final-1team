@@ -1,0 +1,627 @@
+{
+  "title": "시스템 종합 현황",
+  "uid": "system-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "\n<div style=\"display:flex;justify-content:space-between;align-items:center;height:100%;padding:0 8px;\">\n  <div>\n    <div style=\"font-size:28px;font-weight:700;color:#fff;\">시스템 종합 현황</div>\n    <div style=\"font-size:14px;color:#9fa7b3;margin-top:4px;\">실시간 주문 처리 상태와 Kubernetes 자동 확장 현황</div>\n  </div>\n  <div style=\"background:rgba(59,178,115,0.15);border:1px solid #3bb273;color:#3bb273;border-radius:999px;padding:6px 16px;font-size:13px;\">● 실시간</div>\n</div>\n"
+      }
+    },
+    {
+      "id": 2,
+      "title": "주문 접수 TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 0,
+        "y": 3
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "체결 TPS",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 5,
+        "y": 3
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "처리 대기 주문",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 10,
+        "y": 3
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_pending_orders",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "전체 처리 p99",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 15,
+        "y": 3
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "recorder_e2e_p99_latency_ms",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "실행 중인 Pod",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 3
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\"})",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "gridPos": {
+        "h": 2,
+        "w": 5,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"color:#5b9bd5;font-size:13px;padding:4px 8px;\">목표 10,000건/초</div>"
+      }
+    },
+    {
+      "id": 8,
+      "type": "text",
+      "gridPos": {
+        "h": 2,
+        "w": 5,
+        "x": 15,
+        "y": 9
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "<div style=\"color:#5b9bd5;font-size:13px;padding:4px 8px;\">목표 500ms 이하</div>"
+      }
+    },
+    {
+      "id": 9,
+      "title": "주문·체결 처리량",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 14,
+        "w": 16,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": "Prometheus",
+      "description": "최근 15분 동안 초당 처리 건수",
+      "targets": [
+        {
+          "expr": "recorder_order_accept_tps",
+          "legendFormat": "주문"
+        },
+        {
+          "expr": "recorder_execution_tps",
+          "legendFormat": "체결"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "주문 접수 API",
+      "type": "stat",
+      "gridPos": {
+        "h": 2,
+        "w": 8,
+        "x": 16,
+        "y": 11
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "비정상",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"orderapi-metrics\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Kafka 브로커",
+      "type": "stat",
+      "gridPos": {
+        "h": 2,
+        "w": 8,
+        "x": 16,
+        "y": 13
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 100000
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-2",
+          "namespace": "AWS/Kafka",
+          "metricName": "SumOffsetLag",
+          "dimensions": {
+            "Cluster Name": "team1-truss-msk",
+            "Consumer Group": "orderapi-executions",
+            "Topic": "executions"
+          },
+          "statistic": "Average",
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "matchExact": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "매칭 엔진",
+      "type": "stat",
+      "gridPos": {
+        "h": 2,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "colorMode": "background",
+        "textMode": "name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "비정상",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "정상",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"k8s-services\", service=\"matching-engine-metrics\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "PostgreSQL",
+      "type": "stat",
+      "gridPos": {
+        "h": 2,
+        "w": 8,
+        "x": 16,
+        "y": 17
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-2",
+          "namespace": "AWS/RDS",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "DBInstanceIdentifier": "team1-truss-db-instance-1"
+          },
+          "statistic": "Average",
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "matchExact": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Redis 캐시",
+      "type": "stat",
+      "gridPos": {
+        "h": 2,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "datasource": {
+        "type": "cloudwatch",
+        "uid": "cloudwatch"
+      },
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "orientation": "horizontal"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "cloudwatch",
+            "uid": "cloudwatch"
+          },
+          "region": "ap-northeast-2",
+          "namespace": "AWS/ElastiCache",
+          "metricName": "EngineCPUUtilization",
+          "dimensions": {
+            "CacheClusterId": "team1-truss-redis-001"
+          },
+          "statistic": "Average",
+          "queryMode": "Metrics",
+          "metricQueryType": 0,
+          "metricEditorMode": 0,
+          "matchExact": true
+        }
+      ]
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "데이터 정합성 검사 (백엔드 미구현 — FR/NFR 목표치만 존재)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "collapsed": false
+    },
+    {
+      "id": 101,
+      "title": "순서 역전",
+      "type": "text",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "\n      <div style=\"padding:8px;\">\n        <div style=\"color:#9fa7b3;font-size:13px;\">순서 역전</div>\n        <div style=\"color:#5eead4;font-size:32px;font-family:monospace;margin-top:8px;\">--</div>\n      </div>"
+      }
+    },
+    {
+      "id": 102,
+      "title": "주문 유실",
+      "type": "text",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 26
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "\n      <div style=\"padding:8px;\">\n        <div style=\"color:#9fa7b3;font-size:13px;\">주문 유실</div>\n        <div style=\"color:#5eead4;font-size:32px;font-family:monospace;margin-top:8px;\">--</div>\n      </div>"
+      }
+    },
+    {
+      "id": 103,
+      "title": "중복 체결",
+      "type": "text",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "\n      <div style=\"padding:8px;\">\n        <div style=\"color:#9fa7b3;font-size:13px;\">중복 체결</div>\n        <div style=\"color:#5eead4;font-size:32px;font-family:monospace;margin-top:8px;\">--</div>\n      </div>"
+      }
+    },
+    {
+      "id": 104,
+      "title": "매수·매도 총량 불일치",
+      "type": "text",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 26
+      },
+      "datasource": "Prometheus",
+      "options": {
+        "mode": "html",
+        "content": "\n      <div style=\"padding:8px;\">\n        <div style=\"color:#9fa7b3;font-size:13px;\">매수·매도 총량 불일치</div>\n        <div style=\"color:#5eead4;font-size:32px;font-family:monospace;margin-top:8px;\">--</div>\n      </div>"
+      }
+    }
+  ]
+}
