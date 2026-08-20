@@ -72,12 +72,19 @@ spec:
           # 난다(2026-08-19, 팀원이 재배포 직후 GET /v1/sessions/last-run 502 리포트 —
           # 이 세션에서 재배포를 여러 번 시킨 타이밍에 걸린 것으로 확인). ingress의
           # healthcheck-path와 같은 엔드포인트를 재사용한다.
+          # timeoutSeconds를 명시 안 하면 K8s 기본값 1초가 적용된다 — 이 엔드포인트가
+          # Redis 왕복을 포함하는데, 100배속 부하테스트에서 Redis 응답이 순간적으로
+          # 1초를 넘기면 파드는 멀쩡한데도 ALB에서 빠져 사용자가 503을 받는 걸 실측함
+          # (2026-08-20, 81초 동안 readiness 실패 7회 — 파드 자체는 Ready 조건 정상).
+          # livenessProbe까지 같은 기본값이면 더 심각하게 파드가 불필요하게 재시작될
+          # 수 있어 같이 늘림.
           readinessProbe:
             httpGet:
               path: /v1/markets/KRW-BTC/orderbook
               port: 8081
             initialDelaySeconds: 3
             periodSeconds: 5
+            timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
             httpGet:
@@ -85,6 +92,7 @@ spec:
               port: 8081
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 3
             failureThreshold: 3
           # readinessProbe는 "새 파드가 준비되기 전에 트래픽을 받는" 쪽은 막아주지만,
           # "오래된 파드가 종료되기 시작한 뒤에도 ALB가 잠깐 더 트래픽을 보내는" 반대쪽
