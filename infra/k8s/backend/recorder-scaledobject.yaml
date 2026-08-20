@@ -1,0 +1,35 @@
+# recorder를 컨슈머 랙(recorder_consumer_lag, recorder/metrics.go가 노출 —
+# orders/executions 리더 각각)으로 스케일한다(2026-08-20, matching-engine과 같은
+# 이유로 추가 — 부하 테스트 중 recorder 혼자 백프레셔에 걸려 orderapi가 신규
+# 주문을 429로 거절하는데 레플리카는 1개뿐이라 사용자가 "왜 스케일 아웃 안
+# 되냐"고 지적해서 발견함).
+#
+# matching-engine과 달리 recorder는 FR-11 같은 파티션-마켓 고정 배정이 없는
+# 표준 Kafka 컨슈머 그룹(recorder-orders/recorder-executions/recorder-assignments,
+# recorder/main.go)이라 레플리카를 늘리면 Kafka가 파티션을 알아서 재분배한다 —
+# orders/executions/assignments 토픽 전부 20개 파티션이라(실측 확인, kafka-go
+# conn.ReadPartitions) 5개 레플리카까지는 여유 있게 병렬화된다.
+#
+# threshold=1000은 recorder 자신의 백프레셔 상위 워터마크(backpressureHighWatermark
+# = 2000, recorder/main.go)의 절반 — 백프레셔가 실제로 걸려서 orderapi가 429를
+# 뱉기 전에 먼저 스케일 아웃을 시도해보려는 것. matching-engine의 500과 마찬가지로
+# 실측 부하 시험 전까지는 근거 없는 시작값이다.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: recorder
+  namespace: backend
+spec:
+  scaleTargetRef:
+    name: recorder
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://monitor.jhyang.click:9090
+        metricName: recorder_total_lag
+        query: sum(recorder_consumer_lag)
+        threshold: "1000"
