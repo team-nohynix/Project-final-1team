@@ -74,8 +74,8 @@
 ### 3.3 `MatchingEngineView.vue` — 엔진 목록은 **2026-08-12에 새로 생김**, 나머지는 아직 없음
 "엔진 목록"(어느 엔진이 어느 마켓을 담당 중인지)은 이제 `recorder`의 `GET /v1/matching/engines`로 연결할 수 있다(4.4 참고) — `matching_engine_assignment` 테이블의 `released_at IS NULL`인 행만 모아 엔진별로 묶어서 준다. 매칭 단계/오더북 복구 현황(`replayed/total/missing/timeSec/goalSec`)/체결 내역(Kafka partition·offset 포함) 이 세 개는 여전히 없다 — 이건 매칭 엔진 내부의 순간 상태(크래시 복구 진행률 등)라 RDS에 애초에 저장되는 값이 아니고, 별도로 노출하는 장치가 있어야 한다.
 
-### 3.4 `RealtimeMonitoringView.vue` — 이건 예외, 코드가 필요 없을 수도 있음
-이 화면은 자체 fetch 없이 `VITE_GRAFANA_DASHBOARD_URL` 환경변수로 Grafana 대시보드를 iframe으로 띄우기만 한다. 지금 그 값이 없어서 "연결 준비 중" 상태로 뜬다. AMG(Amazon Managed Grafana) 워크스페이스는 이미 만들어져 있으므로(`infra/monitoring.tf`), 거기에 대시보드를 하나 만들고 그 URL을 프론트 `.env`에 넣으면 이 화면만큼은 새 백엔드 코드 없이 끝난다 — 다만 지금 AMP(Prometheus)엔 인프라 지표만 있어서, 3.1의 애플리케이션 지표가 여기 나오게 하려면 결국 애플리케이션이 그 지표를 Prometheus 형식으로 노출해야 한다.
+### 3.4 (폐기됨, 2026-08-20) — 구 `RealtimeMonitoringView.vue` / `VITE_GRAFANA_DASHBOARD_URL` 계획
+이 절이 설명하던 "Grafana를 iframe으로 띄우는 화면"은 더는 존재하지 않는다 — `RealtimeMonitoringView.vue`는 삭제/대체됐고, 지금은 `DashboardView.vue`가 그 자리를 맡아 자체 렌더링 페이지(하드코딩 placeholder, 3.1 참고)로 재설계돼 있다. `VITE_GRAFANA_DASHBOARD_URL`은 어느 컴포넌트도 읽지 않는 죽은 환경변수라 `frontend/.env.example`에서 제거했다. 여기서 말하던 AMG(Amazon Managed Grafana)도 이 조직 계정엔 IAM Identity Center SSO 권한이 없어 구조적으로 못 쓴다고 이미 결론 나서 폐기됐고, 대신 자체 호스팅 EC2 Grafana(`infra/monitoring-ec2.tf`, `http://monitor.jhyang.click:3000`)를 쓰고 있다. 이 화면을 다시 만든다면 3.1의 애플리케이션 지표를 백엔드가 Prometheus 형식으로 노출한 뒤, 그 EC2 Grafana 대시보드 URL을 iframe으로 붙이는 쪽이 지금 인프라와 맞다.
 
 ### 3.5 "AI 트레이더 실행 결과" 화면 — **2026-08-13에 새로 생김**
 팀에서 확정한 필드 4가지(실행 상태/주문 접수·체결·미체결 수/시작·종료 시각 및 실행 시간/오류 메시지)를 지원하는 엔드포인트 세 개가 새로 생겼다. `trader`/`replayengine`이 실행을 시작·종료할 때 자동으로 남기는 값이라 프론트가 직접 계산할 게 없다.
