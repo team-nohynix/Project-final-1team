@@ -37,6 +37,10 @@ func init() {
 type claimRequest struct {
 	Owner string `json:"owner"`
 	RunID string `json:"runId,omitempty"`
+	// Speed는 선택입니다(2026-08-20, "실행 결과" 화면에 배속 노출 지원) —
+	// trader/replayengine이 자기 -speed 플래그 값을 그대로 보냅니다. 안 보내면
+	// 0으로 기록될 뿐 클레임 자체를 막지 않습니다.
+	Speed float64 `json:"speed,omitempty"`
 }
 
 // claimResponse는 POST /v1/sessions의 201 응답 본문입니다. ttlSeconds를 실어주는
@@ -66,7 +70,7 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 			return
 		}
 
-		info, err := store.Claim(r.Context(), req.Owner, req.RunID)
+		info, err := store.Claim(r.Context(), req.Owner, req.RunID, req.Speed)
 		if err != nil {
 			var conflict *session.ConflictError
 			if errors.As(err, &conflict) {
@@ -213,12 +217,13 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 // 메시지입니다(주문 접수/체결/미체결 수는 recorder의 별도 엔드포인트가 줌 —
 // docs/frontend-backend-integration.md 참고).
 type lastRunResponse struct {
-	RunID     string `json:"runId"`
-	Owner     string `json:"owner"`
-	Status    string `json:"status"`
-	StartedAt string `json:"startedAt"`
-	EndedAt   string `json:"endedAt,omitempty"`
-	Message   string `json:"message,omitempty"`
+	RunID     string  `json:"runId"`
+	Owner     string  `json:"owner"`
+	Status    string  `json:"status"`
+	StartedAt string  `json:"startedAt"`
+	EndedAt   string  `json:"endedAt,omitempty"`
+	Message   string  `json:"message,omitempty"`
+	Speed     float64 `json:"speed,omitempty"`
 }
 
 func toLastRunResponse(record session.RunRecord) lastRunResponse {
@@ -228,6 +233,7 @@ func toLastRunResponse(record session.RunRecord) lastRunResponse {
 		Status:    record.Status,
 		StartedAt: record.StartedAt.Format(time.RFC3339),
 		Message:   record.Message,
+		Speed:     record.Speed,
 	}
 	if !record.EndedAt.IsZero() {
 		resp.EndedAt = record.EndedAt.Format(time.RFC3339)

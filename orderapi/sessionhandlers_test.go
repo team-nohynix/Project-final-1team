@@ -31,14 +31,16 @@ type fakeSessionStore struct {
 	requestStopErr    error
 
 	lastRunID       string
+	lastSpeed       float64
 	lastHeartbeatID string
 	lastReleaseID   string
 	lastOutcome     session.RunOutcome
 	lastStopRunID   string
 }
 
-func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string) (session.Info, error) {
+func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string, speed float64) (session.Info, error) {
 	f.lastRunID = runID
+	f.lastSpeed = speed
 	if f.claimErr != nil {
 		return session.Info{}, f.claimErr
 	}

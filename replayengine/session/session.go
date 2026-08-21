@@ -30,8 +30,9 @@ var ErrAlreadyActive = errors.New("이미 활성 세션이 있습니다")
 // 통과합니다(`orderapi/session`의 그룹 모델 참고). 비우면(샤드 1개짜리 단독
 // 실행) 서버가 하나 생성해 그룹 크기 1로 취급 — 기존 동작과 동일합니다.
 type claimRequest struct {
-	Owner string `json:"owner"`
-	RunID string `json:"runId,omitempty"`
+	Owner string  `json:"owner"`
+	RunID string  `json:"runId,omitempty"`
+	Speed float64 `json:"speed,omitempty"`
 }
 
 type claimResponse struct {
@@ -63,9 +64,10 @@ type Client struct {
 // Claim은 owner 이름으로 runID 그룹에 합류합니다(runID가 비어있으면 그룹
 // 크기 1로 단독 클레임). 이미 다른 runID/owner의 그룹이 활성 상태면
 // ErrAlreadyActive를 감싼 에러를 반환합니다 — 호출부는 이 경우 실행을 시작하지
-// 말고 종료해야 합니다.
-func (c Client) Claim(ctx context.Context, owner, runID string) (sessionID string, ttlSeconds int, err error) {
-	body, err := json.Marshal(claimRequest{Owner: owner, RunID: runID})
+// 말고 종료해야 합니다. speed는 2026-08-20 추가 — trader/session.Client.Claim과
+// 같은 이유(-speed 플래그 값을 orderapi의 RunRecord에 기록).
+func (c Client) Claim(ctx context.Context, owner, runID string, speed float64) (sessionID string, ttlSeconds int, err error) {
+	body, err := json.Marshal(claimRequest{Owner: owner, RunID: runID, Speed: speed})
 	if err != nil {
 		return "", 0, err
 	}
