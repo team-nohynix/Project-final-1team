@@ -26,7 +26,8 @@ import (
 var ErrAlreadyActive = errors.New("이미 활성 세션이 있습니다")
 
 type claimRequest struct {
-	Owner string `json:"owner"`
+	Owner string  `json:"owner"`
+	Speed float64 `json:"speed,omitempty"`
 }
 
 type claimResponse struct {
@@ -56,9 +57,11 @@ type Client struct {
 
 // Claim은 owner 이름으로 세션을 하나 클레임합니다. 이미 활성 세션이 있으면
 // ErrAlreadyActive를 감싼 에러를 반환합니다 — 호출부는 이 경우 실행을 시작하지
-// 말고 종료해야 합니다.
-func (c Client) Claim(ctx context.Context, owner string) (sessionID string, ttlSeconds int, err error) {
-	body, err := json.Marshal(claimRequest{Owner: owner})
+// 말고 종료해야 합니다. speed는 2026-08-20 추가 — "실행 결과" 화면에 배속을
+// 같이 보여주기 위해 orderapi의 RunRecord에 기록됩니다(main.go의 -speed 플래그
+// 값을 그대로 전달).
+func (c Client) Claim(ctx context.Context, owner string, speed float64) (sessionID string, ttlSeconds int, err error) {
+	body, err := json.Marshal(claimRequest{Owner: owner, Speed: speed})
 	if err != nil {
 		return "", 0, err
 	}

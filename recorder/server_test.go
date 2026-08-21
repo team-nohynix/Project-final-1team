@@ -230,7 +230,11 @@ func TestOrderSummaryHandler(t *testing.T) {
 	})
 
 	t.Run("to omitted defaults to zero value (querier decides 'now')", func(t *testing.T) {
-		q := &fakeQuerier{summary: query.OrderSummary{Accepted: 10, Filled: 7, Unfilled: 3}}
+		q := &fakeQuerier{summary: query.OrderSummary{
+			Accepted: 10, Filled: 7, Unfilled: 3,
+			ByMarket: []query.MarketOrderSummary{{Market: "KRW-BTC", Accepted: 10, Filled: 7, Unfilled: 3}},
+			BySide:   []query.SideOrderSummary{{Side: "BUY", Count: 6}, {Side: "SELL", Count: 4}},
+		}}
 		w := httptest.NewRecorder()
 		orderSummaryHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
 
@@ -246,6 +250,12 @@ func TestOrderSummaryHandler(t *testing.T) {
 		}
 		if got.Accepted != 10 || got.Filled != 7 || got.Unfilled != 3 {
 			t.Fatalf("unexpected summary: %+v", got)
+		}
+		if len(got.ByMarket) != 1 || got.ByMarket[0].Market != "KRW-BTC" || got.ByMarket[0].Filled != 7 {
+			t.Fatalf("unexpected byMarket: %+v", got.ByMarket)
+		}
+		if len(got.BySide) != 2 || got.BySide[0].Side != "BUY" || got.BySide[0].Count != 6 {
+			t.Fatalf("unexpected bySide: %+v", got.BySide)
 		}
 	})
 

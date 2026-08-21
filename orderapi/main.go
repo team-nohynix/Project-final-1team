@@ -84,9 +84,14 @@ func main() {
 	defer redisClient.Close()
 
 	sessionStore := session.NewRedisStore(redisClient, sessionTTL)
+	// matchingLagChecker는 acceptOrderHandler의 lagChecker(recorder_lag +
+	// matching_lag 둘 다 봄)와 별개로 matching_lag 하나만 봅니다 — 미종결
+	// 주문 정리(자동/수동 둘 다, sessioncleanup.go 참고)가 시작 전에 확인하는
+	// 건 "매칭 엔진이 지금 orders를 잘 따라가고 있는가" 하나뿐이라서입니다.
+	matchingLagChecker := &backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey}
 	lagChecker := backpressure.MultiChecker{
 		&backpressure.RedisChecker{Client: redisClient, Key: backpressureRecorderLagKey},
-		&backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey},
+		matchingLagChecker,
 	}
 
 	mux := http.NewServeMux()
@@ -101,14 +106,15 @@ func main() {
 	// recorder를 부르는 데 씁니다 — 별도 요청마다 새 클라이언트를 만들 필요
 	// 없이 하나 공유합니다.
 	recorderHTTPClient := &http.Client{Timeout: 30 * time.Second}
-	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL))
+	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL, matchingLagChecker))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 
-	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트도 등록하지 않습니다 —
+	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
-	// 수만 건을 동기 처리할 수 있어 releaseSessionHandler보다 훨씬 넉넉한
-	// 타임아웃의 별도 클라이언트를 씁니다.
+	// 일괄 정리 자체는 이제 비동기라(2026-08-20, sessioncleanup.go 참고) 이
+	// 클라이언트의 타임아웃은 더 이상 "얼마나 오래 걸리는 작업을 견디느냐"가
+	// 아니라 평범한 HTTP 호출(recorder 조회 하나)의 타임아웃일 뿐입니다.
 	//
 	// 꺼져있을 때도 반드시 로그를 남깁니다(2026-08-20) — JOB_TRIGGER_QUEUE_URL은
 	// 원래부터 이렇게 로그를 남기는데 RECORDER_URL만 조용히 넘어가고 있었고,
@@ -117,8 +123,9 @@ func main() {
 	// 나서야 원인을 알아낸 사고가 있었습니다. "선택 기능으로 둔다"는 판단은
 	// 맞지만 "꺼져 있다는 사실"은 시작 로그에 항상 드러나야 합니다.
 	if cfg.RecorderURL != "" {
-		cleanupHTTPClient := &http.Client{Timeout: 5 * time.Minute}
-		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", cleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+		cleanupHTTPClient := &http.Client{Timeout: 30 * time.Second}
+		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", startCleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer, matchingLagChecker))
+		mux.HandleFunc("GET /v1/admin/cleanup-unresolved-orders/status", cleanupAllStatusHandler())
 		log.Printf("recorder 연동 활성화 (recorderUrl=%s) — 세션 종료 자동 정리 + 수동 정리 엔드포인트 사용 가능", cfg.RecorderURL)
 	} else {
 		log.Printf("RECORDER_URL이 없어 세션 종료 자동 정리 및 POST /v1/admin/cleanup-unresolved-orders 비활성화")

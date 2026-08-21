@@ -61,7 +61,7 @@ func run() (err error) {
 	// 종료해 defer(세션 반납)를 건너뛰므로, 세션 반납이 항상 실행되도록 에러를
 	// 반환하는 형태로 바꾸고 main()에서 마지막에 한 번만 log.Fatal한다.
 	sessionClient := session.Client{HTTPClient: httpClient, BaseURL: cfg.OrderAPIURL}
-	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "trader")
+	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "trader", *speed)
 	if err != nil {
 		return fmt.Errorf("세션 클레임 실패 — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있습니다: %w", err)
 	}

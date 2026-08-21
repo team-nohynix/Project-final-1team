@@ -127,6 +127,33 @@ type OrderSummary struct {
 	Accepted int64 `json:"accepted"`
 	Filled   int64 `json:"filled"`
 	Unfilled int64 `json:"unfilled"`
+	// ByMarket/BySide는 2026-08-20 추가 — 페이퍼 트레이딩 "실행 결과" 화면에
+	// 마켓별 개수/체결률, 매수·매도 비율을 보여달라는 요청 지원. 비율 자체는
+	// 여기서 계산하지 않고 원본 개수만 내려준다 — 프론트가 나누기만 하면
+	// 되는 값을 서버가 미리 계산해주지 않는 이 프로젝트의 기존 관례(실행
+	// 시간을 endedAt-startedAt으로 프론트가 계산하는 것과 동일한 이유)와
+	// 같다. "생성된 주문 수"는 논의 끝에 Accepted를 그대로 쓰기로 했다 —
+	// 봇의 원시 판단 횟수나 거절된 주문 수는 여전히 구조적으로 관측
+	// 불가능하다(CLAUDE.md 참고).
+	ByMarket []MarketOrderSummary `json:"byMarket"`
+	BySide   []SideOrderSummary   `json:"bySide"`
+}
+
+// MarketOrderSummary는 OrderSummary.ByMarket의 항목 하나 — 마켓 하나의
+// accepted/filled/unfilled입니다(최상위 OrderSummary와 같은 세 필드,
+// 프론트가 같은 렌더링 로직을 마켓별 행에도 재사용할 수 있도록).
+type MarketOrderSummary struct {
+	Market   string `json:"market"`
+	Accepted int64  `json:"accepted"`
+	Filled   int64  `json:"filled"`
+	Unfilled int64  `json:"unfilled"`
+}
+
+// SideOrderSummary는 OrderSummary.BySide의 항목 하나 — "BUY"/"SELL" 각각의
+// 접수 건수입니다.
+type SideOrderSummary struct {
+	Side  string `json:"side"`
+	Count int64  `json:"count"`
 }
 
 // MetricsBucket은 DashboardMetrics.Series의 항목 하나 — 1분 단위 버킷의
@@ -538,7 +565,77 @@ func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to t
 	if err != nil {
 		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", err)
 	}
+
+	byMarket, err := q.orderSummaryByMarket(ctx, mode, from, to)
+	if err != nil {
+		return OrderSummary{}, err
+	}
+	s.ByMarket = byMarket
+
+	bySide, err := q.orderSummaryBySide(ctx, mode, from, to)
+	if err != nil {
+		return OrderSummary{}, err
+	}
+	s.BySide = bySide
+
 	return s, nil
+}
+
+// orderSummaryByMarket은 마켓별 accepted/filled/unfilled를 집계합니다. 위
+// 메인 집계와 달리 COALESCE가 필요 없다 — GROUP BY는 결과에 없는 마켓을
+// 아예 안 돌려주므로(빈 그룹이 없음), 한 그룹에 행이 1개라도 있으면
+// SUM(CASE...)이 NULL이 아니라 항상 0 이상의 숫자가 나온다.
+func (q *MySQLQuerier) orderSummaryByMarket(ctx context.Context, mode string, from, to time.Time) ([]MarketOrderSummary, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT
+			market_code,
+			COUNT(*),
+			SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END)
+		FROM trade_order
+		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		GROUP BY market_code
+		ORDER BY market_code
+	`, mode, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("마켓별 주문 집계 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	out := []MarketOrderSummary{}
+	for rows.Next() {
+		var m MarketOrderSummary
+		if err := rows.Scan(&m.Market, &m.Accepted, &m.Filled, &m.Unfilled); err != nil {
+			return nil, fmt.Errorf("마켓별 주문 집계 조회 실패: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// orderSummaryBySide는 매수/매도 접수 건수를 집계합니다.
+func (q *MySQLQuerier) orderSummaryBySide(ctx context.Context, mode string, from, to time.Time) ([]SideOrderSummary, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT side, COUNT(*)
+		FROM trade_order
+		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		GROUP BY side
+		ORDER BY side
+	`, mode, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("매수/매도 집계 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	out := []SideOrderSummary{}
+	for rows.Next() {
+		var sd SideOrderSummary
+		if err := rows.Scan(&sd.Side, &sd.Count); err != nil {
+			return nil, fmt.Errorf("매수/매도 집계 조회 실패: %w", err)
+		}
+		out = append(out, sd)
+	}
+	return out, rows.Err()
 }
 
 // UnresolvedOrders는 mode+[from,to) 구간에서 아직 ACCEPTED/PARTIALLY_FILLED

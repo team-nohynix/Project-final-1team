@@ -29,16 +29,21 @@ type fakeSessionStore struct {
 	prevRunFound      bool
 	prevRunErr        error
 	requestStopErr    error
+	appendNoteErr     error
 
 	lastRunID       string
+	lastSpeed       float64
 	lastHeartbeatID string
 	lastReleaseID   string
 	lastOutcome     session.RunOutcome
 	lastStopRunID   string
+	lastNoteRunID   string
+	lastNote        string
 }
 
-func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string) (session.Info, error) {
+func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string, speed float64) (session.Info, error) {
 	f.lastRunID = runID
+	f.lastSpeed = speed
 	if f.claimErr != nil {
 		return session.Info{}, f.claimErr
 	}
@@ -75,6 +80,12 @@ func (f *fakeSessionStore) PreviousRun(ctx context.Context) (session.RunRecord, 
 	return f.prevRunRec, f.prevRunFound, f.prevRunErr
 }
 
+func (f *fakeSessionStore) AppendLastRunNote(ctx context.Context, runID, note string) error {
+	f.lastNoteRunID = runID
+	f.lastNote = note
+	return f.appendNoteErr
+}
+
 // newSessionMux는 미종결 주문 정리(sessioncleanup.go)를 건너뛰는 기본
 // 구성으로 만듭니다(recorderURL 빈 문자열) — 그 정리 로직 자체를 검증하는
 // 테스트는 releaseSessionHandler를 직접 호출해서 recorderURL을 채웁니다.
@@ -83,7 +94,7 @@ func newSessionMux(store session.Store) *http.ServeMux {
 	mux.HandleFunc("POST /v1/sessions", claimSessionHandler(store))
 	mux.HandleFunc("PUT /v1/sessions/{sessionId}/heartbeat", heartbeatSessionHandler(store))
 	mux.HandleFunc("POST /v1/sessions/{runId}/stop", stopRunHandler(store))
-	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store, &fakePublisher{}, &http.Client{}, ""))
+	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store, &fakePublisher{}, &http.Client{}, "", &fakeChecker{}))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(store))
 	return mux

@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"orderapi/backpressure"
 	"orderapi/kafkaclient"
 	"orderapi/session"
 )
@@ -37,6 +38,10 @@ func init() {
 type claimRequest struct {
 	Owner string `json:"owner"`
 	RunID string `json:"runId,omitempty"`
+	// Speed는 선택입니다(2026-08-20, "실행 결과" 화면에 배속 노출 지원) —
+	// trader/replayengine이 자기 -speed 플래그 값을 그대로 보냅니다. 안 보내면
+	// 0으로 기록될 뿐 클레임 자체를 막지 않습니다.
+	Speed float64 `json:"speed,omitempty"`
 }
 
 // claimResponse는 POST /v1/sessions의 201 응답 본문입니다. ttlSeconds를 실어주는
@@ -66,7 +71,7 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 			return
 		}
 
-		info, err := store.Claim(r.Context(), req.Owner, req.RunID)
+		info, err := store.Claim(r.Context(), req.Owner, req.RunID, req.Speed)
 		if err != nil {
 			var conflict *session.ConflictError
 			if errors.As(err, &conflict) {
@@ -165,10 +170,11 @@ type releaseRequest struct {
 // 반납됐거나 존재하지 않는 세션도 404로 명확히 알려줍니다(취소 처리와 달리, 아무
 // 상태도 안 남기므로 idempotent-no-op으로 200을 줄 이유가 없습니다).
 //
-// producer/httpClient/recorderURL은 그룹의 마지막 멤버가 반납할 때(=이 실행
-// 전체가 끝날 때)만 도는 미종결 주문 정리(2026-08-19, sessioncleanup.go
-// 참고)에 씁니다 — recorderURL이 비어있으면 그 정리 자체를 건너뜁니다.
-func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, httpClient *http.Client, recorderURL string) http.HandlerFunc {
+// producer/httpClient/recorderURL/matchingLagChecker는 그룹의 마지막 멤버가
+// 반납할 때(=이 실행 전체가 끝날 때)만 도는 미종결 주문 정리(2026-08-19,
+// sessioncleanup.go 참고)에 씁니다 — recorderURL이 비어있으면 그 정리 자체를
+// 건너뜁니다.
+func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, httpClient *http.Client, recorderURL string, matchingLagChecker backpressure.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -203,7 +209,7 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 		// 정리는 best-effort 백그라운드 작업이라 응답을 기다리게 하지 않습니다.
 		// r.Context()는 응답이 끝나면 곧 취소되므로 별도 컨텍스트를 씁니다.
 		if finalized {
-			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, record)
+			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, store, matchingLagChecker, record.RunID, record.StartedAt)
 		}
 	}
 }
@@ -213,12 +219,13 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 // 메시지입니다(주문 접수/체결/미체결 수는 recorder의 별도 엔드포인트가 줌 —
 // docs/frontend-backend-integration.md 참고).
 type lastRunResponse struct {
-	RunID     string `json:"runId"`
-	Owner     string `json:"owner"`
-	Status    string `json:"status"`
-	StartedAt string `json:"startedAt"`
-	EndedAt   string `json:"endedAt,omitempty"`
-	Message   string `json:"message,omitempty"`
+	RunID     string  `json:"runId"`
+	Owner     string  `json:"owner"`
+	Status    string  `json:"status"`
+	StartedAt string  `json:"startedAt"`
+	EndedAt   string  `json:"endedAt,omitempty"`
+	Message   string  `json:"message,omitempty"`
+	Speed     float64 `json:"speed,omitempty"`
 }
 
 func toLastRunResponse(record session.RunRecord) lastRunResponse {
@@ -228,6 +235,7 @@ func toLastRunResponse(record session.RunRecord) lastRunResponse {
 		Status:    record.Status,
 		StartedAt: record.StartedAt.Format(time.RFC3339),
 		Message:   record.Message,
+		Speed:     record.Speed,
 	}
 	if !record.EndedAt.IsZero() {
 		resp.EndedAt = record.EndedAt.Format(time.RFC3339)
