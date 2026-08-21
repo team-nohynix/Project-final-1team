@@ -28,14 +28,17 @@ const (
 	seriesBucketFmt = "2006-01-02T15:04:00Z" // 분 단위로 잘라 표시(초는 항상 00)
 
 	// ordersByStatusWindow은 OrdersByStatus 전용 창입니다(seriesWindow과
-	// 별개) — 프론트 /v1/orders/summary처럼 "이번 세션 전체 누적"에 가깝게
-	// 보여달라는 요청으로 2026-08-21에 10분에서 늘렸습니다. 안전한 이유는
-	// 창을 짧게 유지해서가 아니라 idx_trade_order_status_submitted(status,
-	// submitted_at) 인덱스가 이 range를 그대로 인덱스 스캔으로 처리하기
-	// 때문입니다 — 그래서 24시간처럼 넉넉히 잡아도 비용은 테이블 전체
-	// 크기가 아니라 그 시간대 행 수에만 비례합니다(RDS CPU 포화 사고의
-	// 진짜 원인은 "무제한"이었지, "누적"이 아니었습니다).
-	ordersByStatusWindow = 24 * time.Hour
+	// 별개). 2026-08-21에 "세션 전체 누적처럼 보이게" 24시간으로 늘렸다가
+	// 몇 분 만에 RDS CPU가 트래픽 0인 상태에서 13%→57%로 튀는 걸 실측하고
+	// 되돌렸습니다 — "인덱스를 타니 range가 커도 비용은 그 구간 행 수에만
+	// 비례한다"는 이유 자체는 맞지만, 이 시스템의 실제 처리량(테스트 중
+	// 100건/초 이상)에서는 "24시간 구간"이 사실상 "오늘 하루 전체"와
+	// 맞먹는 행 수라서 예전 무제한 GROUP BY와 실질적으로 비슷한 규모의
+	// 스캔이 됐습니다. "인덱스로 bound돼 있다"가 아니라 "그 구간의 실제
+	// 행 수가 충분히 작다"가 진짜 안전 조건입니다. 세션 전체 누적을
+	// 정확히 보여주려면 recorder가 실제 세션 시작 시각을 알아야 하는데
+	// (지금은 모름) 그건 별도 작업이라, 우선 안전했던 10분으로 되돌립니다.
+	ordersByStatusWindow = seriesWindow
 )
 
 // ExecutionTrace는 OrderTrace.Executions의 항목 하나입니다.
@@ -348,18 +351,17 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	// 남아 전체 COUNT가 시간이 갈수록 무한히 커지는데, 그 전체를 매번
 	// GROUP BY로 다시 세는 게 문제였습니다. 여기서는 idx_trade_order_status_submitted
 	// (status, submitted_at) 인덱스를 그대로 타도록 상태 4개를 각각
-	// "최근 ordersByStatusWindow(24시간) 안에 접수된 주문 중 그 상태" 쿼리로
+	// "최근 ordersByStatusWindow(10분) 안에 접수된 주문 중 그 상태" 쿼리로
 	// 나눠서, 사고 전과 달리 테이블 전체 크기와 무관하게 그 시간대 행 수에만
-	// 비례하는 비용으로 만들었습니다(E2E P99 쿼리를 나눈 것과 같은 이유) —
-	// 프론트 /v1/orders/summary가 "이번 세션 전체"를 보여주는 것과 실질적으로
-	// 같은 체감을 주려고 24시간으로 넉넉히 잡았습니다(테스트 세션이 그보다
-	// 길게 가는 경우는 없다고 가정).
+	// 비례하는 비용으로 만들었습니다(E2E P99 쿼리를 나눈 것과 같은 이유).
+	// (같은 날 24시간으로 늘렸다가 트래픽 0인데도 RDS CPU가 57%로 튀는 걸
+	// 보고 즉시 되돌린 적이 있습니다 — ordersByStatusWindow 상수 주석 참고.)
 	statusByStatus := map[string]int64{}
 	for _, status := range []string{"ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCELED"} {
 		var count int64
 		if err := q.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM trade_order WHERE status = ? AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? HOUR`,
-			status, int(ordersByStatusWindow.Hours()),
+			`SELECT COUNT(*) FROM trade_order WHERE status = ? AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE`,
+			status, int(ordersByStatusWindow.Minutes()),
 		).Scan(&count); err != nil {
 			return DashboardMetrics{}, fmt.Errorf("상태별 건수 조회 실패 (status=%s): %w", status, err)
 		}
