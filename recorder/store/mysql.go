@@ -257,12 +257,23 @@ func reconcilePreexistingFills(ctx context.Context, tx *sql.Tx, orderIDs []strin
 	return nil
 }
 
-// CancelOrdersBatch는 취소 여러 건을 한 트랜잭션(=한 번의 커밋) 안에서
-// 처리합니다. UPDATE 문 자체는 건당 하나씩 실행되지만(각 취소가 서로 다른
-// order_id를 대상으로 해서 하나의 다중 행 UPDATE로 합치기 어려움), 트랜잭션을
-// 하나로 묶는 것만으로도 커밋 횟수(= RDS에서 상대적으로 비싼 연산)를 건수만큼이
-// 아니라 배치당 1번으로 줄일 수 있습니다. 대상 주문이 없는 항목(NEW를 못 본
-// CANCEL)은 그 항목만 영향받는 행 0개로 조용히 넘어갑니다 — 에러가 아닙니다.
+// CancelOrdersBatch는 취소 여러 건을 order_id→canceled_at 매핑을 담은 파생
+// 테이블(VALUES)과 JOIN해서 한 번의 UPDATE...JOIN으로 반영합니다.
+//
+// **2026-08-21, executions 배치화와 같은 이유로 재작성** — 이전엔 취소 건마다
+// 개별 UPDATE를 트랜잭션 하나로만 묶어 실행했습니다(200건이면 UPDATE 200번,
+// applyFillsBatch가 겪었던 것과 같은 구조적 병목의 축소판). 각 취소가 서로
+// 다른 order_id·canceled_at을 대상으로 해서 정적인 CASE WHEN으로는 못 묶지만,
+// order_id→canceled_at 매핑 자체를 파생 테이블로 만들어 JOIN하면 한 문장으로
+// 묶을 수 있습니다. 대상 주문이 없는 항목(NEW를 못 본 CANCEL)은 JOIN이 그냥
+// 매치되지 않아 조용히 넘어갑니다 — 에러가 아닙니다.
+//
+// **같은 order_id가 한 배치 안에 두 번 이상 등장하면 첫 번째 항목만 반영합니다**
+// — 정상 흐름에선 거의 없지만(재전달 등으로 이론상 가능), 기존 순차 처리에서는
+// 첫 취소가 먼저 status를 CANCELED로 바꾸고 나면 같은 order_id의 후속 취소는
+// 아래 WHERE 가드에 걸려 0건 영향(=무시)이었습니다. 이 결과를 그대로 재현하려고
+// Go 쪽에서 미리 결정적으로 중복을 제거합니다 — MySQL의 다중 매치 UPDATE...JOIN이
+// 어느 쪽 값을 적용할지는 명세상 보장되지 않아서, 그 판단을 SQL에 맡기지 않습니다.
 //
 // WHERE에 FILLED도 막는 이유(2026-08-07, 실제 발생 가능한 케이스 분석 후 결정) —
 // orders/executions는 기록기가 서로 독립적으로 소비하므로(배칭으로 그 창이 더
@@ -277,6 +288,36 @@ func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInpu
 		return nil
 	}
 
+	seen := make(map[string]struct{}, len(cancels))
+	var sb strings.Builder
+	sb.WriteString(`
+		UPDATE trade_order t
+		JOIN (`)
+	args := make([]any, 0, len(cancels)*2)
+	first := true
+	for _, c := range cancels {
+		if _, ok := seen[c.OrderID]; ok {
+			continue
+		}
+		seen[c.OrderID] = struct{}{}
+
+		parsed, err := parseTimestamp(c.CanceledAt)
+		if err != nil {
+			return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
+		}
+		if !first {
+			sb.WriteString(" UNION ALL ")
+		}
+		first = false
+		sb.WriteString("SELECT ? AS order_id, ? AS canceled_at")
+		args = append(args, c.OrderID, parsed)
+	}
+	sb.WriteString(`
+		) d ON t.order_id = d.order_id
+		SET t.status = 'CANCELED', t.canceled_at = d.canceled_at
+		WHERE t.status NOT IN ('CANCELED', 'FILLED')
+	`)
+
 	return withRetryOnDeadlock(func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -284,18 +325,8 @@ func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInpu
 		}
 		defer tx.Rollback()
 
-		for _, c := range cancels {
-			parsed, err := parseTimestamp(c.CanceledAt)
-			if err != nil {
-				return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
-			}
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE trade_order
-				SET status = 'CANCELED', canceled_at = ?
-				WHERE order_id = ? AND status NOT IN ('CANCELED', 'FILLED')
-			`, parsed, c.OrderID); err != nil {
-				return fmt.Errorf("취소 일괄 반영 실패 (orderId=%s): %w", c.OrderID, err)
-			}
+		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+			return fmt.Errorf("취소 일괄 반영 실패 (%d건): %w", len(cancels), err)
 		}
 
 		if err := tx.Commit(); err != nil {
