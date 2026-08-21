@@ -30,6 +30,15 @@ const cleanupLoading = ref(false)
 const cleanupMessage = ref('')
 const cleanupIsError = ref(false)
 
+// 매칭엔진 호가창 잔량 초기화 (2026-08-21) — 위 "일괄 정리"와는 다른 문제를
+// 겨냥한다. 그건 DB(recorder) 기준 미종결 주문을 취소하는 거라, 매칭엔진이
+// 크래시 등으로 그 취소를 못 받거나 스냅샷 저장에 실패하면 DB는 깨끗해져도
+// 매칭엔진 자신의 Redis 스냅샷 + 각 파드 메모리에는 미체결 주문이 그대로
+// 남는다(orderapi/adminreset.go 참고). 이 버튼은 그 잔량만 지운다.
+const bookResetLoading = ref(false)
+const bookResetMessage = ref('')
+const bookResetIsError = ref(false)
+
 // 과거 시세 수집 상태 (백엔드 API 미확정 — 프론트 상태만 준비)
 const collectionStatus = ref('idle') // 'idle' | 'collecting' | 'completed' | 'failed'
 // 백엔드 응답 예정 필드: 수집 날짜 / 수집 마켓 수 / 수집 성공 마켓 수 / 수집 실패 마켓 수
@@ -815,6 +824,31 @@ const cleanupUnresolvedOrders = async () => {
     cleanupLoading.value = false
   }
 }
+
+const resetMatchingEngineBook = async () => {
+  if (bookResetLoading.value) return
+  const ok = window.confirm('매칭엔진 호가창(Redis 스냅샷 + 각 파드 메모리)에 남은 미체결 주문을 전부 비웁니다. 매칭엔진이 재시작됩니다. 계속할까요?')
+  if (!ok) return
+
+  bookResetLoading.value = true
+  bookResetMessage.value = ''
+  bookResetIsError.value = false
+  try {
+    const res = await fetch('/order-api/v1/admin/reset-matching-engine-book', { method: 'POST' })
+    if (!res.ok) {
+      let body = null
+      try { body = await res.json() } catch (e) {}
+      throw new Error(body?.message || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    bookResetMessage.value = `스냅샷 ${data.deletedSnapshots}개 삭제, 매칭엔진 재시작 트리거함`
+  } catch (e) {
+    bookResetIsError.value = true
+    bookResetMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    bookResetLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -1067,6 +1101,17 @@ const cleanupUnresolvedOrders = async () => {
         {{ cleanupLoading ? '정리 중...' : '일괄 정리' }}
       </button>
       <div v-if="cleanupMessage" :class="['cleanup-message', { error: cleanupIsError }]">{{ cleanupMessage }}</div>
+    </section>
+
+    <section class="cleanup-section">
+      <div class="cleanup-text">
+        <h4>매칭엔진 호가창 잔량 지우기</h4>
+        <p>위 "일괄 정리"는 DB(recorder) 기준으로만 정리됩니다 — 매칭엔진이 그 취소를 못 받았거나 저장에 실패하면 매칭엔진 자신의 Redis 스냅샷과 각 파드 메모리에는 미체결 주문이 그대로 남을 수 있습니다. 이 버튼은 그 잔량을 지우고 매칭엔진을 재시작합니다(진행 중인 세션이 있으면 매칭이 잠시 끊깁니다).</p>
+      </div>
+      <button class="btn-dark" :disabled="bookResetLoading" @click="resetMatchingEngineBook">
+        {{ bookResetLoading ? '초기화 중...' : '잔량 지우기' }}
+      </button>
+      <div v-if="bookResetMessage" :class="['cleanup-message', { error: bookResetIsError }]">{{ bookResetMessage }}</div>
     </section>
   </div>
 </template>
