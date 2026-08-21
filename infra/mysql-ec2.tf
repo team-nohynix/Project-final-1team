@@ -145,7 +145,7 @@ resource "aws_iam_instance_profile" "mysql" {
 # 있음)을 이미 쓰고 있어 별도 네트워크 리소스 없이 그대로 재사용 가능하다.
 resource "aws_security_group" "team1_sg_mysql_ec2" {
   name        = "team1-sg-mysql-ec2"
-  description = "team1 self-hosted MySQL EC2 - eks_backend only, no public access (team1_sg_rds와 동일한 규칙)"
+  description = "team1 self-hosted MySQL EC2 - eks_backend only, no public access (same rule as old team1_sg_rds)"
   vpc_id      = data.terraform_remote_state.network.outputs.vpc_id
 
   ingress {
