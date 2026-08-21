@@ -19,6 +19,32 @@ func resetCleanupAllStatus(t *testing.T) {
 	cleanupAllMu.Unlock()
 }
 
+// waitForCleanupAllSettled는 startCleanupAllUnresolvedOrdersHandler가 띄운
+// 백그라운드 고루틴(runCleanupAllUnresolvedOrders)이 IN_PROGRESS를 벗어날
+// 때까지 기다립니다 — 이 고루틴이 테스트 함수가 끝난 뒤까지 살아있으면
+// cleanupAllLatest(패키지 전역)를 뒤늦게 덮어써서 다음 테스트를 흔드는
+// flaky 실패로 이어집니다(실측: CI에서 이 이유로
+// TestStartCleanupAllUnresolvedOrdersHandlerConflictWhileInProgress가 깨짐).
+// 202를 응답한 뒤 고루틴을 스폰하는 테스트는 반환 전에 반드시 이 함수를
+// 불러야 합니다.
+func waitForCleanupAllSettled(t *testing.T) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		cleanupAllMu.Lock()
+		status := cleanupAllLatest.Status
+		cleanupAllMu.Unlock()
+		if status != "IN_PROGRESS" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("백그라운드 정리 고루틴이 제한 시간 안에 끝나지 않음")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestCleanupUnresolvedOrdersSkipsWhenRecorderURLEmpty(t *testing.T) {
 	pub := &fakePublisher{}
 
@@ -206,6 +232,7 @@ func TestStartCleanupAllUnresolvedOrdersHandlerForceBypassesLagCheck(t *testing.
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusAccepted, w.Body.String())
 	}
+	waitForCleanupAllSettled(t)
 }
 
 // TestStartCleanupAllUnresolvedOrdersHandlerLagCheckErrorFailsOpen는 랙 확인
@@ -225,6 +252,7 @@ func TestStartCleanupAllUnresolvedOrdersHandlerLagCheckErrorFailsOpen(t *testing
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d (랙 확인 실패는 fail-open이어야 함)", w.Code, http.StatusAccepted)
 	}
+	waitForCleanupAllSettled(t)
 }
 
 // TestStartCleanupAllUnresolvedOrdersHandlerReturnsImmediately는 2026-08-20의
@@ -238,10 +266,7 @@ func TestStartCleanupAllUnresolvedOrdersHandlerReturnsImmediately(t *testing.T) 
 		<-block // 핸들러가 이 응답을 기다리지 않는지 확인하기 위해 일부러 블록
 		json.NewEncoder(w).Encode(unresolvedOrdersResponse{})
 	}))
-	defer func() {
-		close(block)
-		srv.Close()
-	}()
+	defer srv.Close()
 
 	pub := &fakePublisher{}
 	w := httptest.NewRecorder()
@@ -267,6 +292,12 @@ func TestStartCleanupAllUnresolvedOrdersHandlerReturnsImmediately(t *testing.T) 
 	if got.Status != "IN_PROGRESS" {
 		t.Errorf("status = %q, want IN_PROGRESS", got.Status)
 	}
+
+	// 백그라운드 고루틴이 아직 block 채널에서 대기 중입니다 — 풀어주고, 다음
+	// 테스트에 영향을 주지 않도록 종결 상태가 될 때까지 기다립니다(위
+	// waitForCleanupAllSettled 설명 참고).
+	close(block)
+	waitForCleanupAllSettled(t)
 }
 
 func TestStartCleanupAllUnresolvedOrdersHandlerConflictWhileInProgress(t *testing.T) {

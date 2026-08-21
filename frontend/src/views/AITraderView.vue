@@ -30,6 +30,15 @@ const cleanupLoading = ref(false)
 const cleanupMessage = ref('')
 const cleanupIsError = ref(false)
 
+// 매칭엔진 호가창 잔량 초기화 (2026-08-21) — 위 "일괄 정리"와는 다른 문제를
+// 겨냥한다. 그건 DB(recorder) 기준 미종결 주문을 취소하는 거라, 매칭엔진이
+// 크래시 등으로 그 취소를 못 받거나 스냅샷 저장에 실패하면 DB는 깨끗해져도
+// 매칭엔진 자신의 Redis 스냅샷 + 각 파드 메모리에는 미체결 주문이 그대로
+// 남는다(orderapi/adminreset.go 참고). 이 버튼은 그 잔량만 지운다.
+const bookResetLoading = ref(false)
+const bookResetMessage = ref('')
+const bookResetIsError = ref(false)
+
 // 과거 시세 수집 상태 (백엔드 API 미확정 — 프론트 상태만 준비)
 const collectionStatus = ref('idle') // 'idle' | 'collecting' | 'completed' | 'failed'
 // 백엔드 응답 예정 필드: 수집 날짜 / 수집 마켓 수 / 수집 성공 마켓 수 / 수집 실패 마켓 수
@@ -79,6 +88,7 @@ function saveStateToSession() {
       paperTradingResult: paperTradingResult.value,
       runStartedAt: runStartedAt.value,
       runEndedAt: runEndedAt.value,
+      runSpeed: runSpeed.value,
       executionError: executionError.value,
       previousRunId: previousRunId.value,
       awaitingNewRun: awaitingNewRun.value,
@@ -148,16 +158,24 @@ const collectionTargetDate = computed(() => {
   return (collectedData.value && collectedData.value.date) || requestedCollectDate.value || ''
 })
 
-// Paper trading order summary type and typed accessor
-interface OrderSummary { accepted: number; filled: number; unfilled: number }
+// Paper trading order summary types and typed accessor
+interface MarketOrderSummary { market: string; accepted: number; filled: number; unfilled: number }
+interface SideOrderSummary { side: string; count: number }
+interface OrderSummary {
+  accepted: number; filled: number; unfilled: number
+  byMarket?: MarketOrderSummary[]
+  bySide?: SideOrderSummary[]
+}
 const typedPaperTradingResult = computed<OrderSummary | null>(() => {
   const val = paperTradingResult.value as any
   if (!val) return null
-  // best-effort: expect numeric fields
+  // best-effort: expect numeric fields and optional arrays
   return {
     accepted: Number(val.accepted || 0),
     filled: Number(val.filled || 0),
     unfilled: Number(val.unfilled || 0),
+    byMarket: Array.isArray(val.byMarket) ? val.byMarket.map((m: any) => ({ market: m.market, accepted: Number(m.accepted||0), filled: Number(m.filled||0), unfilled: Number(m.unfilled||0) })) : [],
+    bySide: Array.isArray(val.bySide) ? val.bySide.map((s: any) => ({ side: String(s.side), count: Number(s.count||0) })) : [],
   }
 })
 
@@ -413,6 +431,7 @@ const resetExecution = () => {
   awaitingNewRun.value = false
   runStartedAt.value = null
   runEndedAt.value = null
+  runSpeed.value = null
   stopRequested.value = false
 }
 
@@ -431,6 +450,8 @@ const awaitingNewRun = ref(false)
 // execution run timestamps (ISO strings)
 const runStartedAt = ref<string | null>(null)
 const runEndedAt = ref<string | null>(null)
+// run speed observed from last-run (backend may include `speed` in last-run response)
+const runSpeed = ref<number | null>(null)
 
 // 유저가 중지(Stop)를 요청했는지 여부 — 폴링이나 새로고침으로 보존되어야 함
 const stopRequested = ref(false)
@@ -498,6 +519,25 @@ const fetchOrderSummary = async (startedAt: string, endedAt?: string | null) => 
     return null
   }
 }
+
+// Helpers: market fill percent and buy/sell ratio
+const marketFillRate = (m: MarketOrderSummary) => {
+  if (!m || !m.accepted) return 0
+  return Math.round((m.filled / m.accepted) * 100)
+}
+
+const buySellRatio = computed(() => {
+  const list = typedPaperTradingResult.value?.bySide ?? []
+  const buy = list.find((s) => s.side === 'BUY')?.count ?? 0
+  const sell = list.find((s) => s.side === 'SELL')?.count ?? 0
+  const total = buy + sell
+  return {
+    buy,
+    sell,
+    buyPercent: total > 0 ? Math.round((buy / total) * 100) : 0,
+    sellPercent: total > 0 ? Math.round((sell / total) * 100) : 0,
+  }
+})
 
 // 중지 요청: POST /order-api/v1/sessions/{runId}/stop
 const stopPaperTrading = async () => {
@@ -597,6 +637,8 @@ const pollLastRun = async () => {
     const endedAt = data.endedAt ?? null
     runStartedAt.value = startedAt
     runEndedAt.value = endedAt
+    // backend may include speed in last-run response
+    runSpeed.value = typeof data.speed === 'number' ? data.speed : null
     if (status === 'IN_PROGRESS') {
       executionStatus.value = 'running'
       infoMessage.value = data.message || ''
@@ -753,6 +795,7 @@ onMounted(async () => {
       paperTradingResult.value = stored.paperTradingResult ?? paperTradingResult.value
       runStartedAt.value = stored.runStartedAt ?? runStartedAt.value
       runEndedAt.value = stored.runEndedAt ?? runEndedAt.value
+      runSpeed.value = stored.runSpeed ?? runSpeed.value
       executionError.value = stored.executionError ?? executionError.value
       previousRunId.value = stored.previousRunId ?? previousRunId.value
       awaitingNewRun.value = stored.awaitingNewRun ?? awaitingNewRun.value
@@ -813,6 +856,31 @@ const cleanupUnresolvedOrders = async () => {
     cleanupMessage.value = e instanceof Error ? e.message : String(e)
   } finally {
     cleanupLoading.value = false
+  }
+}
+
+const resetMatchingEngineBook = async () => {
+  if (bookResetLoading.value) return
+  const ok = window.confirm('매칭엔진 호가창(Redis 스냅샷 + 각 파드 메모리)에 남은 미체결 주문을 전부 비웁니다. 매칭엔진이 재시작됩니다. 계속할까요?')
+  if (!ok) return
+
+  bookResetLoading.value = true
+  bookResetMessage.value = ''
+  bookResetIsError.value = false
+  try {
+    const res = await fetch('/order-api/v1/admin/reset-matching-engine-book', { method: 'POST' })
+    if (!res.ok) {
+      let body = null
+      try { body = await res.json() } catch (e) {}
+      throw new Error(body?.message || `HTTP ${res.status}`)
+    }
+    const data = await res.json()
+    bookResetMessage.value = `스냅샷 ${data.deletedSnapshots}개 삭제, 매칭엔진 재시작 트리거함`
+  } catch (e) {
+    bookResetIsError.value = true
+    bookResetMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    bookResetLoading.value = false
   }
 }
 </script>
@@ -1000,6 +1068,31 @@ const cleanupUnresolvedOrders = async () => {
             <div class="result-meta">
               시작: {{ formatRFC3339ToKST(runStartedAt) }} • 경과: {{ computeElapsed(runStartedAt) }}
             </div>
+            <div class="result-speed" v-if="runSpeed">실행 배속: {{ runSpeed }}×</div>
+            <div class="buy-sell-bar" v-if="(typedPaperTradingResult.bySide || []).length">
+              <div class="buy" :style="{ width: buySellRatio.buyPercent + '%' }">
+                {{ buySellRatio.buyPercent }}% 매수
+              </div>
+              <div class="sell" :style="{ width: buySellRatio.sellPercent + '%' }">
+                {{ buySellRatio.sellPercent }}% 매도
+              </div>
+            </div>
+            <div class="market-table" v-if="(typedPaperTradingResult.byMarket || []).length">
+              <table>
+                <thead>
+                  <tr><th>마켓</th><th>접수</th><th>체결</th><th>미체결</th><th>체결률</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
+                    <td style="text-align:left">{{ m.market }}</td>
+                    <td style="text-align:right">{{ m.accepted }}</td>
+                    <td style="text-align:right">{{ m.filled }}</td>
+                    <td style="text-align:right">{{ m.unfilled }}</td>
+                    <td style="text-align:right">{{ marketFillRate(m) }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </template>
 
           <template v-else-if="executionStatus === 'error'">
@@ -1028,6 +1121,31 @@ const cleanupUnresolvedOrders = async () => {
               <div class="result-meta">
                 {{ formatRFC3339ToKST(runStartedAt) }} ~ {{ formatRFC3339ToKST(runEndedAt) }} • 총 소요: {{ computeElapsed(runStartedAt, runEndedAt) }}
               </div>
+              <div class="result-speed" v-if="runSpeed">실행 배속: {{ runSpeed }}×</div>
+              <div class="buy-sell-bar" v-if="(typedPaperTradingResult.bySide || []).length">
+                <div class="buy" :style="{ width: buySellRatio.buyPercent + '%' }">
+                  {{ buySellRatio.buyPercent }}% 매수
+                </div>
+                <div class="sell" :style="{ width: buySellRatio.sellPercent + '%' }">
+                  {{ buySellRatio.sellPercent }}% 매도
+                </div>
+              </div>
+              <div class="market-table" v-if="(typedPaperTradingResult.byMarket || []).length">
+                <table>
+                  <thead>
+                    <tr><th>마켓</th><th>접수</th><th>체결</th><th>미체결</th><th>체결률</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
+                      <td style="text-align:left">{{ m.market }}</td>
+                      <td style="text-align:right">{{ m.accepted }}</td>
+                      <td style="text-align:right">{{ m.filled }}</td>
+                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ marketFillRate(m) }}%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <div v-else class="result-desc">주문 집계를 불러오지 못했습니다.</div>
           </template>
@@ -1051,6 +1169,31 @@ const cleanupUnresolvedOrders = async () => {
               <div class="result-meta">
                 {{ formatRFC3339ToKST(runStartedAt) }} ~ {{ formatRFC3339ToKST(runEndedAt) }} • 총 소요: {{ computeElapsed(runStartedAt, runEndedAt) }}
               </div>
+              <div class="result-speed" v-if="runSpeed">실행 배속: {{ runSpeed }}×</div>
+              <div class="buy-sell-bar" v-if="(typedPaperTradingResult.bySide || []).length">
+                <div class="buy" :style="{ width: buySellRatio.buyPercent + '%' }">
+                  {{ buySellRatio.buyPercent }}% 매수
+                </div>
+                <div class="sell" :style="{ width: buySellRatio.sellPercent + '%' }">
+                  {{ buySellRatio.sellPercent }}% 매도
+                </div>
+              </div>
+              <div class="market-table" v-if="(typedPaperTradingResult.byMarket || []).length">
+                <table>
+                  <thead>
+                    <tr><th>마켓</th><th>접수</th><th>체결</th><th>미체결</th><th>체결률</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
+                      <td style="text-align:left">{{ m.market }}</td>
+                      <td style="text-align:right">{{ m.accepted }}</td>
+                      <td style="text-align:right">{{ m.filled }}</td>
+                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ marketFillRate(m) }}%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <div v-else class="result-desc">주문 집계를 불러오지 못했습니다.</div>
           </template>
@@ -1067,6 +1210,17 @@ const cleanupUnresolvedOrders = async () => {
         {{ cleanupLoading ? '정리 중...' : '일괄 정리' }}
       </button>
       <div v-if="cleanupMessage" :class="['cleanup-message', { error: cleanupIsError }]">{{ cleanupMessage }}</div>
+    </section>
+
+    <section class="cleanup-section">
+      <div class="cleanup-text">
+        <h4>매칭엔진 호가창 잔량 지우기</h4>
+        <p>위 "일괄 정리"는 DB(recorder) 기준으로만 정리됩니다 — 매칭엔진이 그 취소를 못 받았거나 저장에 실패하면 매칭엔진 자신의 Redis 스냅샷과 각 파드 메모리에는 미체결 주문이 그대로 남을 수 있습니다. 이 버튼은 그 잔량을 지우고 매칭엔진을 재시작합니다(진행 중인 세션이 있으면 매칭이 잠시 끊깁니다).</p>
+      </div>
+      <button class="btn-dark" :disabled="bookResetLoading" @click="resetMatchingEngineBook">
+        {{ bookResetLoading ? '초기화 중...' : '잔량 지우기' }}
+      </button>
+      <div v-if="bookResetMessage" :class="['cleanup-message', { error: bookResetIsError }]">{{ bookResetMessage }}</div>
     </section>
   </div>
 </template>
@@ -1416,6 +1570,60 @@ const cleanupUnresolvedOrders = async () => {
   font-size: 12px;
   color: #9fb0c2;
   margin-top: 8px;
+}
+
+/* New UI styles: run speed, buy/sell bar, market table */
+.result-speed {
+  color: #9fb0c2;
+  font-size: 13px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+.buy-sell-bar {
+  display: flex;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 10px 0;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.buy-sell-bar .buy {
+  background: #3f86ff;
+  color: #042c53;
+  font-weight: 600;
+  font-size: 11px;
+  display:flex;align-items:center;justify-content:center;
+}
+.buy-sell-bar .sell {
+  background: #e0a95c;
+  color: #412402;
+  font-weight: 600;
+  font-size: 11px;
+  display:flex;align-items:center;justify-content:center;
+}
+.market-table {
+  margin-top: 12px;
+  max-height: 180px;
+  overflow-y: auto;
+  border-radius: 8px;
+  border: 1px solid #163247;
+}
+.market-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.market-table th {
+  text-align: left;
+  padding: 8px 12px;
+  background: #0d1b2a;
+  color: #9fb0c2;
+  font-size: 12px;
+}
+.market-table td {
+  padding: 8px 12px;
+  color: #e6eef8;
+  border-top: 1px solid #163247;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 900px) {
