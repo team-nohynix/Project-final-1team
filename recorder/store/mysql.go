@@ -118,7 +118,7 @@ func NewMySQLStore(db *sql.DB) *MySQLStore {
 // INSERT 직후 reconcilePreexistingFills를 항상 호출합니다(2026-08-12 실사용
 // 검증 중 발견한 버그 수정) — orders/executions를 독립된 배치로 소비하다 보니
 // 이 주문에 대한 체결이 이 INSERT보다 먼저 recorder에 도착해 있을 수 있는데,
-// 그때 updateFill은 order_id를 못 찾아(found=false) 그냥 넘어가고, execution
+// 그때 applyFillsBatch는 order_id를 못 찾아(found=false) 그냥 넘어가고, execution
 // 행 자체는 저장되지만 trade_order 쪽엔 그 체결의 효과가 영영 반영되지
 // 않았습니다. 아래 함수 주석 참고.
 func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) (int64, error) {
@@ -184,21 +184,21 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) (
 // reconcilePreexistingFills는 이 배치의 order_id들에 대해 execution 테이블에
 // 이미 쌓여 있는 체결이 있으면 그 총량을 trade_order에 반영합니다.
 //
-// 왜 이게 안전한가(멱등) — execution 테이블은 updateFill이 order_id를
+// 왜 이게 안전한가(멱등) — execution 테이블은 applyFillsBatch가 order_id를
 // 찾았는지와 무관하게 항상 그 행을 저장합니다(ApplyExecutionsBatch,
 // FR-09 검증 기준 "발행 건수와 저장 건수가 일치"). 그래서
 // quantity - SUM(이 주문이 buy_order_id 또는 sell_order_id인 execution.quantity)
 // 는 그 주문의 remaining_quantity가 실제로 얼마여야 하는지에 대한 절대값이자
-// 유일하게 진실인 값입니다 — updateFill이 이미 정확히 반영해둔 주문을 다시
+// 유일하게 진실인 값입니다 — applyFillsBatch가 이미 정확히 반영해둔 주문을 다시
 // 계산해도 같은 값이 나오므로, 매 InsertOrdersBatch 호출마다(주문이 실제로
 // 새로 INSERT됐든 INSERT IGNORE로 스킵된 재전달이든) 무조건 호출해도
 // 안전합니다. 한 주문은 항상 한쪽 side로만 고정되므로(BUY 주문이 나중에
 // sell_order_id로 나타날 수 없음) 두 IN 목록에 같은 주문이 동시에 매치되는
 // 경우는 없습니다.
 //
-// status/canceled_at 갱신 로직은 updateFill과 동일한 우선순위를 씁니다 —
+// status/canceled_at 갱신 로직은 applyFillsBatch와 동일한 우선순위를 씁니다 —
 // 이번 반영으로 완전 체결이 확정되면 기존 CANCELED를 정정하고, 아니면 기존
-// CANCELED를 보존합니다(주석 위치는 updateFill 정의부 참고).
+// CANCELED를 보존합니다(주석 위치는 applyFillsBatch 정의부 참고).
 func reconcilePreexistingFills(ctx context.Context, tx *sql.Tx, orderIDs []string) error {
 	if len(orderIDs) == 0 {
 		return nil
@@ -270,7 +270,7 @@ func reconcilePreexistingFills(ctx context.Context, tx *sql.Tx, orderIDs []strin
 // 수 있습니다(가장 흔한 경로: orderapi의 order.Store가 체결 결과를 몰라 이미
 // 체결된 주문의 취소 요청도 그냥 받아서 발행해버림 — server.go의 "still never
 // learns about fills" 참고). 완전 체결은 매칭엔진의 호가창에서 이미 확정된
-// 사실이라 뒤늦은 취소가 그걸 덮어쓰면 안 됩니다 — updateFill이 반대 방향
+// 사실이라 뒤늦은 취소가 그걸 덮어쓰면 안 됩니다 — applyFillsBatch가 반대 방향
 // (체결이 취소를 정정)을 처리하는 것과 대칭되는 보호입니다.
 func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInput) error {
 	if len(cancels) == 0 {
@@ -306,16 +306,28 @@ func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInpu
 }
 
 // ApplyExecutionsBatch는 체결 여러 건을 한 트랜잭션(=한 번의 커밋) 안에서:
-// 각 체결의 매수/매도 양쪽 주문 remaining_quantity/status를 updateFill로
-// 갱신하고(건당 로직은 단건 버전과 동일 — 각 체결이 서로 다른 주문 쌍을
-// 건드릴 수 있어 이 부분은 다중 행으로 합치기 어려움), execution 행들은 한
-// 번의 다중 행 INSERT로 저장합니다. 트랜잭션 하나로 묶이는 것 자체가 배칭의
-// 핵심 이득입니다 — 건당 트랜잭션(건당 커밋)이던 것을 배치당 트랜잭션(배치당
-// 커밋 1번)으로 줄여, RDS 쪽 커밋 오버헤드가 건수가 아니라 배치 수에 비례하게
-// 만듭니다. 반환값은 execs와 같은 순서·같은 길이입니다.
+// mode는 fetchModes로 한 번에 조회하고, remaining_quantity/status는
+// applyFillsBatch로 한 번에 합산 반영한 뒤, execution 행들은 한 번의 다중 행
+// INSERT로 저장합니다.
+//
+// **2026-08-21, 구조적 병목 재작성**: 이전엔 체결 건마다 매수/매도 각각
+// updateFill을 개별 호출해서(건당 UPDATE 1번 + 찾았으면 SELECT 1번) 200건
+// 배치에 최대 800번의 순차 DB 왕복이 발생했습니다. recorder_consumer_lag가
+// orders는 0인데 executions만 폭증하는 실측 원인이 이것이었고, 배치/레플리카를
+// 늘려도(파티션 기반 수평 확장이라 레플리카별 처리량 자체는 그대로) 근본
+// 해결이 안 됐습니다. mode 조회를 IN(...) 쿼리 1번으로, 잔량 차감을
+// UPDATE...JOIN 1번(order_id별 SUM으로 합산)으로 묶어 200건 배치 기준 왕복을
+// 800번에서 사실상 3번(mode 조회 1 + 잔량 UPDATE 1 + execution INSERT 1)으로
+// 줄였습니다. 트랜잭션 하나로 묶이는 것 자체(배치당 커밋 1번)는 기존과 동일.
+// 반환값은 execs와 같은 순서·같은 길이입니다.
 func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []ExecutionInput) ([]ExecutionResult, error) {
 	if len(execs) == 0 {
 		return nil, nil
+	}
+
+	orderIDs := make([]string, 0, len(execs)*2)
+	for _, in := range execs {
+		orderIDs = append(orderIDs, in.BuyOrderID, in.SellOrderID)
 	}
 
 	var results []ExecutionResult
@@ -326,21 +338,23 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 		}
 		defer tx.Rollback()
 
+		modeByOrder, err := fetchModes(ctx, tx, orderIDs)
+		if err != nil {
+			return fmt.Errorf("체결 일괄 반영 실패 (mode 조회): %w", err)
+		}
+
+		if err := applyFillsBatch(ctx, tx, execs); err != nil {
+			return fmt.Errorf("체결 일괄 반영 실패 (잔량 갱신): %w", err)
+		}
+
 		results = make([]ExecutionResult, len(execs))
 		var sb strings.Builder
 		sb.WriteString(`INSERT INTO execution (execution_id, market_code, buy_order_id, sell_order_id, price, quantity, mode, executed_at) VALUES `)
 		args := make([]any, 0, len(execs)*7)
 
 		for i, in := range execs {
-			buyMode, buyFound, err := updateFill(ctx, tx, in.BuyOrderID, in.Quantity)
-			if err != nil {
-				return err
-			}
-			sellMode, sellFound, err := updateFill(ctx, tx, in.SellOrderID, in.Quantity)
-			if err != nil {
-				return err
-			}
-
+			buyMode, buyFound := modeByOrder[in.BuyOrderID]
+			sellMode, sellFound := modeByOrder[in.SellOrderID]
 			mode, mismatched := ResolveMode(buyMode, buyFound, sellMode, sellFound)
 			execID := idgen.NewExecutionID()
 
@@ -370,54 +384,100 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 	return results, nil
 }
 
-// updateFill은 한 주문의 remaining_quantity를 qty만큼 SQL 안에서 직접 줄이고
-// (Go에서 decimal 연산을 다시 구현할 필요 없음) status를 그 결과에 맞게 바꿉니다.
-// remaining_quantity는 이 주문이 이미 CANCELED든 아니든 항상 정확히 반영합니다
-// — 실제 체결 사실 자체는 도착 순서와 무관하게 항상 진실이므로, 늦게 도착한
-// 체결이라도 반영을 건너뛰면 잔량이 영원히 틀린 값으로 남습니다.
+// fetchModes는 이 배치가 참조하는 주문 id들(매수+매도, 중복 가능)의 mode를
+// 한 번의 IN(...) 쿼리로 조회합니다 — 기존 updateFill이 체결 건마다 개별
+// SELECT를 날리던 것(200건 배치에 최대 400번)을 대체합니다. 반환 맵에 키가
+// 없으면 그 주문의 NEW 이벤트를 아직 못 봤다는 뜻으로, 기존 updateFill의
+// found=false와 동일하게 취급합니다.
+func fetchModes(ctx context.Context, tx *sql.Tx, orderIDs []string) (map[string]string, error) {
+	seen := make(map[string]struct{}, len(orderIDs))
+	unique := make([]string, 0, len(orderIDs))
+	for _, id := range orderIDs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, len(unique))
+	for i, id := range unique {
+		args[i] = id
+	}
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT order_id, mode FROM trade_order WHERE order_id IN (%s)`, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]string, len(unique))
+	for rows.Next() {
+		var id, mode string
+		if err := rows.Scan(&id, &mode); err != nil {
+			return nil, err
+		}
+		result[id] = mode
+	}
+	return result, rows.Err()
+}
+
+// applyFillsBatch는 이 배치의 모든 체결(매수+매도)이 각 주문에 미치는
+// remaining_quantity 차감을 order_id별로 SQL(SUM/GROUP BY)에서 합산한 뒤
+// 한 번의 UPDATE...JOIN으로 반영합니다 — 기존 updateFill이 체결 건마다
+// 개별 UPDATE를 날리던 것(200건 배치에 최대 400번의 순차 UPDATE)을
+// 대체합니다. 잔량 비교/차감을 전부 SQL DECIMAL 연산으로 하므로 Go 쪽에
+// decimal 라이브러리를 새로 들일 필요가 없습니다(recorder는 지금까지
+// 이 산술을 전부 SQL에 맡겨온 기존 관례 그대로).
 //
-// status의 CASE 순서가 중요합니다(2026-08-07, 실제 발생 케이스 분석 후 결정) —
-// ① "이번 체결로 잔량이 0 이하가 됐다"가 최우선입니다: 이건 그 주문이 실제로
-// 완전 체결됐다는 확정적 증거이므로, 이미 CANCELED로 찍혀 있었더라도(취소가
-// 이 체결보다 먼저 기록기에 도착한 경우 — orders/executions를 독립적으로
-// 소비하다 보니 실제로 일어남) FILLED로 정정합니다. ② 잔량이 아직 남았는데
-// 이미 CANCELED면 그대로 유지합니다 — 정상적인 "부분체결 후 취소" 흐름에서
-// 늦게 도착한 부분체결이 취소를 되돌리면 안 되기 때문입니다. ③ 그 외엔 기존과
-// 같이 PARTIALLY_FILLED. CancelOrdersBatch의 FILLED 보호와 대칭을 이룹니다.
-// ①로 FILLED가 확정되는 순간 canceled_at도 함께 NULL로 지웁니다 — 그 전에
-// 뒤늦게 잘못 찍혔던 CANCELED 상태의 흔적(취소 시각)을 같이 정리해서, "체결
-// 완료됐는데 취소 시각도 남아있는" 모순된 행이 남지 않게 합니다.
-func updateFill(ctx context.Context, tx *sql.Tx, orderID, qty string) (mode string, found bool, err error) {
-	res, err := tx.ExecContext(ctx, `
-		UPDATE trade_order
-		SET remaining_quantity = remaining_quantity - ?,
-		    status = CASE
-		        WHEN remaining_quantity - ? <= 0 THEN 'FILLED'
-		        WHEN status = 'CANCELED' THEN 'CANCELED'
+// **순차 처리와 결과가 동일한 이유(결합법칙)**: 같은 주문에 대한 차감
+// d1,d2,...,dN을 순서대로 적용하나 합산 D=d1+...+dN을 한 번에 적용하나
+// 최종 remaining_quantity는 항상 rq0-D로 같고, status/canceled_at 판정도
+// 최종 (rq0-D<=0) 여부에만 의존합니다(완전체결로 확정된 뒤엔 추가 차감이
+// 있어도 판정이 안 바뀜 — updateFill의 CASE 우선순위 설계와 동일: ① 이번
+// 반영으로 잔량이 0 이하가 되면 기존 CANCELED도 FILLED로 정정, ② 아직
+// 남았는데 CANCELED면 보존, ③ 그 외엔 PARTIALLY_FILLED, canceled_at도 함께
+// 정리). 한 주문은 항상 한쪽 side로만 고정되므로(reconcilePreexistingFills
+// 주석 참고) 이 배치 안에서 order_id가 중복되는 건 "같은 주문이 여러 체결에
+// 걸쳐 부분체결"된 경우뿐이고, 위 결합법칙 덕분에 문제없이 합산됩니다.
+// 대상 주문이 없으면(NEW를 못 본 체결) JOIN이 그냥 매치되지 않아 조용히
+// 건너뜁니다 — 에러가 아닙니다.
+func applyFillsBatch(ctx context.Context, tx *sql.Tx, execs []ExecutionInput) error {
+	type fillRow struct{ orderID, qty string }
+	rows := make([]fillRow, 0, len(execs)*2)
+	for _, in := range execs {
+		rows = append(rows, fillRow{in.BuyOrderID, in.Quantity}, fillRow{in.SellOrderID, in.Quantity})
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		UPDATE trade_order t
+		JOIN (
+			SELECT order_id, SUM(qty) AS qty_sum
+			FROM (`)
+	args := make([]any, 0, len(rows)*2)
+	for i, r := range rows {
+		if i > 0 {
+			sb.WriteString(" UNION ALL ")
+		}
+		sb.WriteString("SELECT ? AS order_id, CAST(? AS DECIMAL(24,8)) AS qty")
+		args = append(args, r.orderID, r.qty)
+	}
+	sb.WriteString(`
+			) x
+			GROUP BY order_id
+		) d ON t.order_id = d.order_id
+		SET t.remaining_quantity = t.remaining_quantity - d.qty_sum,
+		    t.status = CASE
+		        WHEN t.remaining_quantity - d.qty_sum <= 0 THEN 'FILLED'
+		        WHEN t.status = 'CANCELED' THEN 'CANCELED'
 		        ELSE 'PARTIALLY_FILLED'
 		    END,
-		    canceled_at = CASE WHEN remaining_quantity - ? <= 0 THEN NULL ELSE canceled_at END
-		WHERE order_id = ?
-	`, qty, qty, qty, orderID)
-	if err != nil {
-		return "", false, fmt.Errorf("주문 체결 반영 실패 (orderId=%s): %w", orderID, err)
-	}
-
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return "", false, fmt.Errorf("영향받은 행 수 확인 실패 (orderId=%s): %w", orderID, err)
-	}
-	if affected == 0 {
-		return "", false, nil
-	}
-
-	if err := tx.QueryRowContext(ctx, `SELECT mode FROM trade_order WHERE order_id = ?`, orderID).Scan(&mode); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("주문 mode 조회 실패 (orderId=%s): %w", orderID, err)
-	}
-	return mode, true, nil
+		    t.canceled_at = CASE WHEN t.remaining_quantity - d.qty_sum <= 0 THEN NULL ELSE t.canceled_at END
+	`)
+	_, err := tx.ExecContext(ctx, sb.String(), args...)
+	return err
 }
 
 // AssignMarket은 FR-11 배정 이벤트를 새 행으로 기록합니다(released_at은 아직 NULL).
