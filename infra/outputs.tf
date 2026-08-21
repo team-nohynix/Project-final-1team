@@ -31,18 +31,6 @@ output "s3_bucket_names" {
   }
 }
 
-output "rds_writer_endpoint" {
-  value = aws_rds_cluster.team1_truss.endpoint
-}
-
-output "rds_reader_endpoint" {
-  value = aws_rds_cluster.team1_truss.reader_endpoint
-}
-
-output "rds_master_user_secret_arn" {
-  value = aws_rds_cluster.team1_truss.master_user_secret[0].secret_arn
-}
-
 output "redis_primary_endpoint" {
   value = aws_elasticache_replication_group.team1_redis.primary_endpoint_address
 }
