@@ -190,10 +190,6 @@ data "aws_iam_policy_document" "sa_recorder_policy" {
     resources = ["${local.msk_group_arn_prefix}/*"]
   }
   statement {
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_rds_cluster.team1_truss.master_user_secret[0].secret_arn]
-  }
-  statement {
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.trade_results.arn}/*"]
   }
