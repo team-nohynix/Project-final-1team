@@ -187,13 +187,6 @@ type DashboardMetrics struct {
 	E2EP99SampleCount int             `json:"e2eP99SampleCount"`
 	RunningEnginePods int             `json:"runningEnginePods"`
 	Series            []MetricsBucket `json:"series"`
-	// OrdersByStatus는 trade_order.status 값별 현재 건수입니다(2026-08-21,
-	// Grafana에 "처리해야 할/처리 중/처리한 주문"을 함께 보여달라는 요청 대응) —
-	// ACCEPTED=아직 매칭 시도조차 안 된(호가창에 막 들어간) 주문, PARTIALLY_FILLED=
-	// 일부만 체결되고 남은 잔량이 아직 미체결인 주문, FILLED/CANCELED=더 손댈 일
-	// 없는 종결 상태. PendingOrders(ACCEPTED+PARTIALLY_FILLED 합계)와 겹치지만,
-	// 이건 그 둘을 나눠서 보여주려는 것이라 별도로 남깁니다.
-	OrdersByStatus map[string]int64 `json:"ordersByStatus"`
 }
 
 // MySQLQuerier는 Querier를 실제 MySQL(RDS)로 구현합니다. store/mysql.go와
@@ -336,27 +329,6 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	m.OrderAcceptTps = float64(acceptCount) / tpsWindow.Seconds()
 	m.ExecutionTps = float64(execCount) / tpsWindow.Seconds()
 	m.PendingOrders = pendingCount
-
-	// idx_trade_order_status(status 단독 인덱스, schema.sql)로 각 status값을
-	// 인덱스만으로 카운트합니다 — pendingCount 쿼리와 같은 인덱스를 타서
-	// 추가 스캔 비용이 거의 없습니다.
-	statusRows, err := q.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM trade_order GROUP BY status`)
-	if err != nil {
-		return DashboardMetrics{}, fmt.Errorf("상태별 주문 수 조회 실패: %w", err)
-	}
-	m.OrdersByStatus = make(map[string]int64, 4)
-	for statusRows.Next() {
-		var status string
-		var count int64
-		if err := statusRows.Scan(&status, &count); err != nil {
-			statusRows.Close()
-			return DashboardMetrics{}, fmt.Errorf("상태별 주문 수 조회 실패: %w", err)
-		}
-		m.OrdersByStatus[status] = count
-	}
-	if err := statusRows.Err(); err != nil {
-		return DashboardMetrics{}, fmt.Errorf("상태별 주문 수 조회 실패: %w", err)
-	}
 
 	// E2E P99: 최근 p99Window 안에 FILLED된 주문마다 (마지막 체결 시각 - 접수
 	// 시각)을 표본 하나로 삼는다. DashboardMetrics 타입 주석 참고 — 완벽한
