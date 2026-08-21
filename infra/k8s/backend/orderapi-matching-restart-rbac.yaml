@@ -1,0 +1,37 @@
+# orderapi가 POST /v1/admin/reset-matching-engine-book(2026-08-21, orderapi/adminreset.go)에서
+# matching-engine Deployment에 rollout restart를 걸 수 있게 하는 최소 권한이다.
+# ci-deploy-rbac.yaml(CI가 쓰는 훨씬 넓은 권한 — create/update, services/pods까지)과
+# 다르게, orderapi 파드 자신에게 주는 권한이라 꼭 필요한 것만 남긴다: matching-engine
+# Deployment 하나의 상태를 읽고(get) 재시작 어노테이션만 patch할 수 있으면 되고,
+# 다른 워크로드나 replicaset/service는 손댈 필요가 없다. K8s RBAC은 리소스 "이름"으로
+# 좁힐 수 없어(resourceNames는 되지만 get/patch에 한해 특정 오브젝트 이름으로 제한
+# 가능) resourceNames: ["matching-engine"]으로 명시적으로 좁혀둔다 — orderapi 코드가
+# 실수로/취약점으로 다른 Deployment를 건드리는 것 자체를 RBAC 레벨에서 막는다.
+#
+# eks.amazonaws.com/role-arn(IRSA, serviceaccounts.yaml)은 AWS API 권한용이라 이거와
+# 무관하다 — 파드 안에서 rest.InClusterConfig()로 K8s API를 부르는 건 이 ServiceAccount의
+# 프로젝티드 토큰으로 인증하고, 그 인가는 순수 K8s RBAC(이 파일)이 담당한다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orderapi-restart-matching-engine
+  namespace: backend
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["matching-engine"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orderapi-can-restart-matching-engine
+  namespace: backend
+subjects:
+  - kind: ServiceAccount
+    name: sa-ingest-api
+    namespace: backend
+roleRef:
+  kind: Role
+  name: orderapi-restart-matching-engine
+  apiGroup: rbac.authorization.k8s.io
