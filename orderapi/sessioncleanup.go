@@ -57,6 +57,11 @@ func modeForOwner(owner string) (string, bool) {
 // 아예 시도하지 않습니다.
 func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher, record session.RunRecord) {
 	if recorderURL == "" {
+		// 시작 로그(main.go)에 이미 "비활성화"로 남지만, 실제로 세션이 끝날
+		// 때마다 여기서도 남겨야 "이번 실행은 정리가 왜 안 됐지"를 그
+		// 세션의 로그만 보고도 바로 알 수 있습니다(2026-08-20, 이 값이
+		// 빠진 걸 늦게 발견했던 사고 대응).
+		log.Printf("세션 정리 건너뜀 — RECORDER_URL이 설정되어 있지 않음 (runId=%s)", record.RunID)
 		return
 	}
 
