@@ -77,15 +77,18 @@
 ### 3.4 (폐기됨, 2026-08-20) — 구 `RealtimeMonitoringView.vue` / `VITE_GRAFANA_DASHBOARD_URL` 계획
 이 절이 설명하던 "Grafana를 iframe으로 띄우는 화면"은 더는 존재하지 않는다 — `RealtimeMonitoringView.vue`는 삭제/대체됐고, 지금은 `DashboardView.vue`가 그 자리를 맡아 자체 렌더링 페이지(하드코딩 placeholder, 3.1 참고)로 재설계돼 있다. `VITE_GRAFANA_DASHBOARD_URL`은 어느 컴포넌트도 읽지 않는 죽은 환경변수라 `frontend/.env.example`에서 제거했다. 여기서 말하던 AMG(Amazon Managed Grafana)도 이 조직 계정엔 IAM Identity Center SSO 권한이 없어 구조적으로 못 쓴다고 이미 결론 나서 폐기됐고, 대신 자체 호스팅 EC2 Grafana(`infra/monitoring-ec2.tf`, `http://monitor.jhyang.click:3000`)를 쓰고 있다. 이 화면을 다시 만든다면 3.1의 애플리케이션 지표를 백엔드가 Prometheus 형식으로 노출한 뒤, 그 EC2 Grafana 대시보드 URL을 iframe으로 붙이는 쪽이 지금 인프라와 맞다.
 
-### 3.5 "AI 트레이더 실행 결과" 화면 — **2026-08-13에 새로 생김**
-팀에서 확정한 필드 4가지(실행 상태/주문 접수·체결·미체결 수/시작·종료 시각 및 실행 시간/오류 메시지)를 지원하는 엔드포인트 세 개가 새로 생겼다. `trader`/`replayengine`이 실행을 시작·종료할 때 자동으로 남기는 값이라 프론트가 직접 계산할 게 없다.
+### 3.5 "AI 트레이더 실행 결과" 화면 — **2026-08-13에 새로 생김, 2026-08-20에 필드 확장**
+팀에서 확정한 필드(실행 상태/주문 접수·체결·미체결 수/시작·종료 시각 및 실행 시간/오류 메시지 + 2026-08-20에 추가된 생성 주문 수·마켓별 개수/체결률·매수매도 비율·실행 배속)를 지원하는 엔드포인트들이 있다. `trader`/`replayengine`이 실행을 시작·종료할 때 자동으로 남기는 값이라 프론트가 직접 계산할 게 없다(비율 두 개만 예외 — 아래 참고).
 
 - **실행 상태 + 시작/종료 시각 + 오류 메시지** → `orderapi`의 `GET /v1/sessions/last-run` (4.6 참고). `실행 중`은 응답 `status`가 `"IN_PROGRESS"`(`endedAt` 없음)일 때, 끝났으면 `"COMPLETED"`/`"FAILED"`/`"STOPPED"`(2026-08-20 추가, 아래 4.10 참고) 중 하나(`endedAt` 있음)다. 실행 시간은 `endedAt - startedAt`으로 프론트에서 계산하면 된다. 실행이 한 번도 없었으면 404 `NO_RUN_YET`.
 - **"중지" 버튼** → `orderapi`의 `POST /v1/sessions/{runId}/stop` (4.10 참고, 2026-08-20 신설). `runId`는 위 `last-run` 응답의 `runId` 필드를 그대로 쓰면 된다. 즉시 멈추는 게 아니라 다음 하트비트 주기(최악의 경우 약 10초) 안에 반영되므로, 프론트는 버튼을 누른 뒤 `last-run`을 계속 폴링해 `status`가 `STOPPED`로 바뀌는 걸로 실제 정지 완료를 확인하는 걸 권장.
-- **주문 접수/체결/미체결 수** → `recorder`의 `GET /v1/orders/summary?mode=...&from=...&to=...` (4.7 참고) — `from`/`to`는 위 `last-run` 응답의 `startedAt`/`endedAt`을 그대로 넘기면 된다(실행 중이라 `endedAt`이 없으면 `to`를 생략 — 지금까지 누적치로 응답). 이 구간 지정이 정확한 이유는 `orderapi`의 세션 가드가 트레이더/리플레이 엔진을 동시에 하나만 실행되게 막아서, `[startedAt, endedAt)` 구간에 다른 실행의 주문이 섞일 수 없기 때문이다.
-- **실행 파라미터**(날짜/배속 등)는 이 API들에 없다 — 사용자 요청대로, 결과 화면 옆 요청 UI에 이미 그대로 있으니 따로 안 내려줌.
-- **"생성 주문 수"/"거절 수"는 의도적으로 뺐다** — `trader`가 봇의 원시 판단(생성) 건수를 API로 노출하지 않고(로그에만 남음), 거절된 주문은 Kafka에 아예 도달하지 않아 시스템 어디에도 흔적이 남지 않는다(구조적으로 관측 불가능). `accepted`/`filled`/`unfilled` 세 값만 있고, `accepted`엔 취소된 주문도 포함되므로 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소분 차이).
-- 실제 로컬 Kafka/Redis/MySQL로 `IN_PROGRESS`→`COMPLETED`/`FAILED` 전이, 404(실행 이력 없음), 주문 접수 후 `mode`별 집계, 체결 반영 후 `filled` 카운트 변화까지 전부 직접 확인함.
+- **실행 배속** → `last-run` 응답의 `speed` 필드(2026-08-20 추가, 4.6 참고) — 이 실행이 시작될 때 쓴 `-speed` 값. 다른 숫자(특히 미체결 건수) 해석에 필요한 맥락이라 같이 내려준다.
+- **주문 접수/체결/미체결 수 + 생성 주문 수 + 마켓별 개수/체결률 + 매수매도 비율** → `recorder`의 `GET /v1/orders/summary?mode=...&from=...&to=...` (4.7 참고) — `from`/`to`는 위 `last-run` 응답의 `startedAt`/`endedAt`을 그대로 넘기면 된다(실행 중이라 `endedAt`이 없으면 `to`를 생략 — 지금까지 누적치로 응답). 이 구간 지정이 정확한 이유는 `orderapi`의 세션 가드가 트레이더/리플레이 엔진을 동시에 하나만 실행되게 막아서, `[startedAt, endedAt)` 구간에 다른 실행의 주문이 섞일 수 없기 때문이다.
+  - **"생성 주문 수"는 논의 끝에 `accepted`를 그대로 쓰기로 했다(2026-08-20 팀 결정)** — 봇의 원시 판단(제출 시도 이전) 횟수는 여전히 API로 노출 안 됨(trader 로그에만 남음, 구조적으로 안 남는 값), 거절된 주문(429 백프레셔 등)도 Kafka에 아예 도달하지 않아 DB 어디에도 흔적이 없다(구조적으로 관측 불가능, 변화 없음). "생성 주문 수"라는 라벨로 보여주되 실제 값은 `accepted`.
+  - **마켓별 개수/체결률** → `byMarket[]`의 `accepted`/`filled`를 프론트에서 나눠서 체결률 계산(서버는 원본 개수만 줌). **매수매도 비율** → `bySide[]`의 두 `count`를 프론트에서 나눠서 계산.
+  - `accepted`엔 취소된 주문도 포함되므로 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소분 차이) — 최상위/마켓별 둘 다 동일.
+- **"평균 체결 지연시간"은 팀 논의 끝에 빼기로 했다(2026-08-20).** 계산 자체는 가능하지만(`recorder`의 대시보드 지표가 비슷한 걸 이미 계산 중 — P99 버전, `DashboardMetrics.E2EP99Ms`), 매칭 자체는 메모리에서 즉시 일어나서 이 숫자가 실제로 재는 건 "시스템 처리 속도"가 아니라 "봇이 낸 주문이 우연히 반대편과 마주치기까지 걸린 시간"에 가깝다 — 부하테스트 인프라 성능을 보여주는 이 화면의 목적과 안 맞는다고 판단.
+- 실제 로컬 Kafka/Redis/MySQL로 `IN_PROGRESS`→`COMPLETED`/`FAILED` 전이, 404(실행 이력 없음), 주문 접수 후 `mode`별 집계, 체결 반영 후 `filled` 카운트 변화까지 전부 직접 확인함. `byMarket`/`bySide`/`speed`는 코드 레벨 테스트만 통과한 상태로, 아직 실제 인프라로 재검증 전.
 
 ### 3.6 "부하 시나리오 미리보기" 화면(`LoadTestReplayView.vue`) — **2026-08-19에 새로 생김**
 재생 시작 전에 "그날 트레이더가 기록해둔 주문이 총 몇 건이고, 대략 얼마나 걸릴지"를 미리 보여주는 화면. 두 엔드포인트로 지원한다.
@@ -268,7 +271,7 @@ curl http://<backend>/v1/collect/job_5872688b79c4b6070671fc5a486aea34
 ```
 모르는 `jobId`면 404. **프론트는 202를 받으면 `jobId`를 저장해두고, `status`가 `COMPLETED`가 될 때까지 몇 초 간격으로 이 상태 조회 엔드포인트를 폴링해야 한다** — 예전처럼 `POST /v1/collect`의 응답 자체에서 결과를 바로 꺼내 쓰면 안 된다(2.4 참고). job 상태는 메모리에만 있어서 `backend`가 재시작되면 사라진다 — 재시작 중에 폴링하던 요청은 404를 받게 되니, 프론트 쪽에서 이 경우도 처리해두면 좋다.
 
-### 4.6 마지막 실행 결과 — `GET /v1/sessions/last-run` (2026-08-13 신설, `orderapi`)
+### 4.6 마지막 실행 결과 — `GET /v1/sessions/last-run` (2026-08-13 신설, `orderapi`; `speed`는 2026-08-20 추가)
 
 ```
 GET /order-api/v1/sessions/last-run
@@ -279,7 +282,8 @@ GET /order-api/v1/sessions/last-run
   "runId": "sess_31b2f15376c9bddf527ff187",
   "owner": "trader",
   "status": "IN_PROGRESS",
-  "startedAt": "2026-08-13T00:56:28Z"
+  "startedAt": "2026-08-13T00:56:28Z",
+  "speed": 30
 }
 ```
 끝났을 때(`status`는 `COMPLETED`/`FAILED` 중 하나, `endedAt`/`message` 채워짐):
@@ -290,24 +294,39 @@ GET /order-api/v1/sessions/last-run
   "status": "COMPLETED",
   "startedAt": "2026-08-13T00:56:28Z",
   "endedAt": "2026-08-13T00:56:28Z",
-  "message": "20개 마켓 전부 성공"
+  "message": "20개 마켓 전부 성공",
+  "speed": 30
 }
 ```
-한 번도 실행된 적 없으면 404 `{"errorCode":"NO_RUN_YET", ...}`. 실행 도중 크래시(정상 종료 경로를 못 타서 `trader`/`replayengine`이 결과를 못 남긴 경우)는 `status`가 계속 `IN_PROGRESS`로 남아있을 수 있다 — 이 값은 세션 자체의 배타적 잠금(TTL 30초)과는 별개로 영구 보관되는 기록이라 자동으로 안 바뀐다. 실제 로컬 Redis로 클레임 직후(`IN_PROGRESS`) → `DELETE /v1/sessions/{id}`로 `COMPLETED`/`FAILED` 반납 → 이 값이 정확히 반영되는 것까지 확인함.
+`speed`는 이 실행이 시작될 때 쓴 `-speed` 값이다(0이면 필드 자체가 응답에서 빠짐 — `trader`/`replayengine`이 `POST /v1/sessions` 호출 시 보내는 값을 그대로 기록한 것). 다른 숫자(특히 미체결 건수)를 해석하는 데 필요한 맥락이라 같이 내려준다 — 배속에 따라 같은 미체결 건수도 의미가 완전히 다르다. 한 번도 실행된 적 없으면 404 `{"errorCode":"NO_RUN_YET", ...}`. 실행 도중 크래시(정상 종료 경로를 못 타서 `trader`/`replayengine`이 결과를 못 남긴 경우)는 `status`가 계속 `IN_PROGRESS`로 남아있을 수 있다 — 이 값은 세션 자체의 배타적 잠금(TTL 30초)과는 별개로 영구 보관되는 기록이라 자동으로 안 바뀐다. 실제 로컬 Redis로 클레임 직후(`IN_PROGRESS`) → `DELETE /v1/sessions/{id}`로 `COMPLETED`/`FAILED` 반납 → 이 값이 정확히 반영되는 것까지 확인함.
 
 `status`는 2026-08-20부터 `"STOPPED"`도 나올 수 있다 — 사용자가 4.10의 정지 버튼으로 실행을 직접 중단시킨 경우다(`FAILED`는 에러로 죽은 것과 구분).
 
 **참고 — `DELETE /v1/sessions/{sessionId}`(주문 취소용 `DELETE /v1/orders/{id}`와 다른 엔드포인트)도 2026-08-13에 요청 본문을 받도록 바뀌었다.** `trader`/`replayengine`이 정상 종료할 때 보내는 요청이라 프론트가 직접 호출할 일은 없지만, 세션 API 응답 모양이 바뀐 배경으로 참고: 본문 `{"status":"COMPLETED"|"FAILED","message":"..."}` (둘 다 선택, 본문 자체가 없으면 `COMPLETED`로 기본 처리 — 기존 프론트/스크립트가 이 엔드포인트를 이미 호출하고 있었더라도 깨지지 않음).
 
-### 4.7 주문 접수/체결/미체결 집계 — `GET /v1/orders/summary` (2026-08-13 신설, `recorder`)
+### 4.7 주문 접수/체결/미체결 집계 — `GET /v1/orders/summary` (2026-08-13 신설, `recorder`; `byMarket`/`bySide`는 2026-08-20 추가)
 
 ```
 GET /v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:56:28Z&to=2026-08-13T01:10:00Z
 ```
 ```json
-{ "accepted": 1245, "filled": 980, "unfilled": 240 }
+{
+  "accepted": 1245,
+  "filled": 980,
+  "unfilled": 240,
+  "byMarket": [
+    { "market": "KRW-BTC", "accepted": 210, "filled": 190, "unfilled": 15 },
+    { "market": "KRW-ETH", "accepted": 180, "filled": 120, "unfilled": 55 }
+  ],
+  "bySide": [
+    { "side": "BUY", "count": 630 },
+    { "side": "SELL", "count": 615 }
+  ]
+}
 ```
 `mode`는 `PAPER_TRADING`/`REPLAY` 중 하나(필수), `from`은 필수(RFC3339), `to`는 생략하면 지금까지 누적치로 응답(실행이 아직 `IN_PROGRESS`일 때 씀). `mode`/`from`이 없거나 형식이 틀리면 400. `accepted`는 그 구간에 접수된 전체 주문 수(취소분 포함), `filled`/`unfilled`는 그중 체결완료/(접수됨+부분체결) 상태의 개수라 `filled + unfilled`가 `accepted`보다 작을 수 있다(취소된 만큼). 실제 로컬 환경에서 `PAPER_TRADING`/`REPLAY` 각각 주문을 접수해 모드별로 정확히 갈리는 것, `to` 생략 시 지금까지 누적으로 응답하는 것, 체결 반영 후 `filled` 카운트가 실제로 올라가는 것, 데이터 없는 구간엔 `{0,0,0}`으로(에러 아님) 응답하는 것까지 전부 직접 확인함.
+
+**`byMarket`/`bySide`는 원본 개수만 준다 — 체결률/매수매도 비율 계산은 프론트에서.** `byMarket[].filled / byMarket[].accepted`로 마켓별 체결률을, `bySide`의 두 `count`로 매수/매도 비율을 프론트가 직접 계산하면 된다(이 API가 이미 따르는 "프론트가 나눗셈만 하면 되는 값은 서버가 미리 계산 안 함" 관례). 주문이 없던 마켓은 `byMarket`에 아예 안 나온다(빈 그룹이 없는 `GROUP BY` 특성 — "0건"과 "그 마켓 자체가 없음"을 구분할 필요 없이 그냥 리스트에서 빠진 것으로 처리하면 됨).
 
 ### 4.8 주문 재생 미리보기 — `GET /v1/jobs/replay-preview` (2026-08-19 신설, `orderapi`)
 
@@ -369,5 +388,6 @@ POST /order-api/v1/sessions/run_abc123/stop
 - **2026-08-13에 새로 생김**: AI 트레이더 실행 결과 화면용 세 엔드포인트 — `orderapi`의 `GET /v1/sessions/last-run`(실행 상태/시작·종료 시각/오류 메시지, 4.6 참고)과 `recorder`의 `GET /v1/orders/summary`(주문 접수/체결/미체결 수, 4.7 참고). 둘 다 프론트가 직접 계산할 게 없는, 그대로 쓸 수 있는 응답(3.5 참고)
 - **2026-08-19에 새로 생김**: 부하 시나리오 미리보기 화면용 두 엔드포인트 — `orderapi`의 `GET /v1/jobs/replay-preview`(재생 예정 건수 + 배속 1 기준 소요 시간, 프론트가 speed로 나눠 씀, 4.8 참고)와 `GET /v1/sessions/previous-run`(직전 실행 기록, `last-run`과 같은 모양, 4.9 참고). 이 화면은 접수/체결만 보여주고 미체결은 의도적으로 뺌(3.6 참고)
 - **2026-08-20에 새로 생김**: "중지" 버튼용 `orderapi`의 `POST /v1/sessions/{runId}/stop`(4.10 참고) — `trader`/`replayengine`을 정상 종료 경로 그대로 멈춘다(즉시는 아니고 다음 하트비트 주기 내). `last-run`의 `status`에 `"STOPPED"` 값이 새로 추가됨(4.6 참고)
+- **2026-08-20에 필드 확장**: "AI 트레이더 실행 결과" 화면에 `last-run`의 `speed`(4.6), `orders/summary`의 `byMarket`/`bySide`(4.7)가 추가됨 — 마켓별 개수/체결률, 매수매도 비율, 실행 배속 지원(3.5 참고). "평균 체결 지연시간"은 팀 논의 끝에 빼기로 함(인프라 성능 지표로는 부적합하다고 판단, 3.5 참고).
 - **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
 - **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성
