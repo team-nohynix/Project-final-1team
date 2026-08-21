@@ -22,7 +22,7 @@ func resetCleanupAllStatus(t *testing.T) {
 func TestCleanupUnresolvedOrdersSkipsWhenRecorderURLEmpty(t *testing.T) {
 	pub := &fakePublisher{}
 
-	cleanupUnresolvedOrders(context.Background(), &http.Client{}, "", pub, "run_1", time.Now().Add(-time.Minute))
+	cleanupUnresolvedOrders(context.Background(), &http.Client{}, "", pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
 
 	if pub.cancelCalls != 0 {
 		t.Errorf("cancelCalls = %d, want 0 (recorderURL 비어있으면 아예 시도하면 안 됨)", pub.cancelCalls)
@@ -37,7 +37,7 @@ func TestCleanupUnresolvedOrdersSkipsZeroStartedAt(t *testing.T) {
 	defer srv.Close()
 
 	pub := &fakePublisher{}
-	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, "run_1", time.Time{}) // startedAt zero value
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Time{}) // startedAt zero value
 
 	if called {
 		t.Error("startedAt이 없으면(RunRecord가 비정상) recorder를 부르면 안 됨")
@@ -62,7 +62,7 @@ func TestCleanupUnresolvedOrdersPublishesCancelForEach(t *testing.T) {
 	pub := &fakePublisher{}
 	started := time.Date(2026, 8, 19, 9, 2, 11, 0, time.UTC)
 
-	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, "run_8f2a1c", started)
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_8f2a1c", started)
 
 	if gotPath != "/v1/orders/unresolved/all" {
 		t.Errorf("path = %q, want /v1/orders/unresolved/all (범위 제한 없는 조회여야 함)", gotPath)
@@ -85,10 +85,53 @@ func TestCleanupUnresolvedOrdersEmptyResultIsNotError(t *testing.T) {
 	defer srv.Close()
 
 	pub := &fakePublisher{}
-	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, "run_1", time.Now().Add(-time.Minute))
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
 
 	if pub.cancelCalls != 0 {
 		t.Errorf("cancelCalls = %d, want 0", pub.cancelCalls)
+	}
+}
+
+// TestCleanupUnresolvedOrdersSkipsAndLeavesNoteWhenMatchingLagging는
+// 2026-08-20 추가 — 매칭 엔진이 랙 상태면 recorder를 아예 안 부르고
+// 건너뛰면서, "실행 결과" 화면에서 보이도록 RunRecord.Message에 안내
+// 문구를 남기는지 확인합니다(재시도 루프는 일부러 안 둠 — 다음 세션
+// 종료 때 다시 시도되는 구조에 기댐).
+func TestCleanupUnresolvedOrdersSkipsAndLeavesNoteWhenMatchingLagging(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	store := &fakeSessionStore{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, store, &fakeChecker{active: true}, "run_1", time.Now().Add(-time.Minute))
+
+	if called {
+		t.Error("매칭 엔진이 랙 상태면 recorder를 부르면 안 됨")
+	}
+	if pub.cancelCalls != 0 {
+		t.Errorf("cancelCalls = %d, want 0", pub.cancelCalls)
+	}
+	if store.lastNoteRunID != "run_1" || store.lastNote == "" {
+		t.Errorf("실행 결과 메시지에 안내가 안 남음: runId=%q, note=%q", store.lastNoteRunID, store.lastNote)
+	}
+}
+
+// TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen은 랙 확인 자체가
+// 실패해도(Redis 순간 장애 등) 정리를 계속 진행하는지 확인합니다.
+func TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{err: context.DeadlineExceeded}, "run_1", time.Now().Add(-time.Minute))
+
+	if pub.cancelCalls != 1 {
+		t.Errorf("cancelCalls = %d, want 1 (랙 확인 실패는 fail-open이어야 함)", pub.cancelCalls)
 	}
 }
 
@@ -99,7 +142,7 @@ func TestCleanupUnresolvedOrdersRecorderErrorDoesNotPanic(t *testing.T) {
 	defer srv.Close()
 
 	pub := &fakePublisher{}
-	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, "run_1", time.Now().Add(-time.Minute)) // panic 안 나면 통과
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute)) // panic 안 나면 통과
 
 	if pub.cancelCalls != 0 {
 		t.Errorf("cancelCalls = %d, want 0", pub.cancelCalls)

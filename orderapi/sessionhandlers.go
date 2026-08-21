@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"orderapi/backpressure"
 	"orderapi/kafkaclient"
 	"orderapi/session"
 )
@@ -169,10 +170,11 @@ type releaseRequest struct {
 // 반납됐거나 존재하지 않는 세션도 404로 명확히 알려줍니다(취소 처리와 달리, 아무
 // 상태도 안 남기므로 idempotent-no-op으로 200을 줄 이유가 없습니다).
 //
-// producer/httpClient/recorderURL은 그룹의 마지막 멤버가 반납할 때(=이 실행
-// 전체가 끝날 때)만 도는 미종결 주문 정리(2026-08-19, sessioncleanup.go
-// 참고)에 씁니다 — recorderURL이 비어있으면 그 정리 자체를 건너뜁니다.
-func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, httpClient *http.Client, recorderURL string) http.HandlerFunc {
+// producer/httpClient/recorderURL/matchingLagChecker는 그룹의 마지막 멤버가
+// 반납할 때(=이 실행 전체가 끝날 때)만 도는 미종결 주문 정리(2026-08-19,
+// sessioncleanup.go 참고)에 씁니다 — recorderURL이 비어있으면 그 정리 자체를
+// 건너뜁니다.
+func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, httpClient *http.Client, recorderURL string, matchingLagChecker backpressure.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -207,7 +209,7 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 		// 정리는 best-effort 백그라운드 작업이라 응답을 기다리게 하지 않습니다.
 		// r.Context()는 응답이 끝나면 곧 취소되므로 별도 컨텍스트를 씁니다.
 		if finalized {
-			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, record.RunID, record.StartedAt)
+			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, store, matchingLagChecker, record.RunID, record.StartedAt)
 		}
 	}
 }

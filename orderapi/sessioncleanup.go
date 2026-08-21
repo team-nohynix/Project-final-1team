@@ -11,6 +11,7 @@ import (
 
 	"orderapi/backpressure"
 	"orderapi/kafkaclient"
+	"orderapi/session"
 )
 
 // unresolvedOrder는 recorder의 GET /v1/orders/unresolved(/all) 응답 항목입니다 —
@@ -56,7 +57,20 @@ type unresolvedOrdersResponse struct {
 // 아예 시도하지 않습니다. record는 이제 로그용(runId)으로만 씁니다 —
 // StartedAt은 "이 RunRecord가 제대로 채워진 게 맞는지"를 확인하는 방어적
 // 체크로만 남겨뒀습니다(조회 자체엔 더 이상 안 씀).
-func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher, runID string, startedAt time.Time) {
+//
+// **matchingLagChecker: 시작 전에 매칭 엔진이 orders를 잘 따라가고 있는지
+// 확인합니다(2026-08-20)** — startCleanupAllUnresolvedOrdersHandler(수동
+// 일괄 정리)의 같은 확인과 이유가 같습니다(recorder DB만 정리된 것처럼
+// 보이고 매칭 엔진 실제 메모리는 안 줄어드는 상황 방지). 다만 여기는
+// 사람이 응답을 기다리는 동기 요청이 아니라 세션 반납 뒤에 도는
+// fire-and-forget 백그라운드 작업이라 409로 거절할 대상이 없고, 내부
+// 재시도 루프도 일부러 안 둡니다 — 이 정리는 세션이 끝날 때마다 전체
+// 미종결 주문을 대상으로 다시 도니까, 이번에 건너뛰어도 다음 세션이 끝날
+// 때 자연스럽게 다시 시도됩니다. 대신 이번엔 건너뛰었다는 사실을 로그뿐
+// 아니라 sessionStore.AppendLastRunNote로 그 실행의 RunRecord.Message에도
+// 남겨서, "실행 결과" 화면을 보는 사람이 수동 일괄 정리(+매칭 엔진 회복
+// 확인)가 필요하다는 걸 알 수 있게 합니다.
+func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher, sessionStore session.Store, matchingLagChecker backpressure.Checker, runID string, startedAt time.Time) {
 	if recorderURL == "" {
 		// 시작 로그(main.go)에 이미 "비활성화"로 남지만, 실제로 세션이 끝날
 		// 때마다 여기서도 남겨야 "이번 실행은 정리가 왜 안 됐지"를 그
@@ -67,6 +81,17 @@ func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recor
 	}
 	if startedAt.IsZero() {
 		log.Printf("세션 정리 건너뜀 — startedAt 없음, RunRecord가 비정상적으로 비어있음 (runId=%s)", runID)
+		return
+	}
+
+	if active, err := matchingLagChecker.Active(ctx); err != nil {
+		log.Printf("세션 정리 전 matching 랙 확인 실패(경고 없이 진행): %v", err)
+	} else if active {
+		log.Printf("세션 정리 건너뜀 — 매칭 엔진이 컨슈머 랙 상태 (runId=%s)", runID)
+		note := "미종결 주문 자동 정리가 매칭 엔진 컨슈머 랙으로 건너뛰어짐 — 매칭 엔진 회복 후 수동 일괄 정리(POST /v1/admin/cleanup-unresolved-orders) 필요"
+		if err := sessionStore.AppendLastRunNote(ctx, runID, note); err != nil {
+			log.Printf("실행 결과 메시지에 매칭 랙 경고 남기기 실패 (runId=%s): %v", runID, err)
+		}
 		return
 	}
 

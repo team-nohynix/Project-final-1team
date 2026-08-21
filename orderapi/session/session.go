@@ -231,6 +231,13 @@ type Store interface {
 	// PreviousRun은 LastRun 바로 이전 실행의 기록을 반환합니다("직전 실행과
 	// 비교" 지원). 실행이 2번 미만이었으면 found=false(에러 아님).
 	PreviousRun(ctx context.Context) (RunRecord, bool, error)
+	// AppendLastRunNote는 runID가 지금 LastRun 슬롯을 차지하고 있는 경우에만
+	// 그 RunRecord.Message에 note를 덧붙입니다(2026-08-20, 세션 종료 자동
+	// 정리가 매칭 엔진 랙으로 건너뛰었을 때 그 사실을 "실행 결과" 화면에도
+	// 보이게 하려는 용도) — runID가 이미 다른 실행으로 넘어갔으면(그 사이 새
+	// 실행이 시작됨) 아무것도 안 하고 에러 없이 반환합니다(그 새 실행의
+	// 메시지를 실수로 건드리면 안 되므로).
+	AppendLastRunNote(ctx context.Context, runID, note string) error
 }
 
 // RedisStore는 Store를 Redis로 구현합니다.
@@ -472,6 +479,40 @@ func (s *RedisStore) LastRun(ctx context.Context) (RunRecord, bool, error) {
 		return RunRecord{}, false, fmt.Errorf("마지막 실행 기록 파싱 실패: %w", err)
 	}
 	return record, true, nil
+}
+
+// AppendLastRunNote는 Store 인터페이스 설명 참고. lastRunKey를 원자적
+// 스크립트로 안 다루는 이유는 finalizeLastRun과 같습니다 — 세션 배타적
+// 잠금 덕분에 이 함수를 부를 시점엔 활성 실행이 최대 1개뿐이라, GET+SET
+// 사이에 다른 실행이 끼어들어 경합할 여지가 실질적으로 없습니다.
+func (s *RedisStore) AppendLastRunNote(ctx context.Context, runID, note string) error {
+	body, err := s.client.Get(ctx, lastRunKey).Bytes()
+	if err == redis.Nil {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("마지막 실행 기록 조회 실패: %w", err)
+	}
+	var record RunRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return fmt.Errorf("마지막 실행 기록 파싱 실패: %w", err)
+	}
+	if record.RunID != runID {
+		// 그 사이 새 실행이 시작돼 lastRunKey를 넘겨받음 — 이 실행의 결과는
+		// 더 이상 조회 가능한 슬롯에 없습니다(prevRunKey까지 뒤쫓지는 않음,
+		// 흔치 않은 경합이라 v1에선 그냥 넘어감).
+		return nil
+	}
+	if record.Message == "" {
+		record.Message = note
+	} else {
+		record.Message = record.Message + " | " + note
+	}
+	newBody, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return s.client.Set(ctx, lastRunKey, newBody, 0).Err()
 }
 
 // PreviousRun은 LastRun 바로 이전 실행의 기록을 반환합니다. 지금까지 실행이

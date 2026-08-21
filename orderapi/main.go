@@ -76,9 +76,14 @@ func main() {
 	defer redisClient.Close()
 
 	sessionStore := session.NewRedisStore(redisClient, sessionTTL)
+	// matchingLagChecker는 acceptOrderHandler의 lagChecker(recorder_lag +
+	// matching_lag 둘 다 봄)와 별개로 matching_lag 하나만 봅니다 — 미종결
+	// 주문 정리(자동/수동 둘 다, sessioncleanup.go 참고)가 시작 전에 확인하는
+	// 건 "매칭 엔진이 지금 orders를 잘 따라가고 있는가" 하나뿐이라서입니다.
+	matchingLagChecker := &backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey}
 	lagChecker := backpressure.MultiChecker{
 		&backpressure.RedisChecker{Client: redisClient, Key: backpressureRecorderLagKey},
-		&backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey},
+		matchingLagChecker,
 	}
 
 	mux := http.NewServeMux()
@@ -93,7 +98,7 @@ func main() {
 	// recorder를 부르는 데 씁니다 — 별도 요청마다 새 클라이언트를 만들 필요
 	// 없이 하나 공유합니다.
 	recorderHTTPClient := &http.Client{Timeout: 30 * time.Second}
-	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL))
+	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL, matchingLagChecker))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 
@@ -111,7 +116,6 @@ func main() {
 	// 맞지만 "꺼져 있다는 사실"은 시작 로그에 항상 드러나야 합니다.
 	if cfg.RecorderURL != "" {
 		cleanupHTTPClient := &http.Client{Timeout: 30 * time.Second}
-		matchingLagChecker := &backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey}
 		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", startCleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer, matchingLagChecker))
 		mux.HandleFunc("GET /v1/admin/cleanup-unresolved-orders/status", cleanupAllStatusHandler())
 		log.Printf("recorder 연동 활성화 (recorderUrl=%s) — 세션 종료 자동 정리 + 수동 정리 엔드포인트 사용 가능", cfg.RecorderURL)
