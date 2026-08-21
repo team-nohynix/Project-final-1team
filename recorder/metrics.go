@@ -91,11 +91,50 @@ var (
 	})
 )
 
+// recorderOrderAcceptTotal/recorderExecutionTotal은 2026-08-21 추가 — 위
+// recorderOrderAcceptTps/recorderExecutionTps(둘 다 pollDashboardMetrics가
+// 10초마다 MySQL을 다시 읽어서 채움)와 달리, DB를 전혀 안 읽고 recorder가
+// Kafka 배치를 실제로 처리하는 바로 그 지점(main.go의 orderReader.Run/
+// execReader.Run 콜백)에서 직접 증가시키는 순수 카운터입니다. TPS 값 자체는
+// 여기서 계산하지 않고 Prometheus/Grafana의 rate()에 맡깁니다 — 이게
+// Prometheus가 이런 지표를 위해 설계된 표준 방식이고, recorder 쪽에서
+// 슬라이딩 윈도우를 직접 구현할 필요가 없어집니다.
+//
+// **레플리카가 여러 개일 때의 집계 방식이 recorder_order_accept_tps와
+// 다릅니다** — recorder_order_accept_tps는 Redis 리더 락으로 레플리카 중
+// 하나만 전체 집계를 계산해 모든 레플리카가 같은 값을 노출하지만(2026-08-21
+// RDS CPU 포화 사고 대응으로 추가된 캐시), 이 카운터들은 Kafka 파티션 배정을
+// 통해 원래 마켓별로 나뉘어 처리되는 각자 자기 몫만 셉니다(레플리카 간
+// 조율 없음) — 전체 시스템 TPS를 보려면 Grafana 쪽에서
+// sum(rate(recorder_order_accept_total[1m]))처럼 레플리카 전체를 합산해야
+// 합니다(Prometheus 다중 인스턴스 카운터의 표준 집계 방식). 기존
+// recorder_order_accept_tps 패널을 이걸로 옮기려면 이 sum(rate(...))
+// 형태로 쿼리를 바꿔야 합니다 — Grafana 쪽 변경이 필요하므로 별도 확인 필요.
+//
+// PendingOrders(미종결 건수)는 일부러 카운터로 안 옮겼습니다 — 접수/체결/
+// 취소/부분체결/취소가 뒤늦은 체결로 정정되는 경우까지 상태 전이가
+// store/mysql.go의 updateFill/CancelOrdersBatch/reconcilePreexistingFills에
+// 여러 갈래로 나뉘어 있어서, 카운터 증감 로직을 정확히 똑같이 복제하지
+// 않으면 조용히 틀린 값이 나올 위험이 큽니다 — 지금은 그 정확성 리스크가
+// "10초마다 인덱스 탄 쿼리 한 번"이라는 이미 저렴해진 비용보다 크다고
+// 판단해 SQL 기반(+리더 락 캐시)을 그대로 둡니다.
+var (
+	recorderOrderAcceptTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "recorder_order_accept_total",
+		Help: "이 레플리카가 실제로 저장한 신규 주문 누적 건수(재전달로 스킵된 중복 제외, DB 재조회 없이 실시간 증가) — 전체 TPS는 sum(rate(recorder_order_accept_total[1m]))로 계산",
+	})
+	recorderExecutionTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "recorder_execution_total",
+		Help: "이 레플리카가 실제로 저장한 체결 누적 건수(DB 재조회 없이 실시간 증가) — 전체 TPS는 sum(rate(recorder_execution_total[1m]))로 계산",
+	})
+)
+
 func init() {
 	prometheus.MustRegister(
 		recorderLagGauge, recorderBackpressureActiveGauge,
 		recorderOrderAcceptTps, recorderExecutionTps, recorderPendingOrders,
 		recorderE2EP99Ms, recorderE2EP99SampleCount, recorderRunningEnginePods,
+		recorderOrderAcceptTotal, recorderExecutionTotal,
 	)
 }
 

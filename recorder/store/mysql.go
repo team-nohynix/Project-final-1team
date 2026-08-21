@@ -121,9 +121,9 @@ func NewMySQLStore(db *sql.DB) *MySQLStore {
 // 그때 updateFill은 order_id를 못 찾아(found=false) 그냥 넘어가고, execution
 // 행 자체는 저장되지만 trade_order 쪽엔 그 체결의 효과가 영영 반영되지
 // 않았습니다. 아래 함수 주석 참고.
-func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) error {
+func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) (int64, error) {
 	if len(orders) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	var sb strings.Builder
@@ -140,21 +140,31 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) e
 
 		submittedAt, err := parseTimestamp(o.SubmittedAt)
 		if err != nil {
-			return fmt.Errorf("주문 일괄 저장 실패 (orderId=%s): %w", o.OrderID, err)
+			return 0, fmt.Errorf("주문 일괄 저장 실패 (orderId=%s): %w", o.OrderID, err)
 		}
 		args = append(args, o.OrderID, nullIfEmpty(o.ClientRequestID), o.Market, o.Side, o.Price, o.Quantity, o.Quantity, o.Mode, submittedAt, nullIfEmpty(o.SourceOrderID))
 		orderIDs[i] = o.OrderID
 	}
 
-	return withRetryOnDeadlock(func() error {
+	var inserted int64
+	err := withRetryOnDeadlock(func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("주문 일괄 저장 실패: %w", err)
 		}
 		defer tx.Rollback()
 
-		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+		res, err := tx.ExecContext(ctx, sb.String(), args...)
+		if err != nil {
 			return fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(orders), err)
+		}
+		// INSERT IGNORE는 재전달로 스킵된 중복 행을 RowsAffected에서 제외합니다 —
+		// 이 값을 그대로 접수 카운터(recorder/metrics.go)에 쓰면 중복 재전달이
+		// TPS를 부풀리지 않습니다. 재시도(데드락 등)가 나면 이 클로저가 통째로
+		// 다시 실행되므로, 최종적으로 err==nil로 반환될 때의 값만 유효합니다.
+		inserted, err = res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("영향받은 행 수 확인 실패: %w", err)
 		}
 		if err := reconcilePreexistingFills(ctx, tx, orderIDs); err != nil {
 			return fmt.Errorf("선도착 체결 반영 실패: %w", err)
@@ -165,6 +175,10 @@ func (s *MySQLStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) e
 		}
 		return nil
 	})
+	if err != nil {
+		return 0, err
+	}
+	return inserted, nil
 }
 
 // reconcilePreexistingFills는 이 배치의 order_id들에 대해 execution 테이블에
