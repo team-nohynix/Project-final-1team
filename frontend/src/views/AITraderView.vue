@@ -82,6 +82,9 @@ function saveStateToSession() {
       executionError: executionError.value,
       previousRunId: previousRunId.value,
       awaitingNewRun: awaitingNewRun.value,
+      // stop request state
+      stopRequested: stopRequested.value,
+      stopRequestInFlight: stopRequestInFlight.value,
       // timestamp to help debugging
       savedAt: new Date().toISOString(),
     }
@@ -396,7 +399,7 @@ onBeforeUnmount(() => {
 })
 
 // 페이퍼 트레이딩 실행 상태 (백엔드 API/응답 규격 미확정 — 프론트 상태만 준비)
-const executionStatus = ref('idle') // 'idle' | 'running' | 'success' | 'error'
+const executionStatus = ref('idle') // 'idle' | 'running' | 'success' | 'error' | 'stopped'
 // 백엔드 응답 타입 확정 전까지는 unknown으로 보관 (TODO: 응답 규격 확정 후 구체 타입 지정)
 const paperTradingResult = ref<unknown>(null)
 const executionError = ref('')
@@ -410,6 +413,7 @@ const resetExecution = () => {
   awaitingNewRun.value = false
   runStartedAt.value = null
   runEndedAt.value = null
+  stopRequested.value = false
 }
 
 // ---- Paper trading: integrate with POST /order-api/v1/jobs, GET /order-api/v1/sessions/last-run,
@@ -427,6 +431,11 @@ const awaitingNewRun = ref(false)
 // execution run timestamps (ISO strings)
 const runStartedAt = ref<string | null>(null)
 const runEndedAt = ref<string | null>(null)
+
+// 유저가 중지(Stop)를 요청했는지 여부 — 폴링이나 새로고침으로 보존되어야 함
+const stopRequested = ref(false)
+// stop 요청이 네트워크로 전송 중인지(중복 클릭 방지)
+const stopRequestInFlight = ref(false)
 
 const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
@@ -487,6 +496,40 @@ const fetchOrderSummary = async (startedAt: string, endedAt?: string | null) => 
     return await res.json()
   } catch (e) {
     return null
+  }
+}
+
+// 중지 요청: POST /order-api/v1/sessions/{runId}/stop
+const stopPaperTrading = async () => {
+  if (!storedRunId.value) return
+  if (stopRequestInFlight.value) return
+  stopRequestInFlight.value = true
+  try {
+    const res = await fetch(`/order-api/v1/sessions/${storedRunId.value}/stop`, { method: 'POST' })
+    if (res.status === 204) {
+      stopRequested.value = true
+      infoMessage.value = '중지 요청을 보냈습니다. 반영까지 최대 10초 정도 걸릴 수 있습니다.'
+      // Do not change executionStatus here; let pollLastRun observe the eventual STOPPED status
+      saveStateToSession()
+      return
+    }
+    if (res.status === 404) {
+      // NO_ACTIVE_RUN — 이미 종료된 실행
+      infoMessage.value = '이미 종료된 실행입니다.'
+      // force one immediate poll to refresh UI
+      try { await pollLastRun() } catch (e) {}
+      return
+    }
+    // other errors
+    let body = null
+    try { body = await res.json() } catch (e) {}
+    const msg = body?.message || body?.error || `HTTP ${res.status}`
+    errorMessage.value = `중지 요청 실패: ${msg}`
+  } catch (e) {
+    errorMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    stopRequestInFlight.value = false
+    saveStateToSession()
   }
 }
 
@@ -566,8 +609,12 @@ const pollLastRun = async () => {
       execPollTimerId = setTimeout(pollLastRun, 3000)
       return
     }
-    if (status === 'COMPLETED' || status === 'FAILED') {
-      executionStatus.value = status === 'COMPLETED' ? 'success' : 'error'
+    if (status === 'COMPLETED' || status === 'FAILED' || status === 'STOPPED') {
+      if (status === 'STOPPED') {
+        executionStatus.value = 'stopped'
+      } else {
+        executionStatus.value = status === 'COMPLETED' ? 'success' : 'error'
+      }
       infoMessage.value = data.message || ''
       const summary = await fetchOrderSummary(startedAt, endedAt)
       if (summary === null) {
@@ -575,9 +622,11 @@ const pollLastRun = async () => {
       } else {
         paperTradingResult.value = summary
       }
-      // Clear the previousRunId marker now that we've observed a completed/failed run
+      // Clear the previousRunId marker now that we've observed a terminal run
       previousRunId.value = ''
       awaitingNewRun.value = false
+      // If we saw STOPPED, clear our local stopRequested flag
+      stopRequested.value = false
       saveStateToSession()
       stopExecutionPolling()
       return
@@ -677,6 +726,8 @@ watch(
     paperTradingResult,
     executionError,
     requestedCollectDate,
+    stopRequested,
+    stopRequestInFlight,
   ],
   () => {
     if (restoringFromStorage) return
@@ -705,6 +756,9 @@ onMounted(async () => {
       executionError.value = stored.executionError ?? executionError.value
       previousRunId.value = stored.previousRunId ?? previousRunId.value
       awaitingNewRun.value = stored.awaitingNewRun ?? awaitingNewRun.value
+      // stopRequested persistence
+      stopRequested.value = stored.stopRequested ?? stopRequested.value
+      stopRequestInFlight.value = stored.stopRequestInFlight ?? stopRequestInFlight.value
 
       // Collection state
       collectJobId.value = stored.collectJobId ?? collectJobId.value
@@ -899,6 +953,16 @@ const cleanupUnresolvedOrders = async () => {
             페이퍼 트레이딩 시작
           </button>
           <button class="btn-dark" @click="userReset">초기화</button>
+          <!-- Stop button: visible only when running and we have a storedRunId -->
+          <button
+            v-if="executionStatus === 'running'"
+            :class="['btn-stop']"
+            :disabled="!storedRunId || stopRequestInFlight"
+            @click="stopPaperTrading"
+            style="margin-left:8px"
+          >
+            {{ stopRequestInFlight ? '중지 요청됨' : '중지' }}
+          </button>
         </div>
 
         <div v-if="errorMessage" class="error-note">{{ errorMessage }}</div>
@@ -947,6 +1011,29 @@ const cleanupUnresolvedOrders = async () => {
 
           <template v-else-if="executionStatus === 'success'">
             <div v-if="typedPaperTradingResult">
+              <div class="result-stats">
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-label">접수</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-label">체결</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-label">미체결</div>
+                </div>
+              </div>
+              <div class="result-meta">
+                {{ formatRFC3339ToKST(runStartedAt) }} ~ {{ formatRFC3339ToKST(runEndedAt) }} • 총 소요: {{ computeElapsed(runStartedAt, runEndedAt) }}
+              </div>
+            </div>
+            <div v-else class="result-desc">주문 집계를 불러오지 못했습니다.</div>
+          </template>
+          <template v-else-if="executionStatus === 'stopped'">
+            <div v-if="typedPaperTradingResult">
+              <div class="result-title result-title-stopped">페이퍼 트레이딩 중지됨</div>
               <div class="result-stats">
                 <div class="stat">
                   <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
@@ -1122,6 +1209,23 @@ const cleanupUnresolvedOrders = async () => {
   padding: 12px 18px;
   border-radius: 10px;
   cursor: pointer;
+}
+/* Stop button */
+.btn-stop {
+  background: #c97a2e;
+  color: white;
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.btn-stop[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.result-title-stopped {
+  color: #ff7a59;
+  font-weight: 600;
 }
 .result-panel {
   min-height: 260px;
