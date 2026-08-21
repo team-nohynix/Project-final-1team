@@ -126,7 +126,7 @@ func main() {
 	// 참고) — 기록기가 이미 RDS에 쌓아둔 데이터를 읽기만 하고, Kafka 컨슈머
 	// 루프와는 완전히 독립적으로 별도 고루틴에서 돕니다.
 	querier := query.NewMySQLQuerier(db)
-	go pollDashboardMetrics(ctx, querier)
+	go pollDashboardMetrics(ctx, querier, redisClient)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/trace/{orderId}", traceHandler(querier))
 	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"recorder/backpressure"
 	"recorder/query"
@@ -37,6 +39,30 @@ var (
 // TPS/대기주문/p99 계산이 전부 MySQL 쿼리라 매 스크레이프(보통 15s)마다 다시
 // 돌리면 DB 부하가 늘어나므로, 별도 주기로 값을 캐싱하듯 갱신합니다.
 const dashboardMetricsPollInterval = 10 * time.Second
+
+// dashboardMetricsLockKey/dashboardMetricsCacheKey는 "레코더 레플리카 중 딱
+// 하나만 실제로 MySQL을 조회하게" 만드는 Redis 리더 락+캐시입니다(2026-08-21,
+// RDS CPU 97~99% 포화 사고 대응) — pollDashboardMetrics는 파티션 분담이 없어서
+// 살아있는 레플리카 전부가 각자 10초마다 똑같은 전역 집계 쿼리를 MySQL에
+// 날리고 있었고, 레플리카 수만큼 부하가 그대로 곱해지는 게 그 사고의 진짜
+// 원인 중 하나였습니다. orderapi/session의 Redis SETNX 락과 같은 패턴입니다.
+//
+// dashboardMetricsLockTTL을 폴링 주기(10s)보다 짧게(8s) 둔 이유: 리더가
+// 살아있는 동안은 자기 다음 주기 시작 시점(정확히 락이 막 만료된 직후)에
+// 다시 SETNX해서 계속 리더 자리를 이어받습니다 — 락이 주기보다 길면 그
+// 사이클엔 아무도 못 잡아 캐시가 갱신 안 되는 낭비 사이클이 생깁니다.
+// 리더가 죽으면 최대 8초 안에 자연히 다른 레플리카가 이어받습니다(self-heal,
+// 이 프로젝트의 TTL 기반 안전장치들과 같은 철학).
+//
+// dashboardMetricsCacheTTL은 주기 몇 번 치의 여유(20s)를 둬서, 리더 교체가
+// 살짝 늦어져도 나머지 레플리카가 완전히 빈 값(캐시 없음)을 노출하지 않게
+// 합니다.
+const (
+	dashboardMetricsLockKey  = "recorder:dashboard-metrics:lock"
+	dashboardMetricsCacheKey = "recorder:dashboard-metrics:cache"
+	dashboardMetricsLockTTL  = 8 * time.Second
+	dashboardMetricsCacheTTL = 20 * time.Second
+)
 
 var (
 	recorderOrderAcceptTps = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -75,14 +101,15 @@ func init() {
 
 // pollDashboardMetrics는 DashboardMetrics(GET /v1/metrics/dashboard가 쓰는 것과 같은
 // 함수)를 주기적으로 호출해 위 게이지들을 갱신합니다. ctx가 취소되면 종료합니다.
-func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier) {
+// 실제 MySQL 조회는 dashboardMetricsForThisCycle이 리더인 레플리카에서만
+// 일어나고, 나머지는 그 결과를 Redis 캐시에서 읽어 자기 게이지만 갱신합니다 —
+// 그래서 이 함수가 몇 개의 레플리카에서 동시에 돌아도 MySQL 쿼리는 항상
+// 주기당 최대 1번입니다.
+func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier, redisClient *redis.Client) {
 	ticker := time.NewTicker(dashboardMetricsPollInterval)
 	defer ticker.Stop()
 	for {
-		m, err := querier.DashboardMetrics(ctx)
-		if err != nil {
-			log.Printf("대시보드 지표 폴링 실패(다음 주기에 재시도): %v", err)
-		} else {
+		if m, ok := dashboardMetricsForThisCycle(ctx, querier, redisClient); ok {
 			recorderOrderAcceptTps.Set(m.OrderAcceptTps)
 			recorderExecutionTps.Set(m.ExecutionTps)
 			recorderPendingOrders.Set(float64(m.PendingOrders))
@@ -96,6 +123,48 @@ func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// dashboardMetricsForThisCycle는 이번 주기에 노출할 값을 정합니다. 이
+// 인스턴스가 리더 락(SETNX)을 잡으면 직접 MySQL을 조회해 계산하고 Redis
+// 캐시에 남긴 뒤 그 값을 반환합니다. 못 잡으면(다른 레플리카가 이미 리더)
+// 그 캐시를 읽기만 합니다 — 캐시가 아직 없으면(리더가 막 락만 잡고 아직
+// 못 썼거나, 리더 교체 직후) 이번 주기는 조용히 건너뛰고 다음 주기에
+// 다시 시도합니다.
+func dashboardMetricsForThisCycle(ctx context.Context, querier *query.MySQLQuerier, redisClient *redis.Client) (query.DashboardMetrics, bool) {
+	isLeader, err := redisClient.SetNX(ctx, dashboardMetricsLockKey, "1", dashboardMetricsLockTTL).Result()
+	if err != nil {
+		log.Printf("대시보드 지표 리더 락 확인 실패(이번 주기 건너뜀): %v", err)
+		return query.DashboardMetrics{}, false
+	}
+
+	if isLeader {
+		m, err := querier.DashboardMetrics(ctx)
+		if err != nil {
+			log.Printf("대시보드 지표 폴링 실패(다음 주기에 재시도): %v", err)
+			return query.DashboardMetrics{}, false
+		}
+		if body, err := json.Marshal(m); err != nil {
+			log.Printf("대시보드 지표 캐시 인코딩 실패(이번 주기 값 자체는 정상 노출): %v", err)
+		} else if err := redisClient.Set(ctx, dashboardMetricsCacheKey, body, dashboardMetricsCacheTTL).Err(); err != nil {
+			log.Printf("대시보드 지표 캐시 저장 실패(이번 주기 값 자체는 정상 노출): %v", err)
+		}
+		return m, true
+	}
+
+	body, err := redisClient.Get(ctx, dashboardMetricsCacheKey).Bytes()
+	if err != nil {
+		if err != redis.Nil {
+			log.Printf("대시보드 지표 캐시 조회 실패(이번 주기 건너뜀): %v", err)
+		}
+		return query.DashboardMetrics{}, false
+	}
+	var m query.DashboardMetrics
+	if err := json.Unmarshal(body, &m); err != nil {
+		log.Printf("대시보드 지표 캐시 파싱 실패(이번 주기 건너뜀): %v", err)
+		return query.DashboardMetrics{}, false
+	}
+	return m, true
 }
 
 // instrumentedLagSource는 Watcher가 원래 쓰는 LagSource를 감싸서, Watcher가 값을
