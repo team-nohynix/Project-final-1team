@@ -23,7 +23,7 @@ spec:
   scaleTargetRef:
     name: recorder
   minReplicaCount: 1
-  maxReplicaCount: 5
+  maxReplicaCount: 10
   pollingInterval: 15
   cooldownPeriod: 60
   triggers:
