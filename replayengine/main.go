@@ -70,7 +70,7 @@ func run() (err error) {
 	// 별도 함수로 뽑아낸 이유도 같다: log.Fatal이 defer(세션 반납)를 건너뛰지
 	// 않도록, 에러를 반환해 main()에서 마지막에 한 번만 처리한다.
 	sessionClient := session.Client{HTTPClient: httpClient, BaseURL: cfg.OrderAPIURL}
-	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "replayengine", *runID)
+	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "replayengine", *runID, *speed)
 	if err != nil {
 		return fmt.Errorf("세션 클레임 실패 — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있고, 이미 다른 실행 그룹이 활성 상태입니다: %w", err)
 	}
