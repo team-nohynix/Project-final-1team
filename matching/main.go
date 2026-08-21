@@ -131,6 +131,21 @@ func (r *marketRegistry) Release(ctx context.Context, market string) error {
 	return nil
 }
 
+// TotalBookSize는 이 인스턴스가 지금 담당 중인 모든 마켓의 호가창 미체결 주문 개수
+// 합계입니다(matching_engine_book_size 메트릭용, 2026-08-21 추가) — consumer.Lag와
+// 같은 이유로 스크레이프마다 그대로 계산합니다: 맵 길이 합산이라 가볍고, 컨슈머 랙과
+// 달리 "이미 다 읽었지만 체결 상대가 없어 메모리에 쌓인 양"을 재기 때문에 랙이 0이어도
+// 이 값만 계속 자랄 수 있습니다(KEDA가 이 두 지표를 별도 트리거로 같이 봅니다).
+func (r *marketRegistry) TotalBookSize() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total := 0
+	for _, e := range r.engines {
+		total += e.BookSize()
+	}
+	return total
+}
+
 // newInstanceID는 이 매칭 엔진 프로세스를 식별할 값을 만듭니다 — assignments
 // 이벤트에 "누가 이 마켓을 맡았는지"를 남기는 용도뿐이라, orderapi/session의
 // newSessionID와 같은 crypto/rand 기반이면 충분합니다(순번 카운터가 아닌 이유도
@@ -198,7 +213,7 @@ func main() {
 	}
 	go matchingWatcher.Run(ctx)
 
-	startMetricsServer(cfg.MetricsPort, consumer.Lag)
+	startMetricsServer(cfg.MetricsPort, consumer.Lag, registry.TotalBookSize)
 
 	log.Printf("매칭 엔진 시작 (instanceId=%s, Kafka broker=%s, orders=%s, executions=%s, assignments=%s, redis=%s, 마켓 %d개, group=%s)",
 		instanceID, cfg.KafkaBroker, cfg.OrdersTopic, cfg.ExecutionsTopic, cfg.AssignmentsTopic, cfg.RedisAddr, len(TargetMarkets), consumerGroupID)

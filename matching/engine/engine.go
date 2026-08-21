@@ -136,6 +136,13 @@ func (e *Engine) Recover(ctx context.Context) (resumeFromOffset int64, err error
 	return snap.Offset + 1, nil
 }
 
+// BookSize는 이 마켓의 호가창에 지금 남아있는 미체결 주문 개수입니다(orderbook.Size
+// 그대로 위임) — matching_engine_book_size 메트릭이 marketRegistry를 통해 이걸
+// 인스턴스가 담당 중인 모든 마켓에 대해 합산합니다.
+func (e *Engine) BookSize() int {
+	return e.book.Size()
+}
+
 // Apply는 orders 토픽에서 온 이벤트 하나를 처리합니다. NEW면 매칭 후 체결을 전부
 // 발행하고(FR-09), CANCEL이면 호가창에서 제거합니다(FR-10). 체결 발행이 전부 성공한
 // 뒤에만 이 이벤트의 offset을 "안전하게 처리됨"으로 기록합니다 — 발행 확인 전에 먼저
