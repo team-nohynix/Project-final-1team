@@ -159,7 +159,16 @@ func main() {
 			for _, ev := range evs {
 				execBatcher.Add(ev)
 			}
-			return store.ApplyExecutionEvents(ctx, dbStore, evs)
+			applied, err := store.ApplyExecutionEvents(ctx, dbStore, evs)
+			if err != nil {
+				return err
+			}
+			// DB 커밋이 실제로 성공했을 때만(err == nil) 카운터를 늘립니다 —
+			// 실패했으면 이 배치는 오프셋 미커밋으로 통째로 재시도되므로,
+			// 여기서 먼저 늘리면 재시도 성공 시 중복 집계가 됩니다
+			// (recorder/metrics.go, store/apply.go의 ApplyExecutionEvents 참고).
+			recorderExecutionTotal.Add(float64(applied))
+			return nil
 		})
 		log.Fatalf("executions 리더 종료: %v", err)
 	}()
@@ -175,7 +184,13 @@ func main() {
 		for _, ev := range evs {
 			orderBatcher.Add(ev)
 		}
-		return store.ApplyOrderEvents(ctx, dbStore, evs)
+		accepted, err := store.ApplyOrderEvents(ctx, dbStore, evs)
+		if err != nil {
+			return err
+		}
+		// execReader 콜백과 같은 이유로 성공했을 때만 늘립니다.
+		recorderOrderAcceptTotal.Add(float64(accepted))
+		return nil
 	})
 	log.Fatalf("orders 리더 종료: %v", err)
 }

@@ -67,7 +67,10 @@ type Store interface {
 	// InsertOrdersBatch는 신규 주문 여러 건을 한 번의 다중 행 INSERT로
 	// 저장합니다. 같은 order_id가 이미 있으면(재시작 후 컨슈머 그룹의
 	// at-least-once 재전달 등) 그 행만 조용히 무시합니다(INSERT IGNORE).
-	InsertOrdersBatch(ctx context.Context, orders []NewOrder) error
+	// 반환하는 inserted는 실제로 새로 들어간 행 수입니다(재전달로 스킵된
+	// 중복은 제외) — 2026-08-21, DB를 다시 안 읽고도 정확한 접수 TPS
+	// 카운터를 늘리기 위해 추가(recorder/metrics.go 참고).
+	InsertOrdersBatch(ctx context.Context, orders []NewOrder) (inserted int64, err error)
 	// CancelOrdersBatch는 취소 여러 건을 한 트랜잭션(한 번의 커밋) 안에서
 	// 처리합니다. 대상 주문이 없는 항목(NEW를 못 본 CANCEL)은 그 항목만
 	// 조용히 건너뜁니다 — 에러가 아닙니다.

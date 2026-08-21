@@ -22,9 +22,9 @@ type fakeStore struct {
 	released    []AssignmentInput
 }
 
-func (f *fakeStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) error {
+func (f *fakeStore) InsertOrdersBatch(ctx context.Context, orders []NewOrder) (int64, error) {
 	f.inserted = append(f.inserted, orders...)
-	return nil
+	return int64(len(orders)), nil
 }
 
 func (f *fakeStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInput) error {
@@ -57,13 +57,16 @@ func (f *fakeStore) ReleaseMarket(ctx context.Context, in AssignmentInput) error
 
 func TestApplyOrderEventsNewInsertsOrder(t *testing.T) {
 	s := &fakeStore{}
-	err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
+	accepted, err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
 		Type: events.OrderNew, OrderID: "ord_1", Market: "KRW-BTC", Side: "BUY",
 		Price: "100", Quantity: "1", Mode: "PAPER_TRADING", AcceptedAt: "2026-08-06T00:00:00.000Z",
 		ClientRequestID: "key-1",
 	}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if accepted != 1 {
+		t.Errorf("accepted = %d, want 1", accepted)
 	}
 	if len(s.inserted) != 1 {
 		t.Fatalf("InsertOrdersBatch로 들어간 건수 = %d, want 1", len(s.inserted))
@@ -76,7 +79,7 @@ func TestApplyOrderEventsNewInsertsOrder(t *testing.T) {
 
 func TestApplyOrderEventsBatchSeparatesNewAndCancel(t *testing.T) {
 	s := &fakeStore{}
-	err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{
+	_, err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{
 		{Type: events.OrderNew, OrderID: "ord_1", Market: "KRW-BTC", Side: "BUY", Price: "100", Quantity: "1", Mode: "PAPER_TRADING", AcceptedAt: "2026-08-06T00:00:00.000Z"},
 		{Type: events.OrderNew, OrderID: "ord_2", Market: "KRW-ETH", Side: "SELL", Price: "50", Quantity: "2", Mode: "PAPER_TRADING", AcceptedAt: "2026-08-06T00:00:01.000Z"},
 		{Type: events.OrderCancel, OrderID: "ord_3", CanceledAt: "2026-08-06T00:00:02.000Z"},
@@ -94,7 +97,7 @@ func TestApplyOrderEventsBatchSeparatesNewAndCancel(t *testing.T) {
 
 func TestApplyOrderEventsNewPassesThroughSourceOrderID(t *testing.T) {
 	s := &fakeStore{}
-	err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
+	_, err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
 		Type: events.OrderNew, OrderID: "ord_2", Market: "KRW-BTC", Side: "BUY",
 		Price: "100", Quantity: "1", Mode: "REPLAY", AcceptedAt: "2026-08-07T00:00:00.000Z",
 		SourceOrderID: "ord_1",
@@ -109,7 +112,7 @@ func TestApplyOrderEventsNewPassesThroughSourceOrderID(t *testing.T) {
 
 func TestApplyOrderEventsCancelUpdatesStatus(t *testing.T) {
 	s := &fakeStore{}
-	err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
+	_, err := ApplyOrderEvents(context.Background(), s, []events.OrderEvent{{
 		Type: events.OrderCancel, OrderID: "ord_1", CanceledAt: "2026-08-06T00:00:01.000Z",
 	}})
 	if err != nil {
@@ -122,7 +125,7 @@ func TestApplyOrderEventsCancelUpdatesStatus(t *testing.T) {
 
 func TestApplyExecutionEventsCallsStoreWithDecodedFields(t *testing.T) {
 	s := &fakeStore{execResults: []ExecutionResult{{BuyFound: true, SellFound: true, Mode: "PAPER_TRADING"}}}
-	err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{
+	_, err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{
 		Market: "KRW-BTC", BuyOrderID: "b1", SellOrderID: "s1", Price: "100", Quantity: "1",
 	}})
 	if err != nil {
@@ -138,7 +141,7 @@ func TestApplyExecutionEventsBatchesMultiple(t *testing.T) {
 		{BuyFound: true, SellFound: true, Mode: "PAPER_TRADING"},
 		{BuyFound: true, SellFound: true, Mode: "REPLAY"},
 	}}
-	err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{
+	_, err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{
 		{Market: "KRW-BTC", BuyOrderID: "b1", SellOrderID: "s1", Price: "100", Quantity: "1"},
 		{Market: "KRW-ETH", BuyOrderID: "b2", SellOrderID: "s2", Price: "50", Quantity: "2"},
 	})
@@ -152,7 +155,7 @@ func TestApplyExecutionEventsBatchesMultiple(t *testing.T) {
 
 func TestApplyExecutionEventsMissingOrderStillSucceeds(t *testing.T) {
 	s := &fakeStore{execResults: []ExecutionResult{{BuyFound: false, SellFound: true, Mode: "REPLAY"}}}
-	err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{
+	_, err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{
 		Market: "KRW-BTC", BuyOrderID: "b1", SellOrderID: "s1", Price: "100", Quantity: "1",
 	}})
 	if err != nil {
@@ -162,7 +165,7 @@ func TestApplyExecutionEventsMissingOrderStillSucceeds(t *testing.T) {
 
 func TestApplyExecutionEventsStoreErrorPropagates(t *testing.T) {
 	s := &fakeStore{execErr: errTest}
-	err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{BuyOrderID: "b1", SellOrderID: "s1"}})
+	_, err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{{BuyOrderID: "b1", SellOrderID: "s1"}})
 	if err == nil {
 		t.Fatal("Store가 에러를 반환했는데 ApplyExecutionEvents가 에러를 안 반환함")
 	}
@@ -170,7 +173,7 @@ func TestApplyExecutionEventsStoreErrorPropagates(t *testing.T) {
 
 func TestApplyExecutionEventsEmptyBatchIsNoop(t *testing.T) {
 	s := &fakeStore{}
-	if err := ApplyExecutionEvents(context.Background(), s, nil); err != nil {
+	if _, err := ApplyExecutionEvents(context.Background(), s, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(s.execInputs) != 0 {
