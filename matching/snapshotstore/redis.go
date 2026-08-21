@@ -127,6 +127,33 @@ func key(market string) string {
 	return "orderbook:" + market
 }
 
+// watermarkKey는 SaveWatermark/LoadWatermark가 쓰는 키입니다 — engine.SnapshotStore
+// 인터페이스의 설명 참고. 전체 스냅샷(key(market))과 독립된 별도 키입니다.
+func watermarkKey(market string) string {
+	return "orderbook:" + market + ":watermark"
+}
+
+// SaveWatermark는 Save/Handoff와 달리 큐를 거치지 않고 항상 동기로 씁니다 —
+// 오프셋 하나(int64)만 담으므로 전체 스냅샷보다 훨씬 가벼워서, 큐를 거치지
+// 않아도 매칭 핫패스에 부담이 되지 않습니다(호출 주기가 스냅샷과 같은
+// 50건/100ms이지 주문 하나당이 아님).
+func (s *RedisStore) SaveWatermark(ctx context.Context, market string, offset int64) error {
+	return s.client.Set(ctx, watermarkKey(market), offset, 0).Err()
+}
+
+// LoadWatermark는 저장된 워터마크가 없으면(redis.Nil) ok=false를 돌려줍니다 —
+// Load와 같은 규약입니다.
+func (s *RedisStore) LoadWatermark(ctx context.Context, market string) (int64, bool, error) {
+	v, err := s.client.Get(ctx, watermarkKey(market)).Int64()
+	if err == redis.Nil {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return v, true, nil
+}
+
 func toOrderViews(ovs []engine.OrderView) []orderView {
 	out := make([]orderView, 0, len(ovs))
 	for _, ov := range ovs {
