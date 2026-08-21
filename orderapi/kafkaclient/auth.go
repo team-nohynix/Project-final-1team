@@ -18,6 +18,13 @@ import (
 // AWS 공식 문서로 확인해서(이전엔 SCRAM을 택했으나, 그 인프라 전제가 틀렸음이
 // 드러남 — CLAUDE.md 참고) 바꿨습니다. 자격증명은 다른 모듈의 S3/Bedrock과
 // 같은 AWS SDK v2 기본 체인(EC2 인스턴스 프로파일/EKS IRSA)을 그대로 씁니다.
+// NewDialer는 newDialer를 패키지 밖(orderapi의 adminreset.go — 마켓 파티션의
+// 최신 오프셋을 직접 조회해야 하는 강제 초기화용)에서도 쓸 수 있게 노출하는
+// 얇은 래퍼입니다.
+func NewDialer(ctx context.Context, useIAM bool) (*kafka.Dialer, error) {
+	return newDialer(ctx, useIAM)
+}
+
 func newDialer(ctx context.Context, useIAM bool) (*kafka.Dialer, error) {
 	if !useIAM {
 		return nil, nil

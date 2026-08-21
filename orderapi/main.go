@@ -143,7 +143,16 @@ func main() {
 		log.Printf("K8s 클라이언트 생성 실패 — POST /v1/admin/reset-matching-engine-book 비활성화: %v", err)
 	} else {
 		deployments := clientset.AppsV1().Deployments(matchingEngineNamespace)
-		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", resetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName))
+		// force=true 워터마크 강제 설정(adminreset.go의 forceResetWatermarksToLatest)이
+		// orders 토픽 파티션의 최신 오프셋을 직접 읽어야 해서, 프로듀서(producer)와는
+		// 별개로 순수 조회용 Dialer가 필요합니다 — kafkaClient.NewDialer가 useIAM=false면
+		// nil을 돌려주고, adminreset.go의 dialLeader가 그 nil을 인증 없는 기본 연결로
+		// 처리합니다(로컬 dev-kafka 등).
+		kafkaDialer, err := kafkaclient.NewDialer(ctx, cfg.KafkaUseIAMAuth)
+		if err != nil {
+			log.Fatalf("Kafka Dialer 생성 실패 (강제 초기화용): %v", err)
+		}
+		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", resetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
 		log.Printf("K8s 연동 활성화 — POST /v1/admin/reset-matching-engine-book 사용 가능 (namespace=%s, deployment=%s)", matchingEngineNamespace, matchingEngineDeploymentName)
 	}
 
