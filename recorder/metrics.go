@@ -122,7 +122,7 @@ var (
 //
 // PendingOrders(미종결 건수)는 일부러 카운터로 안 옮겼습니다 — 접수/체결/
 // 취소/부분체결/취소가 뒤늦은 체결로 정정되는 경우까지 상태 전이가
-// store/mysql.go의 updateFill/CancelOrdersBatch/reconcilePreexistingFills에
+// store/mysql.go의 applyFillsBatch/CancelOrdersBatch/reconcilePreexistingFills에
 // 여러 갈래로 나뉘어 있어서, 카운터 증감 로직을 정확히 똑같이 복제하지
 // 않으면 조용히 틀린 값이 나올 위험이 큽니다 — 지금은 그 정확성 리스크가
 // "10초마다 인덱스 탄 쿼리 한 번"이라는 이미 저렴해진 비용보다 크다고
