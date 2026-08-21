@@ -96,7 +96,7 @@ var (
 	// 쿼리해서 이 게이지를 갱신하는 코드를 추가하면 안 됩니다.
 	recorderOrdersByStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "recorder_orders_by_status",
-		Help: "최근 seriesWindow(10분) 안에 접수된 주문의 상태별 건수",
+		Help: "최근 ordersByStatusWindow(24시간) 안에 접수된 주문의 상태별 건수 — 사실상 이번 테스트 세션 전체 누적",
 	}, []string{"status"})
 )
 
