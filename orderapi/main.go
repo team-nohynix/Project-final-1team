@@ -111,7 +111,8 @@ func main() {
 	// 맞지만 "꺼져 있다는 사실"은 시작 로그에 항상 드러나야 합니다.
 	if cfg.RecorderURL != "" {
 		cleanupHTTPClient := &http.Client{Timeout: 30 * time.Second}
-		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", startCleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+		matchingLagChecker := &backpressure.RedisChecker{Client: redisClient, Key: backpressureMatchingLagKey}
+		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", startCleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer, matchingLagChecker))
 		mux.HandleFunc("GET /v1/admin/cleanup-unresolved-orders/status", cleanupAllStatusHandler())
 		log.Printf("recorder 연동 활성화 (recorderUrl=%s) — 세션 종료 자동 정리 + 수동 정리 엔드포인트 사용 가능", cfg.RecorderURL)
 	} else {

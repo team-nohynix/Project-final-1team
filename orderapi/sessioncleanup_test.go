@@ -110,13 +110,77 @@ func TestStartCleanupAllUnresolvedOrdersHandlerRecorderURLEmpty(t *testing.T) {
 	resetCleanupAllStatus(t)
 	pub := &fakePublisher{}
 	w := httptest.NewRecorder()
-	startCleanupAllUnresolvedOrdersHandler(&http.Client{}, "", pub)(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
+	startCleanupAllUnresolvedOrdersHandler(&http.Client{}, "", pub, &fakeChecker{})(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 	if pub.cancelCalls != 0 {
 		t.Errorf("cancelCalls = %d, want 0", pub.cancelCalls)
+	}
+}
+
+// TestStartCleanupAllUnresolvedOrdersHandlerBlocksWhenMatchingLagging는
+// 2026-08-20 추가 — 매칭 엔진이 이미 컨슈머 랙 백프레셔 상태면 일괄 정리를
+// 시작하지 않는지 확인합니다(recorder DB만 정리된 것처럼 보이고 매칭 엔진의
+// 실제 메모리는 안 줄어드는 상황 방지).
+func TestStartCleanupAllUnresolvedOrdersHandlerBlocksWhenMatchingLagging(t *testing.T) {
+	resetCleanupAllStatus(t)
+	pub := &fakePublisher{}
+	w := httptest.NewRecorder()
+	startCleanupAllUnresolvedOrdersHandler(&http.Client{}, "http://unused", pub, &fakeChecker{active: true})(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	var got errorResponse
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if got.ErrorCode != "MATCHING_ENGINE_LAGGING" {
+		t.Errorf("errorCode = %q, want MATCHING_ENGINE_LAGGING", got.ErrorCode)
+	}
+	cleanupAllMu.Lock()
+	status := cleanupAllLatest.Status
+	cleanupAllMu.Unlock()
+	if status == "IN_PROGRESS" {
+		t.Error("차단됐는데도 작업이 시작된 것으로 보임")
+	}
+}
+
+// TestStartCleanupAllUnresolvedOrdersHandlerForceBypassesLagCheck는 ?force=true면
+// 매칭 엔진이 랙 상태여도 시작하는지 확인합니다.
+func TestStartCleanupAllUnresolvedOrdersHandlerForceBypassesLagCheck(t *testing.T) {
+	resetCleanupAllStatus(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{})
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders?force=true", nil)
+	startCleanupAllUnresolvedOrdersHandler(srv.Client(), srv.URL, pub, &fakeChecker{active: true})(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+}
+
+// TestStartCleanupAllUnresolvedOrdersHandlerLagCheckErrorFailsOpen는 랙 확인
+// 자체가 실패해도(Redis 순간 장애 등) 정리 작업을 막지 않는지 확인합니다 —
+// acceptOrderHandler의 기존 백프레셔 확인과 같은 fail-open 철학.
+func TestStartCleanupAllUnresolvedOrdersHandlerLagCheckErrorFailsOpen(t *testing.T) {
+	resetCleanupAllStatus(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{})
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	w := httptest.NewRecorder()
+	startCleanupAllUnresolvedOrdersHandler(srv.Client(), srv.URL, pub, &fakeChecker{err: context.DeadlineExceeded})(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (랙 확인 실패는 fail-open이어야 함)", w.Code, http.StatusAccepted)
 	}
 }
 
@@ -140,7 +204,7 @@ func TestStartCleanupAllUnresolvedOrdersHandlerReturnsImmediately(t *testing.T) 
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		startCleanupAllUnresolvedOrdersHandler(srv.Client(), srv.URL, pub)(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
+		startCleanupAllUnresolvedOrdersHandler(srv.Client(), srv.URL, pub, &fakeChecker{})(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
 		close(done)
 	}()
 
@@ -170,7 +234,7 @@ func TestStartCleanupAllUnresolvedOrdersHandlerConflictWhileInProgress(t *testin
 
 	pub := &fakePublisher{}
 	w := httptest.NewRecorder()
-	startCleanupAllUnresolvedOrdersHandler(&http.Client{}, "http://unused", pub)(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
+	startCleanupAllUnresolvedOrdersHandler(&http.Client{}, "http://unused", pub, &fakeChecker{})(w, httptest.NewRequest(http.MethodPost, "/v1/admin/cleanup-unresolved-orders", nil))
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)

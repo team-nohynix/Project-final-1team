@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"orderapi/backpressure"
 	"orderapi/kafkaclient"
 )
 
@@ -119,7 +120,23 @@ var (
 // 비동기+폴링으로 바뀐 것과 같은 문제, CLAUDE.md 참고). 이제 즉시 202를
 // 반환하고, 실제 조회+취소 발행은 백그라운드 고루틴에서 진행합니다 —
 // 진행 상황은 GET .../status로 폴링합니다.
-func startCleanupAllUnresolvedOrdersHandler(httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher) http.HandlerFunc {
+//
+// **matchingLagChecker: 실행 전에 매칭 엔진이 orders를 잘 따라가고 있는지
+// 먼저 확인합니다(2026-08-20).** 이 정리가 실제로 하는 일은 CANCEL 이벤트를
+// orders 토픽에 발행하는 것뿐입니다 — recorder DB의 status는 recorder
+// 자신이 그 이벤트를 읽어야 바뀌고, matching의 인메모리 호가창(+ 그걸
+// 반영하는 Redis 스냅샷)은 matching 자신이 그 이벤트를 읽어야 줄어듭니다.
+// 즉 recorder DB 숫자가 깨끗해지는 것과 matching의 실제 메모리가 줄어드는
+// 것은 서로 다른 두 컨슈머가 각자 따라잡아야 하는 별개의 일입니다. matching이
+// 지금 이미 컨슈머 랙 백프레셔 상태(오늘 낮 OOM 사고의 원인이었던 바로 그
+// 상태)라면, 대량 CANCEL을 지금 쏟아부어봐야 recorder만 먼저 깨끗해 보이고
+// matching의 실제 메모리 압박은 한동안(때로는 영영) 안 풀릴 수 있습니다 —
+// 그래서 기본적으로 이 상태에선 시작을 막습니다. `?force=true` 쿼리
+// 파라미터로 이 확인을 건너뛸 수 있습니다(운영자가 상황을 알고도 강행하고
+// 싶을 때를 위한 탈출구 — 예: matching이 막 회복 중이라 플래그가 아직 안
+// 꺼졌을 뿐인 경우). 확인 자체가 실패하면(Redis 순간 장애 등) fail-open —
+// acceptOrderHandler의 기존 백프레셔 확인과 같은 철학입니다.
+func startCleanupAllUnresolvedOrdersHandler(httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher, matchingLagChecker backpressure.Checker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
 		w.Header().Set("X-Request-Id", reqID)
@@ -127,6 +144,17 @@ func startCleanupAllUnresolvedOrdersHandler(httpClient *http.Client, recorderURL
 		if recorderURL == "" {
 			writeError(w, reqID, http.StatusServiceUnavailable, "RECORDER_URL_NOT_CONFIGURED", "RECORDER_URL이 설정되어 있지 않습니다.")
 			return
+		}
+
+		if r.URL.Query().Get("force") != "true" {
+			active, err := matchingLagChecker.Active(r.Context())
+			if err != nil {
+				log.Printf("일괄 정리 전 matching 랙 확인 실패(경고 없이 진행): %v", err)
+			} else if active {
+				writeError(w, reqID, http.StatusConflict, "MATCHING_ENGINE_LAGGING",
+					"매칭 엔진이 지금 컨슈머 랙 백프레셔 상태입니다 — 지금 대량 취소를 발행하면 recorder DB만 정리된 것처럼 보이고 매칭 엔진의 실제 메모리는 한동안 안 줄어들 수 있습니다. 매칭 엔진이 따라잡을 때까지 기다리거나, 그래도 진행하려면 ?force=true로 다시 요청하세요.")
+				return
+			}
 		}
 
 		cleanupAllMu.Lock()
