@@ -45,7 +45,7 @@ spec:
   scaleTargetRef:
     name: matching-engine
   minReplicaCount: 2
-  maxReplicaCount: 5
+  maxReplicaCount: 10
   triggers:
     - type: prometheus
       metadata:
