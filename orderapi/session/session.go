@@ -29,8 +29,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 )
+
+// sessionActiveGauge/sessionStartedAtGauge는 Grafana에서 "지금 실행 중인가",
+// "경과 시간"을 바로 패널로 뽑기 위한 지표입니다(2026-08-21) — session_events_total
+// (orderapi/sessionhandlers.go)은 카운터라 "지금 상태"를 못 주고, FR-19 리플레이
+// 샤딩 때문에 Claim 호출 자체도 매번 "새 실행 시작"은 아닙니다(그룹에 합류하는
+// 멤버마다 호출됨). 그래서 claimScript가 "그룹을 새로 만들었다"(n==1)고 알려줄
+// 때만, releaseScript가 "마지막 멤버였다"(n==2)고 알려줄 때만 이 게이지를
+// 갱신합니다 — LastRun의 IN_PROGRESS/종료 판정과 정확히 같은 기준입니다.
+// session_started_at_timestamp는 유닉스 초라서 Grafana에서 time() - 이 값으로
+// 바로 경과시간을 계산할 수 있습니다.
+var (
+	sessionActiveGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "session_active",
+		Help: "지금 진행 중인 실행(페이퍼 트레이딩/리플레이)이 있으면 1, 없으면 0",
+	})
+	sessionStartedAtGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "session_started_at_timestamp",
+		Help: "현재(또는 가장 최근) 실행이 시작된 유닉스 타임스탬프(초) — 경과시간은 time() - 이 값",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(sessionActiveGauge, sessionStartedAtGauge)
+}
 
 // activeKey는 지금 활성 그룹의 runID만 담습니다(배타성 보장은 이 키 하나로만
 // 이루어집니다 — 아래 claimScript/heartbeatScript/releaseScript가 전부 이 키를
@@ -285,6 +310,8 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID string) (Info, erro
 		if body, err := json.Marshal(record); err == nil {
 			s.client.Set(ctx, lastRunKey, body, 0)
 		}
+		sessionActiveGauge.Set(1)
+		sessionStartedAtGauge.Set(float64(now.Unix()))
 	}
 
 	return Info{
@@ -405,6 +432,7 @@ func (s *RedisStore) Release(ctx context.Context, sessionID string, outcome RunO
 // 조회가 실패해도(레코드가 이미 없어졌거나 등) 최소한 상태/메시지는 남깁니다 —
 // "완료됐다"는 사실 자체가 "시작 시각을 못 보여준다"보다 훨씬 중요합니다.
 func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome RunOutcome) RunRecord {
+	sessionActiveGauge.Set(0)
 	record := RunRecord{RunID: runID, Status: outcome.Status, EndedAt: time.Now().UTC(), Message: outcome.Message}
 	if body, err := s.client.Get(ctx, lastRunKey).Bytes(); err == nil {
 		var existing RunRecord
