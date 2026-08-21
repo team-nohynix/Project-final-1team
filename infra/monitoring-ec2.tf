@@ -303,8 +303,14 @@ resource "aws_eip" "monitoring" {
 # 않도록 새 주소를 쓴다. 기존 orphan(aws_instance.monitoring, aws_security_group.monitoring,
 # data.aws_ami.ubuntu)은 새 인스턴스 정상 동작 확인 후 별도로 정리한다.
 resource "aws_instance" "monitoring_v2" {
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = "t3.small"
+  ami = data.aws_ami.al2023.id
+  # 2026-08-21: t3.small(2GB RAM)이 Prometheus+Grafana 두 컨테이너를 감당 못 해
+  # 주기적으로 완전히 멎는(SSM도 응답 없음, docker ps조차 안 됨) 문제가 반복돼
+  # t3.medium(4GB)으로 올림 — pod별 스크레이프로 고치면서(서비스당 타겟 1개 ->
+  # 레플리카 수만큼) 타겟/시계열 수가 늘어난 것과 시기가 겹친다. CPU 크레딧은
+  # 사고 당시에도 넉넉했어서(t3.small 최대치 근처) CPU가 아니라 메모리 쪽
+  # 압박으로 추정.
+  instance_type          = "t3.medium"
   subnet_id              = data.terraform_remote_state.network.outputs.subnet_ids.public.a
   vpc_security_group_ids = [aws_security_group.team1_sg_monitoring.id]
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
