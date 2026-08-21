@@ -101,9 +101,19 @@ func main() {
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
 	// 수만 건을 동기 처리할 수 있어 releaseSessionHandler보다 훨씬 넉넉한
 	// 타임아웃의 별도 클라이언트를 씁니다.
+	//
+	// 꺼져있을 때도 반드시 로그를 남깁니다(2026-08-20) — JOB_TRIGGER_QUEUE_URL은
+	// 원래부터 이렇게 로그를 남기는데 RECORDER_URL만 조용히 넘어가고 있었고,
+	// 그래서 실제로 prod 배포 매니페스트에 이 값이 빠졌을 때(세션 종료 자동
+	// 정리가 계속 무동작) 아무 신호가 없어서 미체결 주문이 쌓이는 걸 보고
+	// 나서야 원인을 알아낸 사고가 있었습니다. "선택 기능으로 둔다"는 판단은
+	// 맞지만 "꺼져 있다는 사실"은 시작 로그에 항상 드러나야 합니다.
 	if cfg.RecorderURL != "" {
 		cleanupHTTPClient := &http.Client{Timeout: 5 * time.Minute}
 		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", cleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+		log.Printf("recorder 연동 활성화 (recorderUrl=%s) — 세션 종료 자동 정리 + 수동 정리 엔드포인트 사용 가능", cfg.RecorderURL)
+	} else {
+		log.Printf("RECORDER_URL이 없어 세션 종료 자동 정리 및 POST /v1/admin/cleanup-unresolved-orders 비활성화")
 	}
 
 	// ORDER_RECORDS_BUCKET이 비어있으면(로컬 개발 등) trader/replayengine과
