@@ -63,6 +63,13 @@ var (
 		Name: "recorder_running_engine_pods",
 		Help: "현재 마켓이 배정된 매칭 엔진 인스턴스 수(distinct engine_instance_id)",
 	})
+	recorderOrdersByStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "recorder_orders_by_status",
+			Help: "trade_order.status 값별 현재 건수 (ACCEPTED=처리해야 할, PARTIALLY_FILLED=처리 중, FILLED/CANCELED=처리한)",
+		},
+		[]string{"status"},
+	)
 )
 
 func init() {
@@ -70,6 +77,7 @@ func init() {
 		recorderLagGauge, recorderBackpressureActiveGauge,
 		recorderOrderAcceptTps, recorderExecutionTps, recorderPendingOrders,
 		recorderE2EP99Ms, recorderE2EP99SampleCount, recorderRunningEnginePods,
+		recorderOrdersByStatus,
 	)
 }
 
@@ -89,6 +97,9 @@ func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier) {
 			recorderE2EP99Ms.Set(m.E2EP99Ms)
 			recorderE2EP99SampleCount.Set(float64(m.E2EP99SampleCount))
 			recorderRunningEnginePods.Set(float64(m.RunningEnginePods))
+			for _, status := range []string{"ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCELED"} {
+				recorderOrdersByStatus.WithLabelValues(status).Set(float64(m.OrdersByStatus[status]))
+			}
 		}
 		select {
 		case <-ctx.Done():
