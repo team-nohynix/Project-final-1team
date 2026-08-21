@@ -15,6 +15,10 @@ const precheckMessage = ref('')
 const startMessage = ref('')
 const errorMessage = ref('')
 
+// stop request state
+const stopRequested = ref(false)
+const stopRequestInFlight = ref(false)
+
 // replay run state
 const isStarting = ref(false)
 const isPolling = ref(false)
@@ -139,6 +143,9 @@ function saveToSession() {
     sessionStorage.setItem(SS_KEYS.speed, String(speed.value))
     sessionStorage.setItem(SS_KEYS.shardCount, String(shardCount.value))
     sessionStorage.setItem(SS_KEYS.runInfo, JSON.stringify(runInfo.value || null))
+    // persist stop request state
+    sessionStorage.setItem(SS_PREFIX + 'stopRequested', JSON.stringify(stopRequested.value))
+    sessionStorage.setItem(SS_PREFIX + 'stopRequestInFlight', JSON.stringify(stopRequestInFlight.value))
   } catch (e) {
     // ignore storage errors
   }
@@ -157,6 +164,10 @@ function loadFromSession() {
       const parsed = JSON.parse(ri)
       if (parsed) runInfo.value = parsed
     }
+    const sr = sessionStorage.getItem(SS_PREFIX + 'stopRequested')
+    if (sr) stopRequested.value = JSON.parse(sr)
+    const sif = sessionStorage.getItem(SS_PREFIX + 'stopRequestInFlight')
+    if (sif) stopRequestInFlight.value = JSON.parse(sif)
   } catch (e) {
     // ignore
   }
@@ -275,6 +286,35 @@ async function startReplay() {
   }
 }
 
+// 중지 요청: POST /order-api/v1/sessions/{runId}/stop
+async function stopReplay() {
+  if (!runInfo.value?.runId) return
+  if (stopRequestInFlight.value) return
+  stopRequestInFlight.value = true
+  try {
+    const res = await fetch(`/order-api/v1/sessions/${runInfo.value.runId}/stop`, { method: 'POST' })
+    if (res.status === 204) {
+      stopRequested.value = true
+      startMessage.value = '중지 요청을 보냈습니다. 반영까지 최대 10초 정도 걸릴 수 있습니다.'
+      saveToSession()
+      return
+    }
+    if (res.status === 404) {
+      startMessage.value = '이미 종료된 실행입니다.'
+      try { await pollLastRun() } catch (e) {}
+      return
+    }
+    // other errors
+    const txt = await res.text().catch(() => '')
+    errorMessage.value = `중지 요청 실패: ${res.status} ${txt}`
+  } catch (e: any) {
+    errorMessage.value = e.message || String(e)
+  } finally {
+    stopRequestInFlight.value = false
+    saveToSession()
+  }
+}
+
 async function pollLastRun() {
   try {
     const res = await fetchLastRun()
@@ -313,10 +353,17 @@ async function pollLastRun() {
       startMessage.value = '재생 완료'
       // final fetch and stop polling
       if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopRequested.value = false
       stopPolling()
     } else if (runInfo.value.status === 'FAILED') {
       startMessage.value = '재생 실패'
       if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopRequested.value = false
+      stopPolling()
+    } else if (runInfo.value.status === 'STOPPED') {
+      startMessage.value = '재생 중지됨'
+      if (runInfo.value.startedAt) await fetchRecorderSummary(runInfo.value.startedAt, runInfo.value.endedAt)
+      stopRequested.value = false
       stopPolling()
     }
   } catch (e: any) {
@@ -392,6 +439,14 @@ onBeforeUnmount(() => {
         <div class="actions">
           <button class="btn-primary" :disabled="isStarting || isPolling" @click="onStart">재생 시작</button>
           <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
+          <button
+            class="btn-stop"
+            v-if="runInfo && runInfo.status === 'IN_PROGRESS'"
+            :disabled="!runInfo?.runId || stopRequestInFlight"
+            @click="stopReplay"
+          >
+            {{ stopRequestInFlight ? '중지 요청됨' : '중지' }}
+          </button>
         </div>
 
         <div class="messages">
@@ -442,8 +497,8 @@ onBeforeUnmount(() => {
 
           <div class="status-box">
           <div class="status-left">
-            <span class="status-dot"></span>
-            <span>{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
+            <span class="status-dot" :class="{ 'status-stopped': runInfo?.status === 'STOPPED', 'status-failed': runInfo?.status === 'FAILED', 'status-completed': runInfo?.status === 'COMPLETED' }"></span>
+            <span :class="{ 'status-stopped': runInfo?.status === 'STOPPED' }">{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
           </div>
           <div class="status-right">
             <div v-if="runInfo">
@@ -518,6 +573,20 @@ onBeforeUnmount(() => {
   border: 1px solid #172a3e;
   border-radius: 12px;
   padding: 20px;
+}
+
+/* Stop button (orange) */
+.btn-stop {
+  background: #c97a2e;
+  color: white;
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.status-stopped {
+  color: #c97a2e;
+  font-weight: 600;
 }
 
 .panel-title {
@@ -708,6 +777,15 @@ onBeforeUnmount(() => {
   background: #2ed39a;
   border-radius: 50%;
   margin-right: 8px;
+}
+.status-dot.status-completed {
+  background: #2ed39a;
+}
+.status-dot.status-failed {
+  background: #ff6b6b;
+}
+.status-dot.status-stopped {
+  background: #c97a2e;
 }
 .status-left {
   display: flex;
