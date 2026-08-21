@@ -28,10 +28,12 @@ func (p *fakePublisher) Publish(_ context.Context, exec orderbook.Execution) err
 type fakeSnapshotStore struct {
 	saved        map[string]Snapshot
 	handoffCalls int
+	watermarks   map[string]int64
+	watermarkErr error
 }
 
 func newFakeSnapshotStore() *fakeSnapshotStore {
-	return &fakeSnapshotStore{saved: make(map[string]Snapshot)}
+	return &fakeSnapshotStore{saved: make(map[string]Snapshot), watermarks: make(map[string]int64)}
 }
 
 func (s *fakeSnapshotStore) Load(_ context.Context, market string) (Snapshot, bool, error) {
@@ -48,6 +50,19 @@ func (s *fakeSnapshotStore) Handoff(_ context.Context, snap Snapshot) error {
 	s.handoffCalls++
 	s.saved[snap.Market] = snap
 	return nil
+}
+
+func (s *fakeSnapshotStore) SaveWatermark(_ context.Context, market string, offset int64) error {
+	s.watermarks[market] = offset
+	return nil
+}
+
+func (s *fakeSnapshotStore) LoadWatermark(_ context.Context, market string) (int64, bool, error) {
+	if s.watermarkErr != nil {
+		return 0, false, s.watermarkErr
+	}
+	v, ok := s.watermarks[market]
+	return v, ok, nil
 }
 
 func dec(s string) decimal.Decimal {
@@ -209,6 +224,71 @@ func TestEngineRecoverNoSnapshotStartsFromZero(t *testing.T) {
 	}
 	if resumeFrom != 0 {
 		t.Errorf("스냅샷이 없으면 0부터 시작해야 하는데 resumeFrom = %d", resumeFrom)
+	}
+}
+
+// TestEngineRecoverNoSnapshotButWatermarkResumesFromWatermark는 2026-08-20 수정의
+// 핵심 시나리오입니다 — 실제 배포에서 OOMKilled로 죽은 마켓이 전체 스냅샷을 단
+// 한 번도 못 남기고, 대신 워터마크(가벼운 오프셋 체크포인트)만 남아있는 경우를
+// 재현합니다. 이때 0부터(=하루치를 통째로 재생하며 이미 끝난 매칭을 재실행) 시작하면
+// 안 되고, 워터마크 다음부터 이어서 읽어야 합니다. 호가창 자체는(스냅샷이 없으니)
+// 비어있는 채로 시작하는 것도 함께 확인합니다 — 이건 감수하는 손실이지 버그가 아닙니다.
+func TestEngineRecoverNoSnapshotButWatermarkResumesFromWatermark(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	store.watermarks["KRW-BTC"] = 999 // 전체 스냅샷은 없음(store.saved가 비어있음)
+
+	e := New("KRW-BTC", pub, store, 1000, time.Hour)
+	resumeFrom, err := e.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover 실패: %v", err)
+	}
+	if resumeFrom != 1000 {
+		t.Errorf("resumeFrom = %d, want 1000 (워터마크 offset+1) — 0부터 재생하면 안 됨", resumeFrom)
+	}
+
+	// 호가창은 비어있어야 정상(복구할 상태 자체가 없음) — 새 주문 하나만 접수돼도
+	// 체결 없이 그냥 미체결로 남아야 한다(상대편이 없으므로).
+	if err := e.Apply(context.Background(), newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 1000)); err != nil {
+		t.Fatalf("주문 접수 실패: %v", err)
+	}
+	if len(pub.published) != 0 {
+		t.Errorf("빈 호가창에서 시작했어야 하는데 체결이 발생함: %+v", pub.published)
+	}
+}
+
+// TestEngineRecoverWatermarkLoadErrorFallsBackToZero는 워터마크 조회 자체가
+// 실패하면(Redis 순간 장애 등) "워터마크 없음"과 구분할 수 없으므로 기존 동작
+// (0부터 시작)을 유지하는지 확인합니다 — 반대로 갔다가 정말 첫 실행인 마켓의
+// 메시지를 조용히 건너뛰는 게 더 위험하다는 판단(Recover의 주석 참고).
+func TestEngineRecoverWatermarkLoadErrorFallsBackToZero(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	store.watermarkErr = errors.New("redis 순간 장애(테스트용)")
+
+	e := New("KRW-BTC", pub, store, 1000, time.Hour)
+	resumeFrom, err := e.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("Recover가 에러를 반환하면 안 됨(워터마크 조회 실패는 fail-open): %v", err)
+	}
+	if resumeFrom != 0 {
+		t.Errorf("워터마크 조회 실패 시 resumeFrom = %d, want 0", resumeFrom)
+	}
+}
+
+// TestEngineSnapshotAlsoSavesWatermark는 주기적 스냅샷이 트리거될 때마다
+// 워터마크도 같이 갱신되는지 확인합니다 — 이게 없으면 위 두 테스트가 지키는
+// 계약을 실제로 채울 방법이 없습니다.
+func TestEngineSnapshotAlsoSavesWatermark(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	e := New("KRW-BTC", pub, store, 1, time.Hour) // 1건마다 스냅샷 트리거
+
+	if err := e.Apply(context.Background(), newOrderEvent(EventNew, "ask1", orderbook.Sell, "100", "1", 5)); err != nil {
+		t.Fatalf("ask1 접수 실패: %v", err)
+	}
+	if got, ok := store.watermarks["KRW-BTC"]; !ok || got != 5 {
+		t.Errorf("watermarks[KRW-BTC] = %d (ok=%v), want 5", got, ok)
 	}
 }
 

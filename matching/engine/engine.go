@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -74,6 +75,16 @@ type SnapshotStore interface {
 	Load(ctx context.Context, market string) (Snapshot, bool, error)
 	Save(ctx context.Context, snap Snapshot) error
 	Handoff(ctx context.Context, snap Snapshot) error
+	// SaveWatermark/LoadWatermark는 전체 스냅샷과 별개인 아주 가벼운 체크포인트
+	// (오프셋 하나)입니다(2026-08-20) — 실제 배포에서 OOMKilled(SIGKILL)로 죽은
+	// 마켓이 그때까지 전체 스냅샷을 단 한 번도 못 남긴 경우, Recover()가 "이
+	// 마켓이 예전에 처리된 적이 있다는 사실"만이라도 알 수 있게 해서, offset
+	// 0부터 하루치를 통째로 재생하며 이미 끝난 매칭을 다시 실행(=체결 중복
+	// 발행)하는 사고를 막습니다. Save와 같은 주기로 갱신하되, Save의 64개짜리
+	// 비동기 큐를 거치지 않고 항상 동기로 씁니다 — 오프셋 하나만 담으므로 전체
+	// 스냅샷(수십MB까지 갈 수 있음)보다 훨씬 가볍고, 그래서 훨씬 덜 유실됩니다.
+	SaveWatermark(ctx context.Context, market string, offset int64) error
+	LoadWatermark(ctx context.Context, market string) (offset int64, ok bool, err error)
 }
 
 // Engine은 마켓 하나를 담당합니다. 한 마켓은 고루틴 하나가 이 타입의 Apply를 순차
@@ -117,23 +128,52 @@ func New(market string, publisher ExecutionPublisher, snapshots SnapshotStore, s
 // Recover는 저장된 스냅샷을 불러와 호가창을 그 상태로 세팅합니다(FR-08). 스냅샷이
 // 없으면(최초 실행) 빈 호가창인 채로 오프셋 0부터 시작합니다. 반환값은 이어서 컨슘을
 // 시작해야 할 offset입니다.
+//
+// 전체 스냅샷이 없을 때 무조건 0부터 시작하던 게 실제 배포에서 문제가 됐습니다
+// (2026-08-20) — OOMKilled(SIGKILL)로 죽은 마켓이 전체 스냅샷을 단 한 번도 못
+// 남긴 경우, 다음 인수자가 그 마켓의 orders 파티션을 처음부터(며칠치일 수 있음)
+// 다시 읽으면서 이미 끝난 매칭을 전부 재실행 — 빈 호가창에서 다시 매칭되며
+// executions에 체결이 중복 발행되는 사고로 이어졌습니다. 그래서 전체 스냅샷이
+// 없어도 워터마크(가벼운 오프셋 체크포인트, SnapshotStore 설명 참고)가 있으면
+// "이 마켓은 예전에 분명히 처리된 적 있다"로 판단해 그 지점 다음부터 이어서
+// 읽습니다 — 그 시점에 떠 있던 미체결 주문 자체는(호가창 상태가 없으니) 복구
+// 못 하지만(스냅샷이 정말 없는 이상 피할 수 없는 손실), 과거 이력 전체를
+// 재매칭하는 훨씬 나쁜 결과는 막습니다. 워터마크는 전체 스냅샷과 같은 주기로
+// 갱신되므로 이 경로로 재생되는 이벤트는 최악의 경우도 그 정도 분량뿐이라,
+// 원래 있던 "가끔 있는 크래시에서 비동기 스냅샷이 살짝 뒤처진 채로 복구되는"
+// 것과 같은 수준의(이미 감내하기로 한) 위험으로 줄어듭니다.
 func (e *Engine) Recover(ctx context.Context) (resumeFromOffset int64, err error) {
 	snap, ok, err := e.snapshots.Load(ctx, e.Market)
 	if err != nil {
 		return 0, fmt.Errorf("스냅샷 로드 실패: %w", err)
 	}
-	if !ok {
-		return 0, nil
+	if ok {
+		for _, ov := range snap.Bids {
+			e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Buy, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
+		}
+		for _, ov := range snap.Asks {
+			e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Sell, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
+		}
+		e.lastOffset = snap.Offset
+		return snap.Offset + 1, nil
 	}
 
-	for _, ov := range snap.Bids {
-		e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Buy, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
+	wOffset, wOk, wErr := e.snapshots.LoadWatermark(ctx, e.Market)
+	if wErr != nil {
+		// 워터마크 조회 자체가 실패하면(Redis 순간 장애 등) "워터마크 없음"과
+		// 구분할 방법이 없습니다 — 기존 동작(0부터 시작)을 그대로 유지합니다.
+		// 이 폴백을 잘못된 방향(=있는데 없다고 오판)으로 타면 최악의 경우
+		// 지금과 같은 전체 재생이 재발하지만, 반대 방향(=없는데 있다고
+		// 오판해 tail 근처부터 시작)은 진짜 첫 실행인 마켓의 미처리 메시지를
+		// 조용히 건너뛰는, 되돌릴 수 없는 데이터 손실이라 더 위험합니다.
+		log.Printf("워터마크 조회 실패 (market=%s): %v — offset 0부터 시작합니다", e.Market, wErr)
+		return 0, nil
 	}
-	for _, ov := range snap.Asks {
-		e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Sell, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
+	if wOk {
+		e.lastOffset = wOffset
+		return wOffset + 1, nil
 	}
-	e.lastOffset = snap.Offset
-	return snap.Offset + 1, nil
+	return 0, nil
 }
 
 // Apply는 orders 토픽에서 온 이벤트 하나를 처리합니다. NEW면 매칭 후 체결을 전부
@@ -171,6 +211,12 @@ func (e *Engine) shouldSnapshot() bool {
 func (e *Engine) snapshot(ctx context.Context) error {
 	if err := e.snapshots.Save(ctx, e.currentSnapshot()); err != nil {
 		return fmt.Errorf("스냅샷 저장 실패 (market=%s): %w", e.Market, err)
+	}
+	// 워터마크 저장은 실패해도 스냅샷 저장 자체(=Apply)를 막지 않습니다 —
+	// Recover()의 마지막 안전장치일 뿐인 보조 신호라, 이번 주기에 실패해도
+	// 다음 주기에 다시 시도하면 됩니다(SnapshotStore 인터페이스 설명 참고).
+	if err := e.snapshots.SaveWatermark(ctx, e.Market, e.lastOffset); err != nil {
+		log.Printf("워터마크 저장 실패 (market=%s, offset=%d): %v", e.Market, e.lastOffset, err)
 	}
 	e.sinceSnapshot = 0
 	e.lastSnapshotAt = time.Now()
