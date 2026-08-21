@@ -379,6 +379,25 @@ POST /order-api/v1/sessions/run_abc123/stop
 - **매칭 엔진/기록기로 이미 넘어간 주문은 이 정지가 지우지 않는다.** 그중 미체결로 남은 것들은 세션 반납 시점의 기존 미종결 주문 정리 로직(FR-09 측정 정합성을 지키기 위해 취소로 처리, 삭제가 아님)이 그대로 처리한다 — 이미 체결된 주문은 건드리지 않는다(측정 결과 훼손 방지).
 - 이미 종료된 실행이나 존재한 적 없는 `runId`에 보내면 404 `NO_ACTIVE_RUN`이며, 재시도해도 안전하다(멱등).
 
+### 4.11 미종결 주문 일괄 정리(관리용) — `POST /v1/admin/cleanup-unresolved-orders` + `GET .../status` (2026-08-20, `orderapi`, 비동기로 전환됨)
+
+```
+POST /order-api/v1/admin/cleanup-unresolved-orders
+```
+요청 본문 없음. **즉시 202로 응답한다(동기로 다 처리하고 끝내는 게 아님)**:
+```json
+{ "status": "IN_PROGRESS", "canceled": 0, "total": 0, "startedAt": "2026-08-20T05:00:00Z" }
+```
+```
+GET /order-api/v1/admin/cleanup-unresolved-orders/status
+```
+```json
+{ "status": "COMPLETED", "canceled": 1860342, "total": 1860342, "startedAt": "2026-08-20T05:00:00Z", "endedAt": "2026-08-20T05:14:02Z" }
+```
+`status`는 `IN_PROGRESS`/`COMPLETED`/`FAILED` 중 하나. 이미 진행 중일 때 `POST`를 또 보내면 409 `CLEANUP_ALREADY_IN_PROGRESS`(중복 실행 방지) — 프론트는 버튼을 누른 뒤 `status`를 폴링해서 진행 상황을 보여주면 된다. `RECORDER_URL`이 꺼져있으면(3.5/4.6 참고) 503 `RECORDER_URL_NOT_CONFIGURED`. 한 번도 실행한 적 없으면(서버 재시작 직후 등) `GET .../status`는 404 `NO_CLEANUP_YET`.
+
+**용도가 4.10의 "중지"나 세션 종료 시 자동 정리와 다르다.** 이건 특정 실행 하나를 정리하는 게 아니라 — **지금 이 순간 DB에 남아있는 미종결 주문 전부(언제 만들어졌든, 자동 정리 기능이 생기기 전 것이든)**를 대상으로 취소를 발행하는 관리자용 일괄 도구다. 세션 배타적 잠금 덕분에 활성 실행은 항상 최대 1개뿐이라, 이 시점에 미종결로 남아있는 건 전부 (a) 방금 끝난 실행 것이거나 (b) 과거에 정리 안 된 잔재뿐 — 다른 정상 진행 중인 실행을 잘못 건드릴 위험은 없다. 대량(수십만~수백만 건)일 수 있어 완료까지 시간이 걸린다 — 버튼 클릭 자체가 아니라 `status`가 `COMPLETED`로 바뀌는 걸로 완료를 표시할 것.
+
 ## 요약
 
 - **바로 연결 가능**: 시세 조회, 호가창 조회, 주문 접수/취소 (5개 화면 대응 경로, 2개 필드 불일치만 정리하면 됨)
@@ -389,5 +408,6 @@ POST /order-api/v1/sessions/run_abc123/stop
 - **2026-08-19에 새로 생김**: 부하 시나리오 미리보기 화면용 두 엔드포인트 — `orderapi`의 `GET /v1/jobs/replay-preview`(재생 예정 건수 + 배속 1 기준 소요 시간, 프론트가 speed로 나눠 씀, 4.8 참고)와 `GET /v1/sessions/previous-run`(직전 실행 기록, `last-run`과 같은 모양, 4.9 참고). 이 화면은 접수/체결만 보여주고 미체결은 의도적으로 뺌(3.6 참고)
 - **2026-08-20에 새로 생김**: "중지" 버튼용 `orderapi`의 `POST /v1/sessions/{runId}/stop`(4.10 참고) — `trader`/`replayengine`을 정상 종료 경로 그대로 멈춘다(즉시는 아니고 다음 하트비트 주기 내). `last-run`의 `status`에 `"STOPPED"` 값이 새로 추가됨(4.6 참고)
 - **2026-08-20에 필드 확장**: "AI 트레이더 실행 결과" 화면에 `last-run`의 `speed`(4.6), `orders/summary`의 `byMarket`/`bySide`(4.7)가 추가됨 — 마켓별 개수/체결률, 매수매도 비율, 실행 배속 지원(3.5 참고). "평균 체결 지연시간"은 팀 논의 끝에 빼기로 함(인프라 성능 지표로는 부적합하다고 판단, 3.5 참고).
+- **2026-08-20에 동기→비동기 전환**: 관리용 `POST /v1/admin/cleanup-unresolved-orders`(미종결 주문 일괄 정리, 4.11 참고)가 대량(수백만 건) 백로그에서 5분 타임아웃을 못 맞추던 문제로 202+폴링 방식으로 바뀜 — `POST /v1/collect`가 겪었던 것과 같은 종류의 문제. 세션 종료 시 자동 정리의 범위도 "직전 실행 몫만"에서 "지금 남아있는 전체 미종결"로 넓어짐.
 - **여전히 새로 만들어야 함**: 대시보드 실시간 지표 전체(TPS/P99/대기주문/Pod수), NFR 달성치, 매칭 단계/오더북 복구 진행률/체결 내역 — 계산 로직 + 조회 API 둘 다 없음
 - **인프라 작업 별도 필요**: prod 환경의 `/v1` vs `/order-api`(+`recorder`용 새 경로) 라우팅, Grafana 대시보드 구성

@@ -97,10 +97,11 @@ func main() {
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 
-	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트도 등록하지 않습니다 —
+	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
-	// 수만 건을 동기 처리할 수 있어 releaseSessionHandler보다 훨씬 넉넉한
-	// 타임아웃의 별도 클라이언트를 씁니다.
+	// 일괄 정리 자체는 이제 비동기라(2026-08-20, sessioncleanup.go 참고) 이
+	// 클라이언트의 타임아웃은 더 이상 "얼마나 오래 걸리는 작업을 견디느냐"가
+	// 아니라 평범한 HTTP 호출(recorder 조회 하나)의 타임아웃일 뿐입니다.
 	//
 	// 꺼져있을 때도 반드시 로그를 남깁니다(2026-08-20) — JOB_TRIGGER_QUEUE_URL은
 	// 원래부터 이렇게 로그를 남기는데 RECORDER_URL만 조용히 넘어가고 있었고,
@@ -109,8 +110,9 @@ func main() {
 	// 나서야 원인을 알아낸 사고가 있었습니다. "선택 기능으로 둔다"는 판단은
 	// 맞지만 "꺼져 있다는 사실"은 시작 로그에 항상 드러나야 합니다.
 	if cfg.RecorderURL != "" {
-		cleanupHTTPClient := &http.Client{Timeout: 5 * time.Minute}
-		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", cleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+		cleanupHTTPClient := &http.Client{Timeout: 30 * time.Second}
+		mux.HandleFunc("POST /v1/admin/cleanup-unresolved-orders", startCleanupAllUnresolvedOrdersHandler(cleanupHTTPClient, cfg.RecorderURL, producer))
+		mux.HandleFunc("GET /v1/admin/cleanup-unresolved-orders/status", cleanupAllStatusHandler())
 		log.Printf("recorder 연동 활성화 (recorderUrl=%s) — 세션 종료 자동 정리 + 수동 정리 엔드포인트 사용 가능", cfg.RecorderURL)
 	} else {
 		log.Printf("RECORDER_URL이 없어 세션 종료 자동 정리 및 POST /v1/admin/cleanup-unresolved-orders 비활성화")

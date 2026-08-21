@@ -207,7 +207,7 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 		// 정리는 best-effort 백그라운드 작업이라 응답을 기다리게 하지 않습니다.
 		// r.Context()는 응답이 끝나면 곧 취소되므로 별도 컨텍스트를 씁니다.
 		if finalized {
-			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, record)
+			go cleanupUnresolvedOrders(context.Background(), httpClient, recorderURL, producer, record.RunID, record.StartedAt)
 		}
 	}
 }
