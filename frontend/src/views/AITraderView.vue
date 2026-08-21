@@ -1051,47 +1051,49 @@ const resetMatchingEngineBook = async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
-            <div v-if="typedPaperTradingResult" class="result-stats">
-              <div class="stat">
-                <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
-                <div class="stat-label">접수</div>
+            <div v-if="typedPaperTradingResult">
+              <div v-if="typedPaperTradingResult" class="result-stats">
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-label">접수</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-label">체결</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-label">미체결</div>
+                </div>
               </div>
-              <div class="stat">
-                <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
-                <div class="stat-label">체결</div>
+              <div class="result-meta">
+                시작: {{ formatRFC3339ToKST(runStartedAt) }} • 경과: {{ computeElapsed(runStartedAt) }}
               </div>
-              <div class="stat">
-                <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
-                <div class="stat-label">미체결</div>
+              <div class="result-speed" v-if="runSpeed">실행 배속: {{ runSpeed }}×</div>
+              <div class="buy-sell-bar" v-if="(typedPaperTradingResult.bySide || []).length">
+                <div class="buy" :style="{ width: buySellRatio.buyPercent + '%' }">
+                  {{ buySellRatio.buyPercent }}% 매수
+                </div>
+                <div class="sell" :style="{ width: buySellRatio.sellPercent + '%' }">
+                  {{ buySellRatio.sellPercent }}% 매도
+                </div>
               </div>
-            </div>
-            <div class="result-meta">
-              시작: {{ formatRFC3339ToKST(runStartedAt) }} • 경과: {{ computeElapsed(runStartedAt) }}
-            </div>
-            <div class="result-speed" v-if="runSpeed">실행 배속: {{ runSpeed }}×</div>
-            <div class="buy-sell-bar" v-if="(typedPaperTradingResult.bySide || []).length">
-              <div class="buy" :style="{ width: buySellRatio.buyPercent + '%' }">
-                {{ buySellRatio.buyPercent }}% 매수
+              <div class="market-table" v-if="(typedPaperTradingResult.byMarket || []).length">
+                <table>
+                  <thead>
+                    <tr><th>마켓</th><th>접수</th><th>체결</th><th>미체결</th><th>체결률</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
+                      <td style="text-align:left">{{ m.market }}</td>
+                      <td style="text-align:right">{{ m.accepted }}</td>
+                      <td style="text-align:right">{{ m.filled }}</td>
+                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ marketFillRate(m) }}%</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-              <div class="sell" :style="{ width: buySellRatio.sellPercent + '%' }">
-                {{ buySellRatio.sellPercent }}% 매도
-              </div>
-            </div>
-            <div class="market-table" v-if="(typedPaperTradingResult.byMarket || []).length">
-              <table>
-                <thead>
-                  <tr><th>마켓</th><th>접수</th><th>체결</th><th>미체결</th><th>체결률</th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
-                    <td style="text-align:left">{{ m.market }}</td>
-                    <td style="text-align:right">{{ m.accepted }}</td>
-                    <td style="text-align:right">{{ m.filled }}</td>
-                    <td style="text-align:right">{{ m.unfilled }}</td>
-                    <td style="text-align:right">{{ marketFillRate(m) }}%</td>
-                  </tr>
-                </tbody>
-              </table>
             </div>
           </template>
 
