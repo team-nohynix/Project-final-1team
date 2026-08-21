@@ -89,6 +89,15 @@ var (
 		Name: "recorder_running_engine_pods",
 		Help: "현재 마켓이 배정된 매칭 엔진 인스턴스 수(distinct engine_instance_id)",
 	})
+	// recorderOrdersByStatus는 2026-08-21 재도입 — query.DashboardMetrics.OrdersByStatus
+	// 타입 주석 참고. 예전엔 status만으로 GROUP BY(시간 제한 없음)해서 RDS CPU
+	// 포화 사고의 원인이 됐던 지표라, 이번엔 반드시 이 리더 락+캐시 폴링
+	// 경로로만 갱신됩니다(레플리카별 중복 쿼리 방지) — 다른 경로로 직접
+	// 쿼리해서 이 게이지를 갱신하는 코드를 추가하면 안 됩니다.
+	recorderOrdersByStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "recorder_orders_by_status",
+		Help: "최근 seriesWindow(10분) 안에 접수된 주문의 상태별 건수",
+	}, []string{"status"})
 )
 
 // recorderOrderAcceptTotal/recorderExecutionTotal은 2026-08-21 추가 — 위
@@ -134,7 +143,7 @@ func init() {
 		recorderLagGauge, recorderBackpressureActiveGauge,
 		recorderOrderAcceptTps, recorderExecutionTps, recorderPendingOrders,
 		recorderE2EP99Ms, recorderE2EP99SampleCount, recorderRunningEnginePods,
-		recorderOrderAcceptTotal, recorderExecutionTotal,
+		recorderOrderAcceptTotal, recorderExecutionTotal, recorderOrdersByStatus,
 	)
 }
 
@@ -155,6 +164,9 @@ func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier, redi
 			recorderE2EP99Ms.Set(m.E2EP99Ms)
 			recorderE2EP99SampleCount.Set(float64(m.E2EP99SampleCount))
 			recorderRunningEnginePods.Set(float64(m.RunningEnginePods))
+			for status, count := range m.OrdersByStatus {
+				recorderOrdersByStatus.WithLabelValues(status).Set(float64(count))
+			}
 		}
 		select {
 		case <-ctx.Done():

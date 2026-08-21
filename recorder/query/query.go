@@ -180,13 +180,14 @@ type MetricsBucket struct {
 // 부재와 같은 근본 원인). RunningEnginePods는 ListEngines 결과의 distinct
 // engineInstanceId 수를 그대로 씁니다.
 type DashboardMetrics struct {
-	OrderAcceptTps    float64         `json:"orderAcceptTps"`
-	ExecutionTps      float64         `json:"executionTps"`
-	PendingOrders     int64           `json:"pendingOrders"`
-	E2EP99Ms          float64         `json:"e2eP99Ms"`
-	E2EP99SampleCount int             `json:"e2eP99SampleCount"`
-	RunningEnginePods int             `json:"runningEnginePods"`
-	Series            []MetricsBucket `json:"series"`
+	OrderAcceptTps    float64          `json:"orderAcceptTps"`
+	ExecutionTps      float64          `json:"executionTps"`
+	PendingOrders     int64            `json:"pendingOrders"`
+	E2EP99Ms          float64          `json:"e2eP99Ms"`
+	E2EP99SampleCount int              `json:"e2eP99SampleCount"`
+	RunningEnginePods int              `json:"runningEnginePods"`
+	Series            []MetricsBucket  `json:"series"`
+	OrdersByStatus    map[string]int64 `json:"ordersByStatus"`
 }
 
 // MySQLQuerier는 Querier를 실제 MySQL(RDS)로 구현합니다. store/mysql.go와
@@ -329,6 +330,29 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	m.OrderAcceptTps = float64(acceptCount) / tpsWindow.Seconds()
 	m.ExecutionTps = float64(execCount) / tpsWindow.Seconds()
 	m.PendingOrders = pendingCount
+
+	// 상태별 건수(recorder_orders_by_status, Grafana "주문 상태별 건수 추이"
+	// 패널) — 2026-08-19에 처음 추가했다가 status만으로 GROUP BY(시간 제한
+	// 없음)해서 RDS CPU 97~99% 포화 사고의 원인 중 하나가 돼 2026-08-21에
+	// 통째로 뺐던 지표입니다. FILLED/CANCELED는 종결 후에도 행이 영원히
+	// 남아 전체 COUNT가 시간이 갈수록 무한히 커지는데, 그 전체를 매번
+	// GROUP BY로 다시 세는 게 문제였습니다. 여기서는 idx_trade_order_status_submitted
+	// (status, submitted_at) 인덱스를 그대로 타도록 상태 4개를 각각
+	// "최근 seriesWindow(10분) 안에 접수된 주문 중 그 상태" 쿼리로 나눠서,
+	// 사고 전과 달리 테이블 전체 크기와 무관하게 항상 최근 10분 창 크기에만
+	// 비례하는 비용으로 만들었습니다(E2E P99 쿼리를 나눈 것과 같은 이유).
+	statusByStatus := map[string]int64{}
+	for _, status := range []string{"ACCEPTED", "PARTIALLY_FILLED", "FILLED", "CANCELED"} {
+		var count int64
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM trade_order WHERE status = ? AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE`,
+			status, int(seriesWindow.Minutes()),
+		).Scan(&count); err != nil {
+			return DashboardMetrics{}, fmt.Errorf("상태별 건수 조회 실패 (status=%s): %w", status, err)
+		}
+		statusByStatus[status] = count
+	}
+	m.OrdersByStatus = statusByStatus
 
 	// E2E P99: 최근 p99Window 안에 FILLED된 주문마다 (마지막 체결 시각 - 접수
 	// 시각)을 표본 하나로 삼는다. DashboardMetrics 타입 주석 참고 — 완벽한
