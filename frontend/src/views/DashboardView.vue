@@ -428,14 +428,14 @@ function podLabel(deploymentName) {
 // 포크 구조를 반영합니다 — 일직선이 아니라 매칭엔진을 위로 띄우고, Orders
 // 토픽에서 기록기로 바로 내려가는 우회 곡선을 추가했습니다.
 const flowNodeMeta = {
-  collector: { x: 70, y: 190, label: '시세 수집기', sub: 'backend(배치)' },
-  trader: { x: 220, y: 190, label: 'AI 트레이더', sub: 'trader(Job)' },
-  orderapi: { x: 370, y: 190, label: '접수', sub: 'orderapi' },
-  'orders-topic': { x: 520, y: 190, label: 'Orders 토픽', sub: 'Kafka' },
-  matching: { x: 595, y: 60, label: '매칭 엔진', sub: 'matching-engine' },
-  'exec-topic': { x: 670, y: 190, label: 'Executions 토픽', sub: 'Kafka' },
-  recorder: { x: 820, y: 190, label: '기록기', sub: 'recorder' },
-  mysql: { x: 970, y: 190, label: 'MySQL', sub: 'trade_order' },
+  collector: { x: 70, y: 100, label: '시세 수집기', sub: 'backend(배치)' },
+  trader: { x: 220, y: 100, label: 'AI 트레이더', sub: 'trader(Job)' },
+  orderapi: { x: 370, y: 100, label: '접수', sub: 'orderapi' },
+  'orders-topic': { x: 520, y: 100, label: 'Orders 토픽', sub: 'Kafka' },
+  matching: { x: 595, y: 40, label: '매칭 엔진', sub: 'matching-engine' },
+  'exec-topic': { x: 670, y: 100, label: 'Executions 토픽', sub: 'Kafka' },
+  recorder: { x: 820, y: 100, label: '기록기', sub: 'recorder' },
+  mysql: { x: 970, y: 100, label: 'MySQL', sub: 'trade_order' },
 }
 
 const flowNodes = computed(() => {
@@ -467,25 +467,25 @@ const FLOW_EXEC_COLOR = '#20c8e8'
 const flowEdges = computed(() => {
   const ok = (...keys) => keys.every((k) => flowNodes.value.find((n) => n.key === k)?.ok)
   return [
-    { key: 'e1', d: 'M130,190 L160,190', color: FLOW_ORDER_COLOR, ok: ok('collector', 'trader') },
-    { key: 'e2', d: 'M280,190 L310,190', color: FLOW_ORDER_COLOR, ok: ok('trader', 'orderapi') },
-    { key: 'e3', d: 'M430,190 L460,190', color: FLOW_ORDER_COLOR, ok: ok('orderapi', 'orders-topic') },
+    { key: 'e1', d: 'M130,100 L160,100', color: FLOW_ORDER_COLOR, ok: ok('collector', 'trader') },
+    { key: 'e2', d: 'M280,100 L310,100', color: FLOW_ORDER_COLOR, ok: ok('trader', 'orderapi') },
+    { key: 'e3', d: 'M430,100 L460,100', color: FLOW_ORDER_COLOR, ok: ok('orderapi', 'orders-topic') },
     // 포크 1: Orders 토픽 -> 매칭엔진 (위로)
-    { key: 'e4', d: 'M520,160 Q560,105 578,92', color: FLOW_ORDER_COLOR, ok: ok('orders-topic', 'matching') },
+    { key: 'e4', d: 'M520,70 Q560,50 578,72', color: FLOW_ORDER_COLOR, ok: ok('orders-topic', 'matching') },
     // 매칭엔진 -> Executions 토픽
-    { key: 'e5', d: 'M612,92 Q650,105 670,160', color: FLOW_EXEC_COLOR, ok: ok('matching', 'exec-topic') },
-    { key: 'e6', d: 'M730,190 L760,190', color: FLOW_EXEC_COLOR, ok: ok('exec-topic', 'recorder') },
+    { key: 'e5', d: 'M612,72 Q650,50 670,70', color: FLOW_EXEC_COLOR, ok: ok('matching', 'exec-topic') },
+    { key: 'e6', d: 'M730,100 L760,100', color: FLOW_EXEC_COLOR, ok: ok('exec-topic', 'recorder') },
     // 포크 2: Orders 토픽 -> 기록기 직접 구독 (아래로 우회)
     {
       key: 'e7',
-      d: 'M520,215 C560,270 780,270 820,215',
+      d: 'M520,125 C560,148 780,148 820,125',
       color: FLOW_ORDER_COLOR,
       ok: ok('orders-topic', 'recorder'),
       label: '직접 구독',
       labelX: 670,
-      labelY: 258,
+      labelY: 141,
     },
-    { key: 'e8', d: 'M880,190 L910,190', color: FLOW_ORDER_COLOR, ok: ok('recorder', 'mysql') },
+    { key: 'e8', d: 'M880,100 L910,100', color: FLOW_ORDER_COLOR, ok: ok('recorder', 'mysql') },
   ]
 })
 
@@ -527,7 +527,7 @@ onBeforeUnmount(() => {
 
     <section class="panel flow-panel">
       <h3>실시간 처리 흐름</h3>
-      <svg class="flow-svg" viewBox="0 0 1040 300" preserveAspectRatio="xMidYMid meet">
+      <svg class="flow-svg" viewBox="0 0 1040 170" preserveAspectRatio="xMidYMid meet">
         <!-- 연결선: 상태 나쁘면 점선 회색, 정상이면 실선 + 흐르는 점 -->
         <g v-for="edge in flowEdges" :key="edge.key">
           <path
@@ -535,21 +535,21 @@ onBeforeUnmount(() => {
             :d="edge.d"
             fill="none"
             :stroke="edge.ok ? edge.color : '#2a3d52'"
-            stroke-width="2"
-            :stroke-dasharray="edge.ok ? null : '4 4'"
+            stroke-width="1.6"
+            :stroke-dasharray="edge.ok ? null : '3 3'"
           />
           <template v-if="edge.ok">
-            <circle r="3.5" :fill="edge.color">
+            <circle r="2.4" :fill="edge.color">
               <animateMotion dur="1.8s" repeatCount="indefinite" begin="0s">
                 <mpath :href="`#flowpath-${edge.key}`" />
               </animateMotion>
             </circle>
-            <circle r="3.5" :fill="edge.color" opacity="0.7">
+            <circle r="2.4" :fill="edge.color" opacity="0.7">
               <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.6s">
                 <mpath :href="`#flowpath-${edge.key}`" />
               </animateMotion>
             </circle>
-            <circle r="3.5" :fill="edge.color" opacity="0.4">
+            <circle r="2.4" :fill="edge.color" opacity="0.4">
               <animateMotion dur="1.8s" repeatCount="indefinite" begin="1.2s">
                 <mpath :href="`#flowpath-${edge.key}`" />
               </animateMotion>
@@ -764,7 +764,7 @@ onBeforeUnmount(() => {
 .flow-svg {
   width: 100%;
   height: auto;
-  min-height: 220px;
+  min-height: 140px;
   margin-top: 10px;
   overflow: visible;
 }
