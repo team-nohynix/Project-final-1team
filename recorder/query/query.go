@@ -615,9 +615,12 @@ func (q *MySQLQuerier) ThroughputSeries(ctx context.Context, from, to time.Time)
 // bucketCountsRange는 bucketCounts의 임의 구간/버킷 크기 버전입니다 —
 // DATE_FORMAT 대신 초 단위 정수 버킷 키(UNIX_TIMESTAMP를 bucketSeconds로
 // 나눠 내림)를 써서, 버킷 크기가 매번 달라져도 같은 쿼리 모양으로 처리합니다.
+// CAST(... AS UNSIGNED)가 필요합니다 — FLOOR(UNIX_TIMESTAMP(x)/?)*?는 나눗셈
+// 때문에 MySQL이 DECIMAL로 반환하고("1787535600.000...", go-sql-driver가
+// []byte로 줌), int64로 바로 Scan하면 실패합니다(2026-08-24 실측).
 func bucketCountsRange(ctx context.Context, db *sql.DB, table, tsColumn string, from, to time.Time, bucketSeconds int) (map[int64]int64, error) {
 	query := fmt.Sprintf(`
-		SELECT FLOOR(UNIX_TIMESTAMP(%s) / ?) * ? AS bucket_unix, COUNT(*)
+		SELECT CAST(FLOOR(UNIX_TIMESTAMP(%s) / ?) * ? AS UNSIGNED) AS bucket_unix, COUNT(*)
 		FROM %s
 		WHERE %s >= ? AND %s < ?
 		GROUP BY bucket_unix
