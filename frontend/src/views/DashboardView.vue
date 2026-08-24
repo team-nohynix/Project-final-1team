@@ -15,7 +15,14 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 //   매칭엔진/MySQL/Redis 얕은 헬스체크 + orderapi/matching-engine/recorder
 //   파드 레플리카 수(ready/desired). 시세 수집기/AI 트레이더는 별도 헬스체크
 //   대상이 없는 배치성 워크로드라 세션 가드(last-run)의 owner=trader로
-//   대신 표시합니다.
+//   대신 표시합니다. 다이어그램은 SVG + <animateMotion>으로 그리고(순수
+//   CSS keyframe보다 곡선 경로를 따라가는 점을 표현하기 쉬움), 정상 구간만
+//   점이 흐르고 장애 구간은 회색 점선으로 표시합니다(2026-08-24).
+//   **토폴로지 검토(2026-08-24)** — recorder/main.go 확인 결과 기록기는
+//   Orders 토픽을 매칭엔진을 거치지 않고 자기 전용 컨슈머 그룹으로 직접
+//   구독합니다(그라파나 원본의 "→ 기록기 직접 구독" 라벨과 동일) — 기존
+//   일직선 다이어그램은 이 갈림길을 빠뜨리고 있어서, Orders 토픽에서
+//   매칭엔진행/기록기 직접구독 두 갈래로 갈라지는 포크 구조로 다시 그렸습니다.
 // - 실행 상태(페이퍼 트레이딩/리플레이 진행 여부, 안 돌고 있으면 최근 실행
 //   요약): orderapi GET /v1/sessions/last-run.
 // - 데이터 정합성 검사: 가장 최근 시뮬레이션(replayengine) 실행 하나의
@@ -410,16 +417,77 @@ function podLabel(deploymentName) {
   return `${p.ready}/${p.desired}`
 }
 
-const flowNodes = computed(() => [
-  { key: 'collector', label: '시세 수집기', sub: 'backend(배치)', ok: traderRunning.value, podLabel: null },
-  { key: 'trader', label: 'AI 트레이더', sub: 'trader(Job)', ok: traderRunning.value, podLabel: null },
-  { key: 'orderapi', label: '접수', sub: 'orderapi', ok: flowUp('주문 접수 API'), podLabel: podLabel('orderapi') },
-  { key: 'orders-topic', label: 'Orders 토픽', sub: 'Kafka', ok: flowUp('Kafka 브로커'), podLabel: null },
-  { key: 'matching', label: '매칭 엔진', sub: 'matching-engine', ok: flowUp('매칭 엔진'), podLabel: podLabel('matching-engine') },
-  { key: 'exec-topic', label: 'Executions 토픽', sub: 'Kafka', ok: flowUp('Kafka 브로커'), podLabel: null },
-  { key: 'recorder', label: '기록기', sub: 'recorder', ok: flowUp('MySQL'), podLabel: podLabel('recorder') },
-  { key: 'mysql', label: 'MySQL', sub: 'trade_order', ok: flowUp('MySQL'), podLabel: null },
-])
+// **토폴로지 검토(2026-08-24, 사용자 요청)** — 기존 구현은 접수→Orders 토픽→
+// 매칭엔진→Executions 토픽→기록기를 완전한 일직선으로 그렸는데, 이건 실제
+// 배선과 다릅니다. recorder/main.go를 보면 기록기는 orders 토픽을 매칭엔진을
+// 거치지 않고 자기 전용 컨슈머 그룹("recorder-orders")으로 직접 구독합니다
+// (orderapi가 Orders 토픽에 발행 → 매칭엔진과 기록기가 각자 독립적으로 같은
+// 토픽을 따로 소비 — 그라파나 다이어그램의 "→ 기록기 직접 구독" 라벨이 가리키는
+// 바로 그 경로). 즉 Orders 토픽에서 실제로는 두 갈래로 갈라집니다: (1) 매칭엔진
+// 행 → Executions 토픽 → 기록기, (2) 기록기로 바로. 아래 좌표/경로 정의가 이
+// 포크 구조를 반영합니다 — 일직선이 아니라 매칭엔진을 위로 띄우고, Orders
+// 토픽에서 기록기로 바로 내려가는 우회 곡선을 추가했습니다.
+const flowNodeMeta = {
+  collector: { x: 70, y: 190, label: '시세 수집기', sub: 'backend(배치)' },
+  trader: { x: 220, y: 190, label: 'AI 트레이더', sub: 'trader(Job)' },
+  orderapi: { x: 370, y: 190, label: '접수', sub: 'orderapi' },
+  'orders-topic': { x: 520, y: 190, label: 'Orders 토픽', sub: 'Kafka' },
+  matching: { x: 595, y: 60, label: '매칭 엔진', sub: 'matching-engine' },
+  'exec-topic': { x: 670, y: 190, label: 'Executions 토픽', sub: 'Kafka' },
+  recorder: { x: 820, y: 190, label: '기록기', sub: 'recorder' },
+  mysql: { x: 970, y: 190, label: 'MySQL', sub: 'trade_order' },
+}
+
+const flowNodes = computed(() => {
+  const okByKey = {
+    collector: traderRunning.value,
+    trader: traderRunning.value,
+    orderapi: flowUp('주문 접수 API'),
+    'orders-topic': flowUp('Kafka 브로커'),
+    matching: flowUp('매칭 엔진'),
+    'exec-topic': flowUp('Kafka 브로커'),
+    recorder: flowUp('MySQL'),
+    mysql: flowUp('MySQL'),
+  }
+  const podByKey = { orderapi: 'orderapi', matching: 'matching-engine', recorder: 'recorder' }
+  return Object.entries(flowNodeMeta).map(([key, meta]) => ({
+    key,
+    ...meta,
+    ok: okByKey[key],
+    podLabel: podByKey[key] ? podLabel(podByKey[key]) : null,
+  }))
+})
+
+const FLOW_ORDER_COLOR = '#3478f6'
+const FLOW_EXEC_COLOR = '#20c8e8'
+
+// 각 edge의 SVG path는 두 끝 노드 박스 테두리(반너비 60, 반높이 32)에서
+// 시작/끝나도록 손으로 좌표를 맞췄습니다 — flowNodeMeta 좌표를 바꾸면 같이
+// 맞춰야 합니다(범용 경로 자동 계산은 이 정도 규모에선 과합니다).
+const flowEdges = computed(() => {
+  const ok = (...keys) => keys.every((k) => flowNodes.value.find((n) => n.key === k)?.ok)
+  return [
+    { key: 'e1', d: 'M130,190 L160,190', color: FLOW_ORDER_COLOR, ok: ok('collector', 'trader') },
+    { key: 'e2', d: 'M280,190 L310,190', color: FLOW_ORDER_COLOR, ok: ok('trader', 'orderapi') },
+    { key: 'e3', d: 'M430,190 L460,190', color: FLOW_ORDER_COLOR, ok: ok('orderapi', 'orders-topic') },
+    // 포크 1: Orders 토픽 -> 매칭엔진 (위로)
+    { key: 'e4', d: 'M520,160 Q560,105 578,92', color: FLOW_ORDER_COLOR, ok: ok('orders-topic', 'matching') },
+    // 매칭엔진 -> Executions 토픽
+    { key: 'e5', d: 'M612,92 Q650,105 670,160', color: FLOW_EXEC_COLOR, ok: ok('matching', 'exec-topic') },
+    { key: 'e6', d: 'M730,190 L760,190', color: FLOW_EXEC_COLOR, ok: ok('exec-topic', 'recorder') },
+    // 포크 2: Orders 토픽 -> 기록기 직접 구독 (아래로 우회)
+    {
+      key: 'e7',
+      d: 'M520,215 C560,270 780,270 820,215',
+      color: FLOW_ORDER_COLOR,
+      ok: ok('orders-topic', 'recorder'),
+      label: '직접 구독',
+      labelX: 670,
+      labelY: 258,
+    },
+    { key: 'e8', d: 'M880,190 L910,190', color: FLOW_ORDER_COLOR, ok: ok('recorder', 'mysql') },
+  ]
+})
 
 let pollTimer = null
 
@@ -459,17 +527,49 @@ onBeforeUnmount(() => {
 
     <section class="panel flow-panel">
       <h3>실시간 처리 흐름</h3>
-      <div class="flow-row">
-        <template v-for="(node, i) in flowNodes" :key="node.key">
-          <div class="flow-node" :class="{ down: !node.ok }">
+      <svg class="flow-svg" viewBox="0 0 1040 300" preserveAspectRatio="xMidYMid meet">
+        <!-- 연결선: 상태 나쁘면 점선 회색, 정상이면 실선 + 흐르는 점 -->
+        <g v-for="edge in flowEdges" :key="edge.key">
+          <path
+            :id="`flowpath-${edge.key}`"
+            :d="edge.d"
+            fill="none"
+            :stroke="edge.ok ? edge.color : '#2a3d52'"
+            stroke-width="2"
+            :stroke-dasharray="edge.ok ? null : '4 4'"
+          />
+          <template v-if="edge.ok">
+            <circle r="3.5" :fill="edge.color">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0s">
+                <mpath :href="`#flowpath-${edge.key}`" />
+              </animateMotion>
+            </circle>
+            <circle r="3.5" :fill="edge.color" opacity="0.7">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.6s">
+                <mpath :href="`#flowpath-${edge.key}`" />
+              </animateMotion>
+            </circle>
+            <circle r="3.5" :fill="edge.color" opacity="0.4">
+              <animateMotion dur="1.8s" repeatCount="indefinite" begin="1.2s">
+                <mpath :href="`#flowpath-${edge.key}`" />
+              </animateMotion>
+            </circle>
+          </template>
+          <text v-if="edge.label" :x="edge.labelX" :y="edge.labelY" class="flow-edge-label" text-anchor="middle">
+            → {{ edge.label }}
+          </text>
+        </g>
+
+        <!-- 노드 -->
+        <foreignObject v-for="node in flowNodes" :key="node.key" :x="node.x - 62" :y="node.y - 30" width="124" height="62">
+          <div xmlns="http://www.w3.org/1999/xhtml" class="flow-node" :class="{ down: !node.ok }">
             <span class="flow-dot" :style="{ backgroundColor: node.ok ? '#2ed39a' : '#ff5c7a' }"></span>
             <div class="flow-label">{{ node.label }}</div>
             <div class="flow-sub">{{ node.sub }}</div>
             <div v-if="node.podLabel" class="flow-pods">파드 {{ node.podLabel }}</div>
           </div>
-          <div v-if="i < flowNodes.length - 1" class="flow-arrow">→</div>
-        </template>
-      </div>
+        </foreignObject>
+      </svg>
       <div class="flow-rates">
         <span><i class="order-color"></i>접수 {{ metrics ? displayValue(metrics.orderAcceptTps, 1) : '--' }}/s</span>
         <span><i class="execution-color"></i>체결 {{ metrics ? displayValue(metrics.executionTps, 1) : '--' }}/s</span>
@@ -661,25 +761,33 @@ onBeforeUnmount(() => {
   margin-bottom: 18px;
 }
 
-.flow-row {
-  display: flex;
-  margin-top: 16px;
-  align-items: stretch;
-  gap: 6px;
-  overflow-x: auto;
+.flow-svg {
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  margin-top: 10px;
+  overflow: visible;
+}
+
+.flow-edge-label {
+  fill: #71869c;
+  font-size: 10px;
 }
 
 .flow-node {
   display: flex;
-  min-width: 108px;
-  padding: 12px 10px;
+  width: 100%;
+  height: 100%;
+  padding: 8px 6px;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  gap: 3px;
   text-align: center;
   background: #11243a;
   border: 1px solid #20344b;
   border-radius: 10px;
+  box-sizing: border-box;
 }
 
 .flow-node.down {
@@ -705,14 +813,6 @@ onBeforeUnmount(() => {
 .flow-pods {
   color: #8ea2b8;
   font-size: 10px;
-}
-
-.flow-arrow {
-  display: flex;
-  align-items: center;
-  color: #3478f6;
-  font-size: 16px;
-  font-weight: 700;
 }
 
 .flow-rates {
