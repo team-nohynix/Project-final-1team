@@ -43,6 +43,8 @@ type fakeQuerier struct {
 	unresolvedErr    error
 	allUnresolved    []query.UnresolvedOrder
 	allUnresolvedErr error
+	integrity        query.IntegrityCheck
+	integrityErr     error
 	gotMode          string
 	gotFrom          time.Time
 	gotTo            time.Time
@@ -72,6 +74,11 @@ func (f *fakeQuerier) UnresolvedOrders(ctx context.Context, mode string, from, t
 
 func (f *fakeQuerier) AllUnresolvedOrders(ctx context.Context) ([]query.UnresolvedOrder, error) {
 	return f.allUnresolved, f.allUnresolvedErr
+}
+
+func (f *fakeQuerier) IntegrityCheck(ctx context.Context, mode string, from, to time.Time) (query.IntegrityCheck, error) {
+	f.gotMode, f.gotFrom, f.gotTo = mode, from, to
+	return f.integrity, f.integrityErr
 }
 
 func newTraceRequest(orderID string) *http.Request {
@@ -296,6 +303,54 @@ func TestOrderSummaryHandler(t *testing.T) {
 		q := &fakeQuerier{summaryErr: context.DeadlineExceeded}
 		w := httptest.NewRecorder()
 		orderSummaryHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/summary?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
+
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+	})
+}
+
+func TestIntegrityCheckHandler(t *testing.T) {
+	t.Run("missing mode", func(t *testing.T) {
+		q := &fakeQuerier{}
+		w := httptest.NewRecorder()
+		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?from=2026-08-13T00:00:00Z", nil))
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("mode/from/to passed through, result serialized", func(t *testing.T) {
+		q := &fakeQuerier{integrity: query.IntegrityCheck{
+			DuplicateExecutions: 2,
+			SequenceReversals:   1,
+			BuyFilled:           "10.50000000",
+			SellFilled:          "10.50000000",
+		}}
+		w := httptest.NewRecorder()
+		url := "/v1/orders/integrity?mode=REPLAY&from=2026-08-13T00:00:00Z&to=2026-08-13T01:00:00Z"
+		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, url, nil))
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+		}
+		if q.gotMode != "REPLAY" || q.gotFrom.IsZero() || q.gotTo.IsZero() {
+			t.Fatalf("unexpected args passed to querier: mode=%s from=%v to=%v", q.gotMode, q.gotFrom, q.gotTo)
+		}
+		var got query.IntegrityCheck
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("response not JSON: %v", err)
+		}
+		if got.DuplicateExecutions != 2 || got.SequenceReversals != 1 || got.BuyFilled != "10.50000000" || got.SellFilled != "10.50000000" {
+			t.Fatalf("unexpected integrity check: %+v", got)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		q := &fakeQuerier{integrityErr: context.DeadlineExceeded}
+		w := httptest.NewRecorder()
+		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)

@@ -186,6 +186,26 @@ func allUnresolvedOrdersHandler(q query.Querier) http.HandlerFunc {
 	}
 }
 
+// integrityCheckHandler는 GET /v1/orders/integrity?mode=...&from=...&to=...를
+// 처리합니다 — "시스템 종합 현황" 대시보드의 "데이터 정합성 검사" 패널
+// (2026-08-24) 지원. 파라미터 규칙은 orderSummaryHandler와 동일합니다.
+func integrityCheckHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mode, from, to, ok := parseModeFromTo(w, r)
+		if !ok {
+			return
+		}
+
+		result, err := q.IntegrityCheck(r.Context(), mode, from, to)
+		if err != nil {
+			log.Printf("데이터 정합성 검사 실패 (mode=%s): %v", mode, err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "데이터 정합성 검사에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
 // parseModeFromTo는 orderSummaryHandler/unresolvedOrdersHandler가 공유하는
 // 쿼리 파라미터 파싱입니다. ok=false면 이미 에러 응답을 썼으니 호출부는 그냥
 // return하면 됩니다.

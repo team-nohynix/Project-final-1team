@@ -33,6 +33,10 @@ type claimRequest struct {
 	Owner string  `json:"owner"`
 	RunID string  `json:"runId,omitempty"`
 	Speed float64 `json:"speed,omitempty"`
+	// Date는 2026-08-24 추가 — orderapi/session.RunRecord.Date 참고, "시스템
+	// 종합 현황" 대시보드의 "주문 유실"(예정된 주문량 vs 실제 접수량) 지표가
+	// GET /v1/jobs/replay-preview?date=...를 다시 조회할 수 있게 하기 위함.
+	Date string `json:"date,omitempty"`
 }
 
 type claimResponse struct {
@@ -65,9 +69,10 @@ type Client struct {
 // 크기 1로 단독 클레임). 이미 다른 runID/owner의 그룹이 활성 상태면
 // ErrAlreadyActive를 감싼 에러를 반환합니다 — 호출부는 이 경우 실행을 시작하지
 // 말고 종료해야 합니다. speed는 2026-08-20 추가 — trader/session.Client.Claim과
-// 같은 이유(-speed 플래그 값을 orderapi의 RunRecord에 기록).
-func (c Client) Claim(ctx context.Context, owner, runID string, speed float64) (sessionID string, ttlSeconds int, err error) {
-	body, err := json.Marshal(claimRequest{Owner: owner, RunID: runID, Speed: speed})
+// 같은 이유(-speed 플래그 값을 orderapi의 RunRecord에 기록). date는 2026-08-24
+// 추가 — -date 플래그 값을 그대로 실어 보냄(claimRequest.Date 참고).
+func (c Client) Claim(ctx context.Context, owner, runID, date string, speed float64) (sessionID string, ttlSeconds int, err error) {
+	body, err := json.Marshal(claimRequest{Owner: owner, RunID: runID, Speed: speed, Date: date})
 	if err != nil {
 		return "", 0, err
 	}
