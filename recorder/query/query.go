@@ -820,7 +820,13 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 			) f
 			JOIN trade_order o ON o.order_id = f.order_id
 			GROUP BY f.order_id
-			HAVING SUM(f.quantity) > o.quantity
+			-- MySQL은 HAVING에서 GROUP BY 대상이 아닌 조인 테이블 컬럼(o.quantity)을
+			-- 집계 없이 직접 참조하면 Error 1054 "Unknown column"을 냅니다(실측,
+			-- 2026-08-24) — o.order_id=f.order_id로 그룹 안에서 항상 같은 값이라
+			-- 실제로는 안전한데도 MySQL이 그 함수적 종속성을 HAVING에서는 안
+			-- 봐줍니다. MAX()로 감싸면(그룹 내 값이 전부 같으니 결과는 동일) 문법
+			-- 요건을 만족시키면서 의미는 그대로입니다.
+			HAVING SUM(f.quantity) > MAX(o.quantity)
 		) over_filled
 	`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions); err != nil {
 		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", err)
