@@ -46,6 +46,19 @@ const loadError = ref('')
 const integrityData = ref(null)
 const integrityNote = ref('')
 
+// orderapi GET /v1/metrics/cluster (clustermetrics.go) — 그라파나
+// team1-overview 대시보드가 이미 쓰는 PromQL 그대로 재사용(2026-08-24,
+// 사용자 제안). PROMETHEUS_URL 미설정 환경(로컬 등)에서는 404가 나므로
+// clusterMetricsError로 별도 표시하고 나머지 화면에는 영향 없게 한다.
+const clusterMetrics = ref(null)
+const clusterMetricsError = ref('')
+
+async function fetchClusterMetrics() {
+  const res = await fetch('/order-api/v1/metrics/cluster')
+  if (!res.ok) throw new Error(`클러스터 지표 조회 실패: ${res.status}`)
+  clusterMetrics.value = await res.json()
+}
+
 const displayValue = (v, digits = 0) => {
   if (v === null || v === undefined) return '--'
   return Number(v).toLocaleString('ko-KR', { maximumFractionDigits: digits, minimumFractionDigits: digits })
@@ -237,6 +250,47 @@ const integrityCards = computed(() => {
   ]
 })
 
+// 그라파나 "① 주문 처리 현황" 행과 같은 5개 카드 — 매칭엔진 호가창 잔량만
+// 새 cluster 엔드포인트(Prometheus)에서 오고, 나머지 4개(상태별 건수)는
+// 이미 폴링 중인 recorder DashboardMetrics.ordersByStatus를 그대로 씁니다
+// (그라파나의 recorder_orders_by_status Prometheus 게이지도 recorder가 이
+// 값을 그대로 내보내는 것이라 같은 데이터입니다).
+const orderStatusCards = computed(() => {
+  const byStatus = metrics.value?.ordersByStatus || {}
+  return [
+    {
+      label: '매칭엔진 호가창 잔량',
+      value: clusterMetrics.value ? displayValue(clusterMetrics.value.matchingBookSize) : '--',
+      color: '#9b7bff',
+    },
+    { label: '처리해야 할 (ACCEPTED)', value: displayValue(byStatus.ACCEPTED ?? 0), color: '#ff5c7a' },
+    { label: '처리 중 (PARTIALLY_FILLED)', value: displayValue(byStatus.PARTIALLY_FILLED ?? 0), color: '#ffd23f' },
+    { label: '처리 완료 (FILLED)', value: displayValue(byStatus.FILLED ?? 0), color: '#2ed39a' },
+    { label: '취소됨 (CANCELED)', value: displayValue(byStatus.CANCELED ?? 0), color: '#8ea2b8' },
+  ]
+})
+
+// 그라파나 "개요" 행 중 orderapi/매칭엔진/기록기/시세수집기/AI트레이더
+// 상태는 이미 흐름도로 옮겼으니(2026-08-24), 여기는 그 나머지 — 활성
+// 노드 수/backend 전체 실행 Pod/오토스케일링(/최대)/파드 재시작 누적.
+const clusterCards = computed(() => {
+  const c = clusterMetrics.value
+  return [
+    { label: '활성 노드 수', value: c ? displayValue(c.activeNodes) : '--' },
+    { label: '실행 중인 Pod (backend 전체)', value: c ? displayValue(c.runningPodsBackend) : '--' },
+    {
+      label: '매칭엔진 레플리카',
+      value: c ? `${displayValue(c.autoscaling.matching.current)} / ${displayValue(c.autoscaling.matching.max)}` : '--',
+    },
+    {
+      label: '기록기 레플리카',
+      value: c ? `${displayValue(c.autoscaling.recorder.current)} / ${displayValue(c.autoscaling.recorder.max)}` : '--',
+    },
+    { label: 'Karpenter 노드', value: c ? displayValue(c.autoscaling.karpenterNodes) : '--' },
+  ]
+})
+const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
+
 async function fetchIntegrityCheck() {
   const lastRunRes = await fetch('/order-api/v1/sessions/last-run')
   if (lastRunRes.status === 404) {
@@ -383,6 +437,13 @@ async function refresh() {
       // 드롭된 주문 조회 실패는 다른 카드까지 '--'로 만들 정도로 치명적이지
       // 않으니 별도로 삼킨다 — 값은 그냥 이전 걸 유지.
       fetchDroppedSeriesDefault().catch(() => {}),
+      fetchClusterMetrics()
+        .then(() => {
+          clusterMetricsError.value = ''
+        })
+        .catch((e) => {
+          clusterMetricsError.value = e instanceof Error ? e.message : String(e)
+        }),
     ])
     loadError.value = ''
   } catch (e) {
@@ -921,6 +982,40 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
+    <section class="panel order-status-panel">
+      <h3>주문 처리 현황</h3>
+      <div class="stat-grid stat-grid-5">
+        <div v-for="card in orderStatusCards" :key="card.label">
+          <span>{{ card.label }}</span>
+          <strong :style="{ color: card.color }">{{ card.value }}</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel cluster-panel">
+      <h3>클러스터 현황</h3>
+      <p class="cluster-note">
+        그라파나 team1-overview 대시보드와 같은 지표(Prometheus)입니다.
+        {{ clusterMetricsError ? ' — ' + clusterMetricsError : '' }}
+      </p>
+      <div class="stat-grid stat-grid-5">
+        <div v-for="card in clusterCards" :key="card.label">
+          <span>{{ card.label }}</span>
+          <strong>{{ card.value }}</strong>
+        </div>
+      </div>
+      <div v-if="podRestartRows.length" class="restart-table">
+        <div class="restart-row restart-header">
+          <span>파드 재시작 누적</span>
+          <span>횟수</span>
+        </div>
+        <div v-for="row in podRestartRows" :key="row.pod" class="restart-row">
+          <span>{{ row.pod }}</span>
+          <span>{{ row.restarts }}</span>
+        </div>
+      </div>
+    </section>
+
     <section class="throughput-section">
       <article class="panel throughput-panel">
         <div class="panel-header">
@@ -1360,5 +1455,86 @@ onBeforeUnmount(() => {
   margin: 6px 0 0;
   color: #8ea2b8;
   font-size: 12px;
+}
+
+.order-status-panel,
+.cluster-panel {
+  margin-top: 18px;
+}
+
+.order-status-panel h3,
+.cluster-panel h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.cluster-note {
+  margin: 6px 0 0;
+  color: #8ea2b8;
+  font-size: 12px;
+}
+
+.stat-grid {
+  display: grid;
+  margin-top: 20px;
+}
+
+.stat-grid-5 {
+  grid-template-columns: repeat(5, 1fr);
+}
+
+.stat-grid div {
+  display: flex;
+  padding: 0 20px;
+  flex-direction: column;
+  gap: 9px;
+  border-right: 1px solid #20344b;
+}
+
+.stat-grid div:first-child {
+  padding-left: 0;
+}
+
+.stat-grid div:last-child {
+  border-right: 0;
+}
+
+.stat-grid span {
+  color: #8ea2b8;
+  font-size: 12px;
+}
+
+.stat-grid strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.restart-table {
+  margin-top: 18px;
+  border-top: 1px solid #20344b;
+  padding-top: 14px;
+}
+
+.restart-row {
+  display: flex;
+  padding: 8px 0;
+  justify-content: space-between;
+  font-size: 13px;
+  border-bottom: 1px solid #16283b;
+}
+
+.restart-row:last-child {
+  border-bottom: 0;
+}
+
+.restart-header {
+  color: #8ea2b8;
+  font-size: 12px;
+  border-bottom: 1px solid #20344b;
+}
+
+.restart-row:not(.restart-header) span:last-child {
+  color: #ffb84d;
+  font-variant-numeric: tabular-nums;
 }
 </style>
