@@ -967,19 +967,22 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section class="metrics-grid">
-      <article v-for="metric in metricCards" :key="metric.label" class="metric-card">
-        <div class="metric-title">
-          <span>{{ metric.label }}</span>
-          <span class="metric-dot" :style="{ backgroundColor: metric.color }"></span>
-        </div>
+    <section class="panel metrics-panel">
+      <h3>핵심 지표</h3>
+      <div class="metrics-grid">
+        <article v-for="metric in metricCards" :key="metric.label" class="metric-card">
+          <div class="metric-title">
+            <span>{{ metric.label }}</span>
+            <span class="metric-dot" :style="{ backgroundColor: metric.color }"></span>
+          </div>
 
-        <strong>{{ metric.value }}</strong>
+          <strong>{{ metric.value }}</strong>
 
-        <p :style="{ color: metric.color }">
-          {{ metric.description }}
-        </p>
-      </article>
+          <p :style="{ color: metric.color }">
+            {{ metric.description }}
+          </p>
+        </article>
+      </div>
     </section>
 
     <section class="panel order-status-panel">
@@ -1099,7 +1102,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section class="integrity-panel">
+    <section class="panel integrity-panel">
       <h3>데이터 정합성 검사</h3>
       <p v-if="integrityNote" class="integrity-note">{{ integrityNote }}</p>
       <p v-else class="integrity-note">가장 최근 부하 테스트(리플레이) 실행 결과입니다.</p>
@@ -1209,10 +1212,32 @@ onBeforeUnmount(() => {
   color: #ffb84d !important;
 }
 
+.metrics-panel {
+  margin-top: 18px;
+}
+
+.metrics-panel h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(170px, 1fr));
-  gap: 14px;
+  margin-top: 20px;
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
+}
+
+.metric-card {
+  padding: 0 20px;
+  border-right: 1px solid #20344b;
+}
+
+.metric-card:first-child {
+  padding-left: 0;
+}
+
+.metric-card:last-child {
+  border-right: 0;
 }
 
 .metric-title {
@@ -1234,6 +1259,7 @@ onBeforeUnmount(() => {
   display: block;
   margin-top: 17px;
   font-size: 27px;
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-card p {
