@@ -132,6 +132,33 @@ const rangeSeries = ref(null)
 const rangeLoading = ref(false)
 const rangeError = ref('')
 
+// 드롭된(429 백프레셔로 거절된) 주문 — orderapi GET /v1/metrics/dropped-orders.
+// recorder의 접수/체결 시계열과 달리 MySQL이 아니라 orderapi 프로세스
+// 메모리에서 나오는 값이라(droppedmetrics.go 주석 참고) 별도 fetch가
+// 필요합니다 — bucketStart로 병합해서 같은 차트에 세 번째 선으로 그립니다.
+// 기본(10분) 구간은 다른 두 선과 같은 리듬(10초 폴링, refresh() 참고)으로
+// 같이 갱신하고, 커스텀 구간은 그쪽과 마찬가지로 사용자가 기간을 바꿀 때만
+// 다시 부릅니다 — 한쪽만 실시간이고 한쪽만 스냅샷이면 같은 차트 안에서
+// 시간 구간이 어긋나 보여 혼란스럽습니다.
+const droppedSeriesDefault = ref({})
+const droppedSeriesRange = ref({})
+
+async function fetchDroppedSeries(minutes) {
+  const to = new Date()
+  const from = new Date(to.getTime() - minutes * 60000)
+  const url = `/order-api/v1/metrics/dropped-orders?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`드롭된 주문 조회 실패: ${res.status}`)
+  const data = await res.json()
+  const map = {}
+  for (const b of data.series || []) map[b.bucketStart] = b.dropped
+  return map
+}
+
+async function fetchDroppedSeriesDefault() {
+  droppedSeriesDefault.value = await fetchDroppedSeries(10)
+}
+
 async function fetchRangeSeries() {
   if (isDefaultRange.value) return
   rangeLoading.value = true
@@ -140,10 +167,14 @@ async function fetchRangeSeries() {
     const to = new Date()
     const from = new Date(to.getTime() - selectedRangeMinutes.value * 60000)
     const url = `/recorder-api/v1/metrics/throughput?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
-    const res = await fetch(url)
+    const [res, droppedMap] = await Promise.all([
+      fetch(url),
+      fetchDroppedSeries(selectedRangeMinutes.value).catch(() => ({})),
+    ])
     if (!res.ok) throw new Error(`처리량 조회 실패: ${res.status}`)
     const data = await res.json()
     rangeSeries.value = data.series
+    droppedSeriesRange.value = droppedMap
   } catch (e) {
     rangeError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -283,13 +314,21 @@ function pointsFor(series, key, maxValue) {
 }
 
 const series = computed(() => (isDefaultRange.value ? metrics.value?.series || [] : rangeSeries.value || []))
+const droppedByBucket = computed(() => (isDefaultRange.value ? droppedSeriesDefault.value : droppedSeriesRange.value))
+// recorder 시계열(series)에 orderapi 시계열(droppedByBucket)을 bucketStart로
+// 병합 — 둘이 서로 다른 서비스/저장소에서 나오지만 버킷 정의(분 단위,
+// "2006-01-02T15:04:00Z" UTC 포맷)가 같아서 키로 그대로 맞출 수 있다.
+const seriesWithDropped = computed(() =>
+  series.value.map((b) => ({ ...b, dropped: droppedByBucket.value[b.bucketStart] || 0 }))
+)
 const seriesMax = computed(() => {
-  const s = series.value
+  const s = seriesWithDropped.value
   if (s.length === 0) return 0
-  return Math.max(1, ...s.map((b) => Math.max(b.orders, b.executions)))
+  return Math.max(1, ...s.map((b) => Math.max(b.orders, b.executions, b.dropped)))
 })
-const orderPoints = computed(() => pointsFor(series.value, 'orders', seriesMax.value))
-const execPoints = computed(() => pointsFor(series.value, 'executions', seriesMax.value))
+const orderPoints = computed(() => pointsFor(seriesWithDropped.value, 'orders', seriesMax.value))
+const execPoints = computed(() => pointsFor(seriesWithDropped.value, 'executions', seriesMax.value))
+const droppedPoints = computed(() => pointsFor(seriesWithDropped.value, 'dropped', seriesMax.value))
 
 function toHHMM(bucketStart) {
   const d = new Date(bucketStart)
@@ -337,7 +376,14 @@ async function fetchLastRun() {
 
 async function refresh() {
   try {
-    await Promise.all([fetchDashboardMetrics(), fetchSystemStatus(), fetchLastRun()])
+    await Promise.all([
+      fetchDashboardMetrics(),
+      fetchSystemStatus(),
+      fetchLastRun(),
+      // 드롭된 주문 조회 실패는 다른 카드까지 '--'로 만들 정도로 치명적이지
+      // 않으니 별도로 삼킨다 — 값은 그냥 이전 걸 유지.
+      fetchDroppedSeriesDefault().catch(() => {}),
+    ])
     loadError.value = ''
   } catch (e) {
     // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
@@ -719,10 +765,26 @@ function drawFlowFrame() {
     ctx.fillStyle = '#7f93a8'
     ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
     ctx.fillText(nd.sub, drawCx, ny + 11)
+
+    // Redis 캐시는 파이프라인의 별도 홉이 아니라 매칭엔진의 오더북 스냅샷
+    // 저장소라, 자기 노드 대신 매칭엔진 박스 오른쪽 위에 위성 점으로 붙임
+    // (2026-08-24, "시스템 구성요소 상태" 패널을 없애고 여기로 통합).
+    if (nd.key === 'matching') {
+      const redisOk = flowUp('Redis 캐시')
+      const rx = bx + bw - 2
+      const ry = by - 2
+      ctx.beginPath()
+      ctx.fillStyle = redisOk ? '#2ed39a' : '#ff5c7a'
+      ctx.arc(rx, ry, 3.4, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.strokeStyle = '#0a1420'
+      ctx.lineWidth = 1
+      ctx.stroke()
+    }
   }
 
   ctx.fillStyle = 'rgba(10,20,32,0.6)'
-  ctx.fillRect(6, 6, 190, 62)
+  ctx.fillRect(6, 6, 210, 74)
   ctx.fillStyle = '#cfe6ff'
   ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.textAlign = 'left'
@@ -732,6 +794,8 @@ function drawFlowFrame() {
   ctx.fillStyle = '#9fb0c2'
   ctx.font = '500 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillText(`레플리카: 매칭 ${Math.round(scale.matching)} · 기록기 ${Math.round(scale.recorder)}`, 14, 58)
+  ctx.fillStyle = flowUp('Redis 캐시') ? '#2ed39a' : '#ff5c7a'
+  ctx.fillText(`● Redis 캐시 (오더북 스냅샷)`, 14, 72)
 
   ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillStyle = '#9fb0c2'
@@ -857,17 +921,18 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
-    <section class="dashboard-grid">
+    <section class="throughput-section">
       <article class="panel throughput-panel">
         <div class="panel-header">
           <div>
-            <h3>주문·체결 처리량</h3>
+            <h3>주문·체결·드롭 처리량</h3>
             <p>{{ isDefaultRange ? '최근 10분 동안 1분 단위 처리 건수' : '선택한 기간의 처리 건수' }}</p>
           </div>
 
           <div class="chart-legend">
             <span><i class="order-color"></i>주문</span>
             <span><i class="execution-color"></i>체결</span>
+            <span><i class="dropped-color"></i>드롭됨(429)</span>
           </div>
         </div>
 
@@ -914,6 +979,7 @@ onBeforeUnmount(() => {
                 :y1="chartPadTop + ((chartHeight - chartPadTop - chartPadBottom) / 4) * n"
                 :y2="chartPadTop + ((chartHeight - chartPadTop - chartPadBottom) / 4) * n"
               />
+              <polyline class="dropped-series" fill="none" stroke="#ff8a3d" stroke-width="2" :points="droppedPoints" />
               <polyline class="exec-series" fill="none" stroke="#20c8e8" stroke-width="2" :points="execPoints" />
               <polyline class="order-series" fill="none" stroke="#3478f6" stroke-width="2" :points="orderPoints" />
             </svg>
@@ -921,19 +987,6 @@ onBeforeUnmount(() => {
               <span v-for="(label, i) in chartLabels" :key="i">{{ label }}</span>
             </div>
           </template>
-        </div>
-      </article>
-
-      <article class="panel status-panel">
-        <h3>시스템 구성요소 상태</h3>
-
-        <div v-for="item in componentRows" :key="item.name" class="status-row">
-          <span>{{ item.name }}</span>
-
-          <span class="status-value" :style="{ color: item.color }">
-            <i :style="{ backgroundColor: item.color }"></i>
-            {{ item.label }}
-          </span>
         </div>
       </article>
     </section>
@@ -1094,10 +1147,7 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: minmax(600px, 2fr) minmax(320px, 1fr);
-  gap: 16px;
+.throughput-section {
   margin-top: 18px;
 }
 
@@ -1142,6 +1192,10 @@ onBeforeUnmount(() => {
 
 .execution-color {
   background: #20c8e8;
+}
+
+.dropped-color {
+  background: #ff8a3d;
 }
 
 .range-picker {
@@ -1242,37 +1296,6 @@ onBeforeUnmount(() => {
 .empty-sub {
   color: #71869c;
   font-size: 12px;
-}
-
-.status-panel {
-  min-height: 330px;
-}
-
-.status-row {
-  display: flex;
-  padding: 19px 0;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid #20344b;
-  font-size: 13px;
-}
-
-.status-row:last-child {
-  border-bottom: 0;
-}
-
-.status-value {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.status-value i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
 }
 
 .scaling-alert {
