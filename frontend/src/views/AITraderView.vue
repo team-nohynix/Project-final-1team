@@ -861,21 +861,26 @@ const cleanupUnresolvedOrders = async () => {
 
 const resetMatchingEngineBook = async () => {
   if (bookResetLoading.value) return
-  const ok = window.confirm('매칭엔진 호가창(Redis 스냅샷 + 각 파드 메모리)에 남은 미체결 주문을 전부 비웁니다. 매칭엔진이 재시작됩니다. 계속할까요?')
+  // force=true로 호출합니다(2026-08-24) — force 없이 호출하면 워터마크를 보존한 채
+  // 재시작만 걸어서, Engine.Recover()가 Kafka orders 토픽에서 그 시점 이후 이력을
+  // 다시 읽어 같은 미체결 잔량을 그대로 재구성해버립니다(버튼을 눌러도 안 지워지는
+  // 것처럼 보이는 원인이었음). 이 페이지는 페이퍼 트레이딩/부하테스트 전용이라
+  // 과거 미체결 이력을 실제로 버려도 되므로, 항상 강제 초기화로 호출합니다.
+  const ok = window.confirm('매칭엔진 호가창을 완전히 초기화합니다 — Redis 스냅샷/각 파드 메모리는 물론, 지금까지 쌓인 미체결 이력도(워터마크를 최신 오프셋으로 강제 이동) 전부 버립니다. 매칭엔진이 재시작됩니다. 계속할까요?')
   if (!ok) return
 
   bookResetLoading.value = true
   bookResetMessage.value = ''
   bookResetIsError.value = false
   try {
-    const res = await fetch('/order-api/v1/admin/reset-matching-engine-book', { method: 'POST' })
+    const res = await fetch('/order-api/v1/admin/reset-matching-engine-book?force=true', { method: 'POST' })
     if (!res.ok) {
       let body = null
       try { body = await res.json() } catch (e) {}
       throw new Error(body?.message || `HTTP ${res.status}`)
     }
     const data = await res.json()
-    bookResetMessage.value = `스냅샷 ${data.deletedSnapshots}개 삭제, 매칭엔진 재시작 트리거함`
+    bookResetMessage.value = `스냅샷 ${data.deletedSnapshots}개 삭제, 워터마크 ${data.watermarksForced}개 강제 이동, 매칭엔진 재시작 트리거함`
   } catch (e) {
     bookResetIsError.value = true
     bookResetMessage.value = e instanceof Error ? e.message : String(e)
@@ -1217,7 +1222,7 @@ const resetMatchingEngineBook = async () => {
     <section class="cleanup-section">
       <div class="cleanup-text">
         <h4>매칭엔진 호가창 잔량 지우기</h4>
-        <p>위 "일괄 정리"는 DB(recorder) 기준으로만 정리됩니다 — 매칭엔진이 그 취소를 못 받았거나 저장에 실패하면 매칭엔진 자신의 Redis 스냅샷과 각 파드 메모리에는 미체결 주문이 그대로 남을 수 있습니다. 이 버튼은 그 잔량을 지우고 매칭엔진을 재시작합니다(진행 중인 세션이 있으면 매칭이 잠시 끊깁니다).</p>
+        <p>위 "일괄 정리"는 DB(recorder) 기준으로만 정리됩니다 — 매칭엔진이 그 취소를 못 받았거나 저장에 실패하면 매칭엔진 자신의 Redis 스냅샷과 각 파드 메모리에는 미체결 주문이 그대로 남을 수 있습니다. 이 버튼은 워터마크를 최신 오프셋으로 강제 이동시켜 과거 미체결 이력째로 완전히 비우고 매칭엔진을 재시작합니다(진행 중인 세션이 있으면 매칭이 잠시 끊깁니다). 페이퍼 트레이딩 환경 전용 — 실거래라면 절대 쓰면 안 되는 파괴적 동작입니다.</p>
       </div>
       <button class="btn-dark" :disabled="bookResetLoading" @click="resetMatchingEngineBook">
         {{ bookResetLoading ? '초기화 중...' : '잔량 지우기' }}
