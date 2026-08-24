@@ -185,8 +185,13 @@ resource "aws_instance" "mysql" {
   root_block_device {
     volume_size = 50
     volume_type = "gp3"
-    iops        = 3000
-    throughput  = 250
+    # iops 3000→6000, 2026-08-24 — innodb_flush_log_at_trx_commit=2로 fsync
+    # "빈도"는 줄였지만, 실제로 fsync가 발생할 때의 "지연"은 여전히 프로비저닝된
+    # IOPS에 좌우된다(docker-compose.yml.tpl 주석 참고). gp3 온라인 볼륨
+    # 수정이라 인스턴스 재시작/다운타임 없이 반영되고, 인스턴스 클래스를
+    # 올리는 것과 달리 비용 임팩트도 작다(추가 3000 IOPS ≈ 월 15달러 수준).
+    iops       = 6000
+    throughput = 250
   }
 
   # monitoring-ec2.tf와 같은 이유 — most_recent=true인 AMI가 새로 나올 때마다
