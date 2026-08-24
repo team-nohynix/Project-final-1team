@@ -41,6 +41,19 @@ const (
 	ordersByStatusWindow = seriesWindow
 )
 
+// ThroughputMaxRange은 GET /v1/metrics/throughput(2026-08-24, Grafana처럼
+// 처리량 차트 기간을 직접 고르는 기능)이 허용하는 최대 구간입니다 — 위
+// ordersByStatusWindow 주석의 2026-08-21 사고(구간을 10분→24시간으로
+// 늘렸다가 트래픽 0인데도 RDS CPU가 13%→57%로 튐 — "인덱스를 타도 결국
+// 그 구간의 실제 행 수만큼은 스캔한다"는 교훈)와 같은 이유로 상한을 둡니다.
+// server.go의 throughputHandler가 이 값으로 요청을 검증합니다(400) — 여기
+// 그대로 두면 검증 실패와 진짜 쿼리 실패(500)가 같은 에러 경로로 섞입니다.
+// 다만 상한을 두는 것만으론 부족합니다 — 이 엔드포인트는
+// dashboardMetricsHandler의 기본 10분 창(Redis 캐시, 10초 폴링)과 달리
+// 캐시가 없는 라이브 쿼리라, 프론트가 이 엔드포인트를 자동 폴링하면
+// 안 됩니다(server.go throughputHandler / DashboardView.vue 주석 참고).
+const ThroughputMaxRange = 24 * time.Hour
+
 // ExecutionTrace는 OrderTrace.Executions의 항목 하나입니다.
 type ExecutionTrace struct {
 	ExecutionID string `json:"executionId"`
@@ -122,6 +135,11 @@ type Querier interface {
 	// 번에 정리하는 용도(2026-08-20, 프론트 수동 정리 버튼)라 세션 가드가
 	// 보장하는 구간 분리가 필요 없습니다 — 그냥 지금 시점의 미종결 전부입니다.
 	AllUnresolvedOrders(ctx context.Context) ([]UnresolvedOrder, error)
+	// ThroughputSeries는 GET /v1/metrics/throughput(2026-08-24, "주문·체결
+	// 처리량" 차트의 기간을 Grafana처럼 직접 고르는 기능)이 씁니다.
+	// DashboardMetrics.Series(고정 10분/1분, 캐시됨)와 달리 임의의 [from, to)
+	// 구간을 라이브로 계산합니다 — throughputMaxRange 주석 참고.
+	ThroughputSeries(ctx context.Context, from, to time.Time) ([]MetricsBucket, error)
 }
 
 // UnresolvedOrder는 UnresolvedOrders 응답의 항목 하나입니다. Market은
@@ -505,6 +523,87 @@ func (q *MySQLQuerier) metricsSeries(ctx context.Context) ([]MetricsBucket, erro
 		})
 	}
 	return out, nil
+}
+
+// pickBucketSeconds는 Grafana의 "적당한 step 자동 선택"과 같은 목적입니다 —
+// 구간이 넓어질수록 버킷도 넓혀서, 응답 포인트 수를 대략 수십~백 개 선으로
+// 유지합니다(1분 버킷으로 24시간을 그리면 1440포인트라 차트도 못 읽고 SQL
+// GROUP BY 카디널리티도 쓸데없이 커집니다).
+func pickBucketSeconds(span time.Duration) int {
+	switch {
+	case span <= 30*time.Minute:
+		return 60
+	case span <= 3*time.Hour:
+		return 5 * 60
+	case span <= 12*time.Hour:
+		return 15 * 60
+	default:
+		return 30 * 60
+	}
+}
+
+// ThroughputSeries는 GET /v1/metrics/throughput(2026-08-24)이 씁니다 —
+// metricsSeries(고정 10분/1분)와 달리 임의의 [from, to) 구간을 받아 버킷
+// 크기를 자동으로 고릅니다. 구간 길이 검증(ThroughputMaxRange)은 이미
+// server.go의 throughputHandler가 호출 전에 하지만, 이 메서드를 다른
+// 경로에서 직접 불러도 안전하도록 여기서도 한 번 더 확인합니다.
+func (q *MySQLQuerier) ThroughputSeries(ctx context.Context, from, to time.Time) ([]MetricsBucket, error) {
+	span := to.Sub(from)
+	if span <= 0 {
+		return nil, fmt.Errorf("from은 to보다 이전이어야 합니다")
+	}
+	if span > ThroughputMaxRange {
+		return nil, fmt.Errorf("구간이 너무 깁니다(최대 %s)", ThroughputMaxRange)
+	}
+	bucketSeconds := pickBucketSeconds(span)
+
+	orderCounts, err := bucketCountsRange(ctx, q.db, "trade_order", "submitted_at", from, to, bucketSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("접수 시계열 조회 실패: %w", err)
+	}
+	execCounts, err := bucketCountsRange(ctx, q.db, "execution", "executed_at", from, to, bucketSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("체결 시계열 조회 실패: %w", err)
+	}
+
+	fromUnix := from.Truncate(time.Duration(bucketSeconds) * time.Second).Unix()
+	toUnix := to.Unix()
+	out := []MetricsBucket{}
+	for t := fromUnix; t < toUnix; t += int64(bucketSeconds) {
+		out = append(out, MetricsBucket{
+			BucketStart: time.Unix(t, 0).UTC().Format(seriesBucketFmt),
+			Orders:      orderCounts[t],
+			Executions:  execCounts[t],
+		})
+	}
+	return out, nil
+}
+
+// bucketCountsRange는 bucketCounts의 임의 구간/버킷 크기 버전입니다 —
+// DATE_FORMAT 대신 초 단위 정수 버킷 키(UNIX_TIMESTAMP를 bucketSeconds로
+// 나눠 내림)를 써서, 버킷 크기가 매번 달라져도 같은 쿼리 모양으로 처리합니다.
+func bucketCountsRange(ctx context.Context, db *sql.DB, table, tsColumn string, from, to time.Time, bucketSeconds int) (map[int64]int64, error) {
+	query := fmt.Sprintf(`
+		SELECT FLOOR(UNIX_TIMESTAMP(%s) / ?) * ? AS bucket_unix, COUNT(*)
+		FROM %s
+		WHERE %s >= ? AND %s < ?
+		GROUP BY bucket_unix
+	`, tsColumn, table, tsColumn, tsColumn)
+	rows, err := db.QueryContext(ctx, query, bucketSeconds, bucketSeconds, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[int64]int64)
+	for rows.Next() {
+		var bucketUnix, count int64
+		if err := rows.Scan(&bucketUnix, &count); err != nil {
+			return nil, err
+		}
+		out[bucketUnix] = count
+	}
+	return out, rows.Err()
 }
 
 func bucketCounts(ctx context.Context, db *sql.DB, table, tsColumn string) (map[string]int64, error) {

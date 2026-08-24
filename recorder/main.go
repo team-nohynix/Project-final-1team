@@ -131,6 +131,7 @@ func main() {
 	mux.HandleFunc("GET /v1/trace/{orderId}", traceHandler(querier))
 	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
 	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier, redisClient))
+	mux.HandleFunc("GET /v1/metrics/throughput", throughputHandler(querier))
 	mux.HandleFunc("GET /v1/health", healthHandler(db))
 	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
 	mux.HandleFunc("GET /v1/orders/unresolved", unresolvedOrdersHandler(querier))

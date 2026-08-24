@@ -43,6 +43,8 @@ type fakeQuerier struct {
 	unresolvedErr    error
 	allUnresolved    []query.UnresolvedOrder
 	allUnresolvedErr error
+	throughput       []query.MetricsBucket
+	throughputErr    error
 	gotMode          string
 	gotFrom          time.Time
 	gotTo            time.Time
@@ -72,6 +74,11 @@ func (f *fakeQuerier) UnresolvedOrders(ctx context.Context, mode string, from, t
 
 func (f *fakeQuerier) AllUnresolvedOrders(ctx context.Context) ([]query.UnresolvedOrder, error) {
 	return f.allUnresolved, f.allUnresolvedErr
+}
+
+func (f *fakeQuerier) ThroughputSeries(ctx context.Context, from, to time.Time) ([]query.MetricsBucket, error) {
+	f.gotFrom, f.gotTo = from, to
+	return f.throughput, f.throughputErr
 }
 
 func newTraceRequest(orderID string) *http.Request {

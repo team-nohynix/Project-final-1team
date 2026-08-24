@@ -105,6 +105,53 @@ func dashboardMetricsHandler(q query.Querier, redisClient *redis.Client) http.Ha
 	}
 }
 
+// throughputHandler는 GET /v1/metrics/throughput?from=&to=(둘 다 RFC3339
+// 필수)를 처리합니다 — 프론트 DashboardView "주문·체결 처리량" 차트를
+// Grafana처럼 임의 기간으로 볼 수 있게 합니다(2026-08-24). dashboardMetricsHandler와
+// 달리 **캐시가 없는 라이브 쿼리**입니다 — query.ThroughputSeries 주석의
+// throughputMaxRange 이유로 구간 길이는 서버가 거부할 수 있지만, "얼마나
+// 자주 불리느냐"는 이 핸들러가 통제할 수 없습니다. 그래서 프론트는 이
+// 엔드포인트를 자동 폴링하면 안 되고, 사용자가 기간을 바꿀 때만 불러야
+// 합니다(DashboardView.vue 주석 참고) — 2026-08-21 RDS CPU 포화 사고와
+// 같은 패턴이 재발하지 않도록 하는 책임이 서버가 아니라 호출 빈도 쪽에
+// 있다는 뜻이라, 여기 남겨둡니다.
+func throughputHandler(q query.Querier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fromStr := r.URL.Query().Get("from")
+		toStr := r.URL.Query().Get("to")
+		if fromStr == "" || toStr == "" {
+			writeError(w, http.StatusBadRequest, "MISSING_RANGE", "from/to는 둘 다 필수입니다 (RFC3339).")
+			return
+		}
+		from, err := time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_FROM", "from 형식이 올바르지 않습니다 (RFC3339).")
+			return
+		}
+		to, err := time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_TO", "to 형식이 올바르지 않습니다 (RFC3339).")
+			return
+		}
+		if !to.After(from) {
+			writeError(w, http.StatusBadRequest, "INVALID_RANGE", "to는 from보다 이후여야 합니다.")
+			return
+		}
+		if to.Sub(from) > query.ThroughputMaxRange {
+			writeError(w, http.StatusBadRequest, "RANGE_TOO_WIDE", "구간이 너무 깁니다 (최대 "+query.ThroughputMaxRange.String()+").")
+			return
+		}
+
+		series, err := q.ThroughputSeries(r.Context(), from, to)
+		if err != nil {
+			log.Printf("처리량 시계열 조회 실패 (from=%s, to=%s): %v", fromStr, toStr, err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "처리량 시계열 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string][]query.MetricsBucket{"series": series})
+	}
+}
+
 // healthHandler는 GET /v1/health를 처리합니다 — 프론트 DashboardView "시스템
 // 구성요소 상태" 패널이 MySQL 연결 자체를 값싸게(집계 쿼리 없이 PingContext만)
 // 확인하는 용도입니다. orderapi의 GET /v1/system-status가 이 엔드포인트를

@@ -81,7 +81,55 @@ const allComponentsUp = computed(
   () => !!systemStatus.value && systemStatus.value.every((c) => c.status === 'up')
 )
 
-// ---- 처리량 차트 (SVG 라인 차트, recorder Series: 최근 10분을 1분 단위로 집계) ----
+// ---- 처리량 차트 (SVG 라인 차트) ----
+// 기본(10분)은 metrics.value.series(위 fetchDashboardMetrics, 캐시된 값,
+// 10초 폴링) 그대로 씁니다. 그 외 기간은 GET /v1/metrics/throughput?from=&to=
+// (recorder/server.go throughputHandler, 2026-08-24)를 호출합니다 — 이건
+// 캐시가 없는 라이브 쿼리라서, 과거 RDS CPU 포화 사고와 같은 패턴을 피하려고
+// **자동 폴링 타이머에 절대 안 묶고, 기간을 바꾸거나 새로고침 버튼을 누를
+// 때만** 부릅니다(recorder 쪽 주석 참고). 최대 24시간까지만 허용됩니다
+// (서버가 그 이상은 400으로 거절).
+const rangePresets = [
+  { label: '실시간(10분)', minutes: 10 },
+  { label: '30분', minutes: 30 },
+  { label: '1시간', minutes: 60 },
+  { label: '3시간', minutes: 180 },
+  { label: '6시간', minutes: 360 },
+  { label: '24시간', minutes: 1440 },
+]
+const selectedRangeMinutes = ref(10)
+const isDefaultRange = computed(() => selectedRangeMinutes.value === 10)
+
+const rangeSeries = ref(null)
+const rangeLoading = ref(false)
+const rangeError = ref('')
+
+async function fetchRangeSeries() {
+  if (isDefaultRange.value) return
+  rangeLoading.value = true
+  rangeError.value = ''
+  try {
+    const to = new Date()
+    const from = new Date(to.getTime() - selectedRangeMinutes.value * 60000)
+    const url = `/recorder-api/v1/metrics/throughput?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`처리량 조회 실패: ${res.status}`)
+    const data = await res.json()
+    rangeSeries.value = data.series
+  } catch (e) {
+    rangeError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    rangeLoading.value = false
+  }
+}
+
+function selectRange(minutes) {
+  if (selectedRangeMinutes.value === minutes) return
+  selectedRangeMinutes.value = minutes
+  rangeError.value = ''
+  if (!isDefaultRange.value) fetchRangeSeries()
+}
+
 const chartWidth = 600
 const chartHeight = 250
 const chartPadTop = 14
@@ -102,7 +150,7 @@ function pointsFor(series, key, maxValue) {
     .join(' ')
 }
 
-const series = computed(() => metrics.value?.series || [])
+const series = computed(() => (isDefaultRange.value ? metrics.value?.series || [] : rangeSeries.value || []))
 const seriesMax = computed(() => {
   const s = series.value
   if (s.length === 0) return 0
@@ -198,7 +246,7 @@ onBeforeUnmount(() => {
         <div class="panel-header">
           <div>
             <h3>주문·체결 처리량</h3>
-            <p>최근 10분 동안 1분 단위 처리 건수</p>
+            <p>{{ isDefaultRange ? '최근 10분 동안 1분 단위 처리 건수' : '선택한 기간의 처리 건수' }}</p>
           </div>
 
           <div class="chart-legend">
@@ -207,10 +255,33 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div class="range-picker">
+          <button
+            v-for="preset in rangePresets"
+            :key="preset.minutes"
+            class="range-btn"
+            :class="{ active: selectedRangeMinutes === preset.minutes }"
+            @click="selectRange(preset.minutes)"
+          >
+            {{ preset.label }}
+          </button>
+          <button
+            v-if="!isDefaultRange"
+            class="range-btn range-refresh"
+            :disabled="rangeLoading"
+            @click="fetchRangeSeries"
+          >
+            {{ rangeLoading ? '조회 중...' : '새로고침' }}
+          </button>
+        </div>
+        <div v-if="rangeError" class="range-error">{{ rangeError }}</div>
+
         <div class="chart-placeholder" :class="{ empty: series.length === 0 }">
           <div v-if="series.length === 0" class="empty-center">
-            <strong>데이터 연동 예정</strong>
-            <div class="empty-sub">실제 인프라 및 백엔드 연동 후 데이터가 표시됩니다.</div>
+            <strong>{{ rangeLoading ? '조회 중...' : '데이터 없음' }}</strong>
+            <div class="empty-sub">
+              {{ rangeLoading ? '' : '이 기간에 표시할 처리량 데이터가 없습니다.' }}
+            </div>
           </div>
           <template v-else>
             <svg
@@ -404,6 +475,49 @@ onBeforeUnmount(() => {
 
 .execution-color {
   background: #20c8e8;
+}
+
+.range-picker {
+  display: flex;
+  margin-top: 14px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.range-btn {
+  padding: 6px 12px;
+  color: #8ea2b8;
+  background: #11243a;
+  border: 1px solid #20344b;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.range-btn:hover {
+  color: #c7d3e0;
+}
+
+.range-btn.active {
+  color: #0d1b2a;
+  background: #3478f6;
+  border-color: #3478f6;
+}
+
+.range-refresh {
+  margin-left: auto;
+}
+
+.range-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.range-error {
+  margin-top: 8px;
+  color: #ff5c7a;
+  font-size: 12px;
 }
 
 .chart-placeholder {
