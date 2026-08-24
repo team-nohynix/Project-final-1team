@@ -172,6 +172,13 @@ resource "aws_security_group" "team1_sg_mysql_ec2" {
 
 # --- EC2 ---------------------------------------------------------------------
 
+# **매일 destroy→apply 운영 시 데이터는 매번 사라진다(2026-08-24, 의도적으로
+# 고친 적 없음 — 알고 넘어가기로 한 부분)** — RDS와 달리 순수 EC2+EBS라
+# terraform destroy 시 스냅샷 없이 볼륨째로 지워지고, 다시 만들면 schema.sql로
+# 빈 스키마부터 시작한다(아래 user_data). 부하테스트용 디스포저블 데이터라
+# 보통 문제 없지만, "어제 테스트 결과를 남겨두고 싶다"면 별도로 EBS 스냅샷을
+# 만들거나 mysqldump를 S3에 백업해뒀다가 복원하는 절차가 추가로 필요하다 —
+# 지금은 그 자동화가 없다.
 resource "aws_instance" "mysql" {
   ami                    = data.aws_ami.al2023_mysql.id
   instance_type          = "m6i.2xlarge" # 8vCPU/32GiB — RDS(db.m6gd.large, 2vCPU)의 4배
@@ -232,4 +239,24 @@ output "mysql_private_ip" {
 output "mysql_root_password" {
   value     = random_password.mysql_root.result
   sensitive = true
+}
+
+# recorder-db-secret — 원래 이 MySQL EC2를 만들 때 `kubectl create secret generic
+# recorder-db-secret --from-literal=DATABASE_URL=...`로 손으로 만들어져 있던 것을
+# terraform으로 옮겼다(2026-08-24, "EKS/MySQL을 통째로 지웠다 올려도 원상복구되게").
+# random_password.mysql_root는 destroy→apply 할 때마다 새로 생성되는데(고정 시드가
+# 없어서), 그 비밀번호가 바뀔 때마다 이 시크릿을 손으로 다시 만들어줘야 했던 게 원래
+# 문제였음 — 이제 password도 이 리소스도 같은 terraform apply 안에서 항상 같이
+# 갱신되므로 그 문제가 사라진다. DSN 형식(parseTime=true&loc=UTC)은 실제 배포된
+# 시크릿에서 그대로 확인한 것(recorder/main.go의 sql.Open이 기대하는 형식,
+# go-sql-driver/mysql DATETIME 스캔에 parseTime 필요).
+resource "kubernetes_secret" "recorder_db" {
+  metadata {
+    name      = "recorder-db-secret"
+    namespace = kubernetes_namespace.backend.metadata[0].name
+  }
+
+  data = {
+    DATABASE_URL = "root:${random_password.mysql_root.result}@tcp(${aws_instance.mysql.private_ip}:3306)/team1_truss?parseTime=true&loc=UTC"
+  }
 }

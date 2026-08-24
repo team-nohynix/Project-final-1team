@@ -1,0 +1,53 @@
+# backend 네임스페이스 — 원래 infra/k8s/backend/namespace.yaml을 CI가 kubectl apply로
+# 만들었는데(지금도 그렇게 함, 중복 생성 시도는 무해함 — kubectl apply는 이미 있는
+# 네임스페이스에 그냥 멱등하게 적용됨), recorder-db-secret(kubernetes_secret, 아래
+# mysql-ec2.tf)이 이 네임스페이스가 존재해야만 만들어질 수 있어서 terraform 안에서도
+# 하나 갖고 있어야 한다 — CI의 kubectl apply 순서에 기대지 않고 terraform apply
+# 하나만으로 시크릿까지 자기완결적으로 만들어지게 하려는 목적(2026-08-24).
+resource "kubernetes_namespace" "backend" {
+  metadata {
+    name   = "backend"
+    labels = { team = "team1" }
+  }
+}
+
+# 클러스터 부트스트랩용 Helm 애드온(KEDA/kube-state-metrics/node-exporter) — 원래
+# `helm install`로 손으로 설치돼 있던 것을 "EKS 클러스터를 통째로 지웠다 올려도
+# 원상복구되게"(2026-08-24, 사용자 요청) terraform으로 옮겼다. alb-controller.tf의
+# aws_load_balancer_controller, karpenter.tf의 karpenter와 같은 이유 — IAM(IRSA)이
+# 필요 없는 애드온이라 여기 한 파일에 모았다. 셋 다 `helm get values <release> -n
+# <namespace>`로 확인한 실제 사용자 지정값이 전혀 없었다(전부 차트 기본값 그대로
+# 설치돼 있었음, 2026-08-24 확인) — 그래서 values 블록 없이 차트+버전만 지정한다.
+
+resource "helm_release" "keda" {
+  name             = "keda"
+  namespace        = "keda"
+  repository       = "https://kedacore.github.io/charts"
+  chart            = "keda"
+  version          = "2.20.2" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
+  create_namespace = true
+
+  depends_on = [aws_eks_node_group.system]
+}
+
+resource "helm_release" "kube_state_metrics" {
+  name             = "kube-state-metrics"
+  namespace        = "monitoring"
+  repository       = "https://prometheus-community.github.io/helm-charts"
+  chart            = "kube-state-metrics"
+  version          = "8.4.0" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
+  create_namespace = true
+
+  depends_on = [aws_eks_node_group.system]
+}
+
+resource "helm_release" "node_exporter" {
+  name             = "node-exporter"
+  namespace        = "monitoring"
+  repository       = "https://prometheus-community.github.io/helm-charts"
+  chart            = "prometheus-node-exporter"
+  version          = "4.56.1" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
+  create_namespace = true
+
+  depends_on = [aws_eks_node_group.system]
+}

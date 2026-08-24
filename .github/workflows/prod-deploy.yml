@@ -10,6 +10,18 @@ name: Prod Deploy
 on:
   push:
     branches: [prod]
+  # 수동 "전체 복구" 트리거(2026-08-24 추가) — 비용 절감을 위해 EKS 클러스터를
+  # 통째로 지웠다가 다음 날 다시 올릴 때 씀. 평소 push 트리거는 detect-changes가
+  # git diff만 보고 "바뀐 것만" 배포하는데, 클러스터를 새로 만든 직후엔 diff가
+  # 없어도(그날 코드를 안 건드렸어도) 전부 다시 배포해야 한다. 이 트리거는
+  # detect-changes의 모든 출력을 강제로 true로 만들고(아래 참고), terraform-apply
+  # 뒤에 bootstrap-k8s job(네임스페이스/RBAC/인그레스/ScaledObject/Kafka 토픽처럼
+  # 평소엔 사람이 손으로 apply하던 나머지 매니페스트 전부)까지 돌린다 — 이
+  # job은 이 트리거에서만 돈다, 평소 push엔 안 낀다(ci-deploy-rbac.yaml 주석의
+  # "Ingress/RBAC/Secret은 사람이 직접 적용한다" 원칙을 일상적인 배포에서는
+  # 그대로 지키고, 이 트리거는 광범위한 권한을 가진 TF_APPLY_ROLE로 사람이
+  # 명시적으로 누를 때만 돈다).
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -52,17 +64,25 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      frontend: ${{ steps.filter.outputs.frontend }}
-      backend: ${{ steps.filter.outputs.backend }}
-      orderapi: ${{ steps.filter.outputs.orderapi }}
-      matching: ${{ steps.filter.outputs.matching }}
-      recorder: ${{ steps.filter.outputs.recorder }}
-      trader: ${{ steps.filter.outputs.trader }}
-      replayengine: ${{ steps.filter.outputs.replayengine }}
-      infra: ${{ steps.filter.outputs.infra }}
+      # workflow_dispatch("전체 복구")면 paths-filter(steps.filter, push 이벤트
+      # 전용 — github.event.before가 workflow_dispatch엔 없어서 그대로 두면
+      # 에러남)를 아예 안 돌리고 steps.force가 전부 true를 준다.
+      frontend: ${{ steps.filter.outputs.frontend || steps.force.outputs.all }}
+      backend: ${{ steps.filter.outputs.backend || steps.force.outputs.all }}
+      orderapi: ${{ steps.filter.outputs.orderapi || steps.force.outputs.all }}
+      matching: ${{ steps.filter.outputs.matching || steps.force.outputs.all }}
+      recorder: ${{ steps.filter.outputs.recorder || steps.force.outputs.all }}
+      trader: ${{ steps.filter.outputs.trader || steps.force.outputs.all }}
+      replayengine: ${{ steps.filter.outputs.replayengine || steps.force.outputs.all }}
+      infra: ${{ steps.filter.outputs.infra || steps.force.outputs.all }}
     steps:
       - uses: actions/checkout@v4
+      - name: workflow_dispatch("전체 복구")면 모두 강제로 true
+        if: github.event_name == 'workflow_dispatch'
+        id: force
+        run: echo "all=true" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3
+        if: github.event_name != 'workflow_dispatch'
         id: filter
         with:
           # base 미지정 시 dorny/paths-filter가 (push 이벤트의 직전 커밋이 아니라)
@@ -376,3 +396,60 @@ jobs:
         run: |
           terraform init -input=false
           terraform apply -auto-approve -input=false
+
+  # --- 수동 "전체 복구" 전용 — 평소 push엔 절대 안 낀다 ---------------------
+  #
+  # namespace/RBAC/Ingress/ScaledObject/Kafka 토픽처럼, 지금까지 CI가 아니라
+  # 사람이 한 번씩 손으로 kubectl apply해뒀던 나머지 매니페스트 전부(2026-08-24
+  # 발견 — EKS를 지웠다 올리는 걸 검토하다가, 이 저장소가 실제로는 이것들이
+  # 전혀 자동화돼 있지 않다는 걸 알게 됨). terraform-apply가 EKS 클러스터+
+  # Karpenter/ALB 컨트롤러/KEDA(2026-08-24부터 helm_release로 같이 관리, karpenter.tf/
+  # alb-controller.tf/k8s-addons.tf 참고)까지 다 올린 "뒤"에 돌아야 한다 — Karpenter
+  # NodePool CRD는 Karpenter 차트가 설치돼야 존재하고, ScaledObject는 KEDA CRD가
+  # 있어야 하기 때문.
+  #
+  # TF_APPLY_ROLE을 쓴다(ECR_PUSH_ROLE이 아니라) — ci-deploy-rbac.yaml 주석대로
+  # ECR_PUSH_ROLE(team1-github-actions-deploy 그룹)은 일부러 Deployment/Service만
+  # 건드리게 좁혀뒀고, Namespace/RBAC/Ingress/Secret처럼 민감한 리소스는 "사람이
+  # 직접 적용한다"는 팀 결정이 있었다(2026-08-20) — 그 원칙을 일상적인 배포
+  # 자동화에서는 그대로 지키고, 이 job은 사람이 workflow_dispatch를 명시적으로
+  # 눌렀을 때만 돌며 이미 광범위한 쓰기 권한을 가진 TF_APPLY_ROLE(terraform-apply와
+  # 동일)을 재사용한다 — 새로 권한을 넓히는 게 아니라 이미 있는, 사람이 수동으로
+  # 트리거하는 권한을 그대로 쓰는 것.
+  bootstrap-k8s:
+    needs: [terraform-apply]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TF_APPLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      # 네임스페이스부터 먼저 — 그 안의 리소스들이 존재를 전제로 한다.
+      # backend는 이제 terraform(kubernetes_namespace.backend, k8s-addons.tf)이
+      # 만들지만, 그 파일도 같이 적용해두면(멱등) 라벨 등이 어긋날 일이 없다.
+      - name: 네임스페이스 먼저 적용
+        run: |
+          kubectl apply -f infra/k8s/backend/namespace.yaml
+          kubectl apply -f infra/k8s/collector/namespace.yaml
+          kubectl apply -f infra/k8s/ai-trader/namespace.yaml
+          kubectl apply -f infra/k8s/replay/namespace.yaml
+      # kafka-topic-bootstrap Job은 이름이 고정이라(재적용 시 불변 필드 에러 방지),
+      # 재실행 대비로 먼저 지우고 새로 만든다 — --if-not-exists라 토픽 자체는
+      # 이미 있어도 안전(kafka-admin-job.yaml 주석 참고).
+      - name: Kafka 토픽 부트스트랩 Job 재실행 준비
+        run: kubectl delete job kafka-topic-bootstrap -n backend --ignore-not-found
+      - name: 나머지 전부 적용 (RBAC/서비스어카운트/인그레스/ScaledObject/Deployment/Kafka 토픽)
+        run: |
+          kubectl apply -f infra/k8s/backend/
+          kubectl apply -f infra/k8s/collector/
+          kubectl apply -f infra/k8s/ai-trader/
+          kubectl apply -f infra/k8s/replay/
+          kubectl apply -f infra/k8s/monitoring/
+          kubectl apply -f infra/k8s/job-trigger-rbac.yaml
+          kubectl apply -f infra/k8s/ci-deploy-rbac.yaml
+          kubectl apply -f infra/k8s/karpenter/nodepool-backend.yaml
+      - name: Kafka 토픽 생성 완료 대기
+        run: kubectl wait --for=condition=complete job/kafka-topic-bootstrap -n backend --timeout=180s
