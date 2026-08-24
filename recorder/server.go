@@ -1,10 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"recorder/query"
 )
@@ -69,8 +72,29 @@ func enginesHandler(q query.Querier) http.HandlerFunc {
 // TPS/체결 TPS/처리 대기 주문/전체 처리 P99/실행 중인 Pod 수/처리량 라인
 // 차트)를 지원합니다. 계산 방식과 근사치의 한계는 query.DashboardMetrics의
 // 타입 주석 참고.
-func dashboardMetricsHandler(q query.Querier) http.HandlerFunc {
+//
+// 2026-08-24: 매 호출마다 q.DashboardMetrics로 직접 라이브 쿼리하던 걸
+// pollDashboardMetrics(metrics.go)가 10초마다 이미 채워두는 Redis 캐시
+// (dashboardMetricsCacheKey)를 먼저 읽도록 바꿨습니다 — 이 핸들러를 그대로
+// 뒀다면 DashboardView가 프론트에서 주기적으로 폴링을 시작하는 순간, 레플리카
+// 수와 무관하게 "폴링하는 브라우저 탭 수"만큼 매번 새로 MySQL을 때리게 되고,
+// 이건 정확히 2026-08-21 RDS CPU 97~99% 포화 사고(metrics.go 주석 참고)를
+// 일으켰던 것과 같은 패턴입니다 — 캐시는 이미 있으니 이 핸들러도 그걸 재사용하면
+// 됩니다. 캐시가 비어있을 때만(막 기동해 첫 폴링 주기 전, 또는 캐시 만료
+// 직후) 라이브 쿼리로 폴백합니다.
+func dashboardMetricsHandler(q query.Querier, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if body, err := redisClient.Get(r.Context(), dashboardMetricsCacheKey).Bytes(); err == nil {
+			var cached query.DashboardMetrics
+			if jsonErr := json.Unmarshal(body, &cached); jsonErr == nil {
+				writeJSON(w, http.StatusOK, cached)
+				return
+			}
+			log.Printf("대시보드 지표 캐시 파싱 실패, 라이브 조회로 폴백: %v", err)
+		} else if err != redis.Nil {
+			log.Printf("대시보드 지표 캐시 조회 실패, 라이브 조회로 폴백: %v", err)
+		}
+
 		metrics, err := q.DashboardMetrics(r.Context())
 		if err != nil {
 			log.Printf("대시보드 지표 조회 실패: %v", err)
@@ -78,6 +102,21 @@ func dashboardMetricsHandler(q query.Querier) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, metrics)
+	}
+}
+
+// healthHandler는 GET /v1/health를 처리합니다 — 프론트 DashboardView "시스템
+// 구성요소 상태" 패널이 MySQL 연결 자체를 값싸게(집계 쿼리 없이 PingContext만)
+// 확인하는 용도입니다. orderapi의 GET /v1/system-status가 이 엔드포인트를
+// 내부 호출해 그 결과를 종합합니다.
+func healthHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := db.PingContext(r.Context()); err != nil {
+			log.Printf("헬스체크 — MySQL 연결 확인 실패: %v", err)
+			writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "MySQL에 연결할 수 없습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
 

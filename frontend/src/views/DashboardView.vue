@@ -1,27 +1,167 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 
-const metrics = [
-  { label: '주문 접수 TPS', value: null, description: '목표 10,000건/초', color: '#3478f6' },
-  { label: '체결 TPS', value: null, description: '', color: '#2ed39a' },
-  { label: '처리 대기 주문', value: null, description: '', color: '#ffb84d' },
-  { label: '전체 처리 p99', value: null, description: '목표 500ms 이하', color: '#20c8e8' },
-  { label: '실행 중인 Pod', value: null, description: '', color: '#9b7bff' },
-]
+// 2026-08-24: 이 화면 전체를 실제 백엔드 데이터로 채웠습니다.
+// - 상단 지표 5개 + 처리량 차트: recorder GET /v1/metrics/dashboard
+//   (recorder/query/query.go의 DashboardMetrics — 이 화면을 위해 이미
+//   만들어져 있던 전용 API, 그라파나가 아니라 이걸 직접 씁니다. 그라파나는
+//   인프라 지표 위주라 "접수 TPS/체결 TPS/p99" 같은 애플리케이션 지표는
+//   여기 없습니다). 이 핸들러는 Redis 캐시(10초 주기 갱신)를 읽으므로
+//   폴링해도 매번 새로 MySQL을 때리지 않습니다(recorder/server.go 주석 참고,
+//   과거 RDS CPU 포화 사고가 이 캐시가 생긴 이유).
+// - 시스템 구성요소 상태: orderapi GET /v1/system-status (2026-08-24 신규,
+//   orderapi/systemstatus.go) — API/Kafka/매칭엔진/MySQL/Redis 각각을 얕게
+//   확인합니다.
+const POLL_INTERVAL_MS = 10000
 
-const systemStatus = [
-  { name: '주문 접수 API', status: null, color: '#2ed39a' },
-  { name: 'Kafka 브로커', status: null, color: '#2ed39a' },
-  { name: '매칭 엔진', status: null, color: '#ffb84d' },
-  { name: 'PostgreSQL', status: null, color: '#2ed39a' },
-  { name: 'Redis 캐시', status: null, color: '#2ed39a' },
-]
+const metrics = ref(null)
+const systemStatus = ref(null)
+const loadError = ref('')
 
-// Throughput chart data generation (15 minutes, 16 samples)
-// No local fake chart data — show placeholder until real metrics integration.
-const hasRealMetrics = false
+const displayValue = (v, digits = 0) => {
+  if (v === null || v === undefined) return '--'
+  return Number(v).toLocaleString('ko-KR', { maximumFractionDigits: digits, minimumFractionDigits: digits })
+}
 
-const displayValue = (v) => (v === null || v === undefined ? '--' : v)
+const metricCards = computed(() => {
+  const m = metrics.value
+  return [
+    {
+      label: '주문 접수 TPS',
+      value: m ? displayValue(m.orderAcceptTps, 1) : '--',
+      description: '목표 10,000건/초',
+      color: '#3478f6',
+    },
+    {
+      label: '체결 TPS',
+      value: m ? displayValue(m.executionTps, 1) : '--',
+      description: '',
+      color: '#2ed39a',
+    },
+    {
+      label: '처리 대기 주문',
+      value: m ? displayValue(m.pendingOrders) : '--',
+      description: '',
+      color: '#ffb84d',
+    },
+    {
+      label: '전체 처리 p99',
+      value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
+      description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '목표 500ms 이하',
+      color: '#20c8e8',
+    },
+    {
+      label: '실행 중인 Pod',
+      value: m ? displayValue(m.runningEnginePods) : '--',
+      description: '매칭 엔진',
+      color: '#9b7bff',
+    },
+  ]
+})
+
+const statusColor = (status) => (status === 'up' ? '#2ed39a' : '#ff5c7a')
+const statusLabel = (status) => (status === 'up' ? '정상' : '장애')
+
+const componentRows = computed(() => {
+  if (!systemStatus.value) {
+    return ['주문 접수 API', 'Kafka 브로커', '매칭 엔진', 'MySQL', 'Redis 캐시'].map((name) => ({
+      name,
+      label: '--',
+      color: '#8ea2b8',
+    }))
+  }
+  return systemStatus.value.map((c) => ({
+    name: c.name,
+    label: statusLabel(c.status),
+    color: statusColor(c.status),
+  }))
+})
+
+const allComponentsUp = computed(
+  () => !!systemStatus.value && systemStatus.value.every((c) => c.status === 'up')
+)
+
+// ---- 처리량 차트 (SVG 라인 차트, recorder Series: 최근 10분을 1분 단위로 집계) ----
+const chartWidth = 600
+const chartHeight = 250
+const chartPadTop = 14
+const chartPadBottom = 28
+const chartPadX = 8
+
+function pointsFor(series, key, maxValue) {
+  if (series.length < 2) return ''
+  const usableHeight = chartHeight - chartPadTop - chartPadBottom
+  const usableWidth = chartWidth - chartPadX * 2
+  return series
+    .map((bucket, i) => {
+      const x = chartPadX + (usableWidth * i) / (series.length - 1)
+      const ratio = maxValue > 0 ? bucket[key] / maxValue : 0
+      const y = chartPadTop + usableHeight * (1 - ratio)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+}
+
+const series = computed(() => metrics.value?.series || [])
+const seriesMax = computed(() => {
+  const s = series.value
+  if (s.length === 0) return 0
+  return Math.max(1, ...s.map((b) => Math.max(b.orders, b.executions)))
+})
+const orderPoints = computed(() => pointsFor(series.value, 'orders', seriesMax.value))
+const execPoints = computed(() => pointsFor(series.value, 'executions', seriesMax.value))
+
+function toHHMM(bucketStart) {
+  const d = new Date(bucketStart)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+const chartLabels = computed(() => {
+  const s = series.value
+  if (s.length === 0) return []
+  // 10개 버킷 전부 라벨을 붙이면 겹치니, 처음/중간/끝만 남긴다.
+  const idxs = [0, Math.floor((s.length - 1) / 2), s.length - 1]
+  return [...new Set(idxs)].map((i) => toHHMM(s[i].bucketStart))
+})
+
+async function fetchDashboardMetrics() {
+  const res = await fetch('/recorder-api/v1/metrics/dashboard')
+  if (!res.ok) throw new Error(`지표 조회 실패: ${res.status}`)
+  metrics.value = await res.json()
+}
+
+async function fetchSystemStatus() {
+  const res = await fetch('/order-api/v1/system-status')
+  if (!res.ok) throw new Error(`상태 조회 실패: ${res.status}`)
+  const data = await res.json()
+  systemStatus.value = data.components
+}
+
+async function refresh() {
+  try {
+    await Promise.all([fetchDashboardMetrics(), fetchSystemStatus()])
+    loadError.value = ''
+  } catch (e) {
+    // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
+    // 잠깐의 네트워크 실패로 화면이 전부 '--'로 깜빡이지 않게.
+    loadError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+let pollTimer = null
+
+onMounted(() => {
+  refresh()
+  pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 </script>
 
 <template>
@@ -39,13 +179,13 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
     </header>
 
     <section class="metrics-grid">
-      <article v-for="metric in metrics" :key="metric.label" class="metric-card">
+      <article v-for="metric in metricCards" :key="metric.label" class="metric-card">
         <div class="metric-title">
           <span>{{ metric.label }}</span>
           <span class="metric-dot" :style="{ backgroundColor: metric.color }"></span>
         </div>
 
-        <strong>{{ metric.value === null || metric.value === undefined ? '--' : metric.value }}</strong>
+        <strong>{{ metric.value }}</strong>
 
         <p :style="{ color: metric.color }">
           {{ metric.description }}
@@ -58,7 +198,7 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
         <div class="panel-header">
           <div>
             <h3>주문·체결 처리량</h3>
-            <p>최근 15분 동안 초당 처리 건수</p>
+            <p>최근 10분 동안 1분 단위 처리 건수</p>
           </div>
 
           <div class="chart-legend">
@@ -67,32 +207,60 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
           </div>
         </div>
 
-        <div class="chart-placeholder empty">
-          <div class="empty-center">
+        <div class="chart-placeholder" :class="{ empty: series.length === 0 }">
+          <div v-if="series.length === 0" class="empty-center">
             <strong>데이터 연동 예정</strong>
             <div class="empty-sub">실제 인프라 및 백엔드 연동 후 데이터가 표시됩니다.</div>
           </div>
+          <template v-else>
+            <svg
+              class="throughput-chart"
+              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+              preserveAspectRatio="none"
+            >
+              <line
+                v-for="n in 4"
+                :key="n"
+                class="grid-line"
+                x1="0"
+                :x2="chartWidth"
+                :y1="chartPadTop + ((chartHeight - chartPadTop - chartPadBottom) / 4) * n"
+                :y2="chartPadTop + ((chartHeight - chartPadTop - chartPadBottom) / 4) * n"
+              />
+              <polyline class="exec-series" fill="none" stroke="#20c8e8" stroke-width="2" :points="execPoints" />
+              <polyline class="order-series" fill="none" stroke="#3478f6" stroke-width="2" :points="orderPoints" />
+            </svg>
+            <div class="chart-labels">
+              <span v-for="(label, i) in chartLabels" :key="i">{{ label }}</span>
+            </div>
+          </template>
         </div>
       </article>
 
       <article class="panel status-panel">
         <h3>시스템 구성요소 상태</h3>
 
-        <div v-for="item in systemStatus" :key="item.name" class="status-row">
+        <div v-for="item in componentRows" :key="item.name" class="status-row">
           <span>{{ item.name }}</span>
 
           <span class="status-value" :style="{ color: item.color }">
             <i :style="{ backgroundColor: item.color }"></i>
-            {{ item.status }}
+            {{ item.label }}
           </span>
         </div>
       </article>
     </section>
 
-    <section class="scaling-alert">
-      <div class="alert-content empty-center">
-        <strong>데이터 연동 예정</strong>
-        <p>실제 인프라 및 백엔드 연동 후 확장 상태가 표시됩니다.</p>
+    <section v-if="loadError" class="scaling-alert">
+      <div class="alert-content">
+        <strong>{{ !allComponentsUp && systemStatus ? '일부 구성요소 장애' : '지표 갱신 실패' }}</strong>
+        <p>{{ loadError }} — 마지막으로 정상 조회된 값을 계속 표시합니다.</p>
+      </div>
+    </section>
+    <section v-else-if="systemStatus && !allComponentsUp" class="scaling-alert">
+      <div class="alert-content">
+        <strong>일부 구성요소 장애</strong>
+        <p>{{ componentRows.filter((c) => c.label === '장애').map((c) => c.name).join(', ') }} 확인이 필요합니다.</p>
       </div>
     </section>
 
@@ -264,14 +432,6 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
   stroke-dasharray: 1.5 2.5;
 }
 
-.throughput-chart .order-series path[stroke] {
-  filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0));
-}
-
-.throughput-chart .exec-series path[stroke] {
-  filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0));
-}
-
 .chart-labels {
   position: absolute;
   right: 14px;
@@ -281,6 +441,26 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
   justify-content: space-between;
   color: #71869c;
   font-size: 10px;
+}
+
+.empty-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.empty-center strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #c7d3e0;
+  font-size: 14px;
+}
+
+.empty-sub {
+  color: #71869c;
+  font-size: 12px;
 }
 
 .status-panel {
@@ -325,35 +505,15 @@ const displayValue = (v) => (v === null || v === undefined ? '--' : v)
   border-radius: 15px;
 }
 
-.alert-icon {
-  display: grid;
-  width: 50px;
-  height: 50px;
-  place-items: center;
-  color: #ffb84d;
-  background: #11243a;
-  border-radius: 12px;
-  font-size: 25px;
-}
-
 .alert-content strong {
   font-size: 14px;
+  color: #ffb84d;
 }
 
 .alert-content p {
   margin: 7px 0 0;
   color: #8ea2b8;
   font-size: 12px;
-}
-
-.scaling-badge {
-  margin-left: auto;
-  padding: 8px 12px;
-  color: #ffb84d;
-  background: #11243a;
-  border-radius: 16px;
-  font-size: 11px;
-  font-weight: 700;
 }
 
 .integrity-panel {

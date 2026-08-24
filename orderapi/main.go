@@ -33,8 +33,8 @@ const (
 	// matchingEngineNamespace/matchingEngineDeploymentName은 resetMatchingEngineBookHandler가
 	// rollout restart를 걸 대상입니다 — infra/k8s/backend/matching-engine-deployment.yaml의
 	// metadata와 반드시 같은 값이어야 합니다.
-	matchingEngineNamespace       = "backend"
-	matchingEngineDeploymentName  = "matching-engine"
+	matchingEngineNamespace      = "backend"
+	matchingEngineDeploymentName = "matching-engine"
 )
 
 // sessionTTL은 세션 락의 Redis 만료 시간입니다 — 클라이언트(trader/replayengine)는
@@ -109,6 +109,17 @@ func main() {
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL, matchingLagChecker))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
+
+	// GET /v1/system-status(2026-08-24, systemstatus.go 참고) — 프론트
+	// DashboardView "시스템 구성요소 상태" 패널. 이 조회 전용 Kafka Dialer는
+	// resetMatchingEngineBookHandler의 것(K8s in-cluster 접근이 성공해야만
+	// 만들어짐)과 달리 항상 만듭니다 — 시스템 상태 패널은 K8s 연동 여부와
+	// 무관하게 항상 떠 있어야 하는 기능이라서입니다.
+	statusKafkaDialer, err := kafkaclient.NewDialer(ctx, cfg.KafkaUseIAMAuth)
+	if err != nil {
+		log.Fatalf("Kafka Dialer 생성 실패 (시스템 상태 확인용): %v", err)
+	}
+	mux.HandleFunc("GET /v1/system-status", systemStatusHandler(redisClient, statusKafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic, cfg.RecorderURL, recorderHTTPClient))
 
 	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).

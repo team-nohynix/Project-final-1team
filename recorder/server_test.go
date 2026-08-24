@@ -8,8 +8,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"recorder/query"
 )
+
+// unreachableRedisClient는 dashboardMetricsHandler의 캐시 읽기가 항상
+// 실패하게 만들어 라이브 쿼리 폴백 경로(테스트 대상)를 확실히 타게 합니다 —
+// 이 파일의 다른 Redis 의존 코드와 같은 이유로 실제 Redis 왕복은 손으로
+// 검증하고(recorder/backpressure/redis_flag.go 주석 참고), 여기서는 캐시
+// 미스 상황만 재현하면 충분합니다. DialTimeout을 짧게 잡아 테스트가 느려지지
+// 않게 합니다.
+func unreachableRedisClient() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 50 * time.Millisecond,
+		ReadTimeout: 50 * time.Millisecond,
+	})
+}
 
 // fakeQuerier는 실제 MySQL 없이 핸들러를 검증하기 위한 query.Querier
 // 구현체입니다 — orderapi/server_test.go의 fakePublisher와 같은 패턴.
@@ -152,7 +168,7 @@ func TestDashboardMetricsHandler(t *testing.T) {
 			Series:            []query.MetricsBucket{{BucketStart: "2026-08-12T06:10:00Z", Orders: 120, Executions: 95}},
 		}}
 		w := httptest.NewRecorder()
-		dashboardMetricsHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
+		dashboardMetricsHandler(q, unreachableRedisClient())(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -169,7 +185,7 @@ func TestDashboardMetricsHandler(t *testing.T) {
 	t.Run("query error", func(t *testing.T) {
 		q := &fakeQuerier{metricsErr: context.DeadlineExceeded}
 		w := httptest.NewRecorder()
-		dashboardMetricsHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
+		dashboardMetricsHandler(q, unreachableRedisClient())(w, httptest.NewRequest(http.MethodGet, "/v1/metrics/dashboard", nil))
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
