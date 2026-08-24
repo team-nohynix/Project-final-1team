@@ -133,6 +133,17 @@ func main() {
 		log.Printf("RECORDER_URL이 없어 세션 종료 자동 정리 및 POST /v1/admin/cleanup-unresolved-orders 비활성화")
 	}
 
+	// GET /v1/metrics/cluster (clustermetrics.go 참고) — PROMETHEUS_URL이
+	// 없으면(로컬 개발 등) 등록하지 않습니다. RECORDER_URL과 같은 선택적
+	// 기능 패턴 — orderapi의 핵심 기능과는 무관합니다.
+	if cfg.PrometheusURL != "" {
+		prom := newPromQuerier(cfg.PrometheusURL)
+		mux.HandleFunc("GET /v1/metrics/cluster", clusterMetricsHandler(prom))
+		log.Printf("Prometheus 연동 활성화 (prometheusUrl=%s) — GET /v1/metrics/cluster 사용 가능", cfg.PrometheusURL)
+	} else {
+		log.Printf("PROMETHEUS_URL이 없어 GET /v1/metrics/cluster 비활성화")
+	}
+
 	// POST /v1/admin/reset-matching-engine-book (2026-08-21, adminreset.go 참고) —
 	// DB 정리(위)와는 별개로, 매칭엔진 자신의 Redis 전체 스냅샷 + 인메모리
 	// 상태에만 남는 "잔량"을 지웁니다. rest.InClusterConfig()는 이 파드가 실제

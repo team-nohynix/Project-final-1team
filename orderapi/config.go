@@ -20,6 +20,7 @@ type Config struct {
 	JobTriggerQueueURL string
 	OrderRecordsBucket string
 	RecorderURL        string
+	PrometheusURL      string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -112,6 +113,16 @@ func LoadConfig() Config {
 	// 정상 동작해야 합니다.
 	recorderURL := os.Getenv("RECORDER_URL")
 
+	// PROMETHEUS_URL도 선택입니다 — 값이 있으면 GET /v1/metrics/cluster가
+	// 활성 노드 수/백엔드 전체 파드 수/파드 재시작 누적/매칭엔진 호가창
+	// 잔량/오토스케일링 현황을 그라파나 team1-overview 대시보드가 이미
+	// 쓰고 있는 PromQL 그대로 모니터링 EC2의 Prometheus(infra/monitoring-ec2.tf,
+	// 포트 9090)에 물어봅니다(2026-08-24, 사용자 제안 — 이 지표들을 orderapi가
+	// 다시 만들 필요 없이 그라파나가 이미 검증해 쓰고 있는 값을 그대로
+	// 재사용). RECORDER_URL과 같은 이유로 선택값 — 없으면 이 라우트를
+	// 등록하지 않고, orderapi의 핵심 기능(주문 접수/취소)과는 무관합니다.
+	prometheusURL := os.Getenv("PROMETHEUS_URL")
+
 	return Config{
 		Port:               port,
 		KafkaBroker:        broker,
@@ -123,6 +134,7 @@ func LoadConfig() Config {
 		RedisTLSEnabled:    redisTLSEnabled,
 		JobTriggerQueueURL: jobTriggerQueueURL,
 		RecorderURL:        recorderURL,
+		PrometheusURL:      prometheusURL,
 		OrderRecordsBucket: orderRecordsBucket,
 	}
 }

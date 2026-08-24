@@ -57,6 +57,13 @@ spec:
             # 원인. recorder Service(같은 backend 네임스페이스, 8082) 가리키게 채움.
             - name: RECORDER_URL
               value: "http://recorder:8082"
+            # 2026-08-24: GET /v1/metrics/cluster(clustermetrics.go)가 그라파나
+            # team1-overview 대시보드와 같은 PromQL을 그대로 재사용하려고
+            # 모니터링 EC2의 Prometheus를 직접 찌른다(infra/monitoring-ec2.tf,
+            # team1_sg_monitoring이 9090을 0.0.0.0/0로 열어둬서 같은 VPC의
+            # orderapi에서도 NAT 아웃바운드로 도달 가능 — 별도 SG 규칙 불필요).
+            - name: PROMETHEUS_URL
+              value: "http://monitor.jhyang.click:9090"
           # 2026-08-20: 트레이더 Job이 짧은 시간에 대량 주문을 동시 제출할 때(실측: 같은 초에
           # 50건 이상) 512Mi를 넘겨 OOMKilled됨(exit 137) — 프론트 "페이퍼 트레이딩 실행 실패"의
           # 실제 원인. matching-engine과 같은 이유로 1Gi로 상향.
