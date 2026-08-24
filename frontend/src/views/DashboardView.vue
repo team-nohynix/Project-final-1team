@@ -411,83 +411,322 @@ function componentStatusOf(name) {
 }
 const flowUp = (name) => componentStatusOf(name) === 'up'
 
-function podLabel(deploymentName) {
-  const p = pods.value?.[deploymentName]
-  if (!p) return null
-  return `${p.ready}/${p.desired}`
-}
+// **그라파나 원본 스타일로 재구현 (2026-08-24, 사용자 요청)** — 처음엔
+// 토폴로지만 맞춘 SVG 다이어그램이었는데, 사용자가 "그라파나 대시보드의 실제
+// 패널(team1-overview, panel id 121)과 똑같은 스타일로" 를 명시적으로
+// 요청해서, 그 패널(순수 HTML text 패널 + <canvas>, 손으로 애니메이션 루프를
+// 짠 것)의 그리기 로직을 이 컴포넌트로 그대로 옮겼습니다. 다만 그 패널은
+// Grafana의 Prometheus 데이터소스 프록시(/api/datasources/proxy/...)를 직접
+// 호출해 컨슈머 랙/백프레셔/노드별 파드 배치까지 그리는데, 이 프론트엔드에는
+// 그 경로가 없고(대신 recorder/orderapi 자체 REST API만 있음) 이미 갖고
+// 있는 데이터(접수/체결 TPS, 파드 ready/desired, 컴포넌트 헬스체크)만으로
+// 그릴 수 있는 부분만 옮겼습니다 — 병목(랙/백프레셔) 뱃지와 "워커 노드별
+// 배치" 범례는 소스 데이터가 없어 제외했습니다. 노드 상태(정상/장애)는
+// 원본엔 없던 요소지만, 기존 헬스체크 정보를 잃지 않으려고 노드 테두리
+// 색으로 계속 표시합니다.
+const flowNodesDef = [
+  { key: 'collector', x: 0.02, label: '시세 수집기', sub: 'backend(배치)', lane: 'trunk' },
+  { key: 'trader', x: 0.12, label: 'AI 트레이더', sub: 'trader(Job)', lane: 'trunk' },
+  { key: 'orderapi', x: 0.227, label: '접수', sub: 'orderapi', lane: 'trunk' },
+  { key: 'orders-topic', x: 0.352, label: 'Orders 토픽', sub: 'Kafka', lane: 'trunk' },
+  { key: 'matching', x: 0.585, label: '매칭 엔진', sub: 'matching-engine', lane: 'upper' },
+  { key: 'exec-topic', x: 0.728, label: 'Executions 토픽', sub: 'Kafka', lane: 'upper' },
+  { key: 'recorder', x: 0.862, label: '기록기', sub: 'recorder', lane: 'trunk' },
+  { key: 'mysql', x: 0.965, label: 'MySQL', sub: 'trade_order', lane: 'trunk' },
+]
+const flowBranchLabels = [
+  { x: 0.44, lane: 'upper', text: '→ 매칭 엔진행' },
+  { x: 0.44, lane: 'lower', text: '→ 기록기 직접 구독' },
+]
+const FLOW_SVC_COLOR = { orderapi: '#4a90ff', matching: '#ffb84d', recorder: '#33e6a8' }
+const FLOW_SCALE_RANGE = { matching: { min: 2, max: 10 }, recorder: { min: 1, max: 10 } }
+const FLOW_BRANCH_START = 0.388
+const FLOW_BRANCH_END = 0.424
+const FLOW_MERGE_START = 0.813
+const FLOW_MERGE_END = 0.849
 
-// **토폴로지 검토(2026-08-24, 사용자 요청)** — 기존 구현은 접수→Orders 토픽→
-// 매칭엔진→Executions 토픽→기록기를 완전한 일직선으로 그렸는데, 이건 실제
-// 배선과 다릅니다. recorder/main.go를 보면 기록기는 orders 토픽을 매칭엔진을
-// 거치지 않고 자기 전용 컨슈머 그룹("recorder-orders")으로 직접 구독합니다
-// (orderapi가 Orders 토픽에 발행 → 매칭엔진과 기록기가 각자 독립적으로 같은
-// 토픽을 따로 소비 — 그라파나 다이어그램의 "→ 기록기 직접 구독" 라벨이 가리키는
-// 바로 그 경로). 즉 Orders 토픽에서 실제로는 두 갈래로 갈라집니다: (1) 매칭엔진
-// 행 → Executions 토픽 → 기록기, (2) 기록기로 바로. 아래 좌표/경로 정의가 이
-// 포크 구조를 반영합니다 — 일직선이 아니라 매칭엔진을 위로 띄우고, Orders
-// 토픽에서 기록기로 바로 내려가는 우회 곡선을 추가했습니다.
-const flowNodeMeta = {
-  collector: { x: 70, y: 100, label: '시세 수집기', sub: 'backend(배치)' },
-  trader: { x: 220, y: 100, label: 'AI 트레이더', sub: 'trader(Job)' },
-  orderapi: { x: 370, y: 100, label: '접수', sub: 'orderapi' },
-  'orders-topic': { x: 520, y: 100, label: 'Orders 토픽', sub: 'Kafka' },
-  matching: { x: 595, y: 40, label: '매칭 엔진', sub: 'matching-engine' },
-  'exec-topic': { x: 670, y: 100, label: 'Executions 토픽', sub: 'Kafka' },
-  recorder: { x: 820, y: 100, label: '기록기', sub: 'recorder' },
-  mysql: { x: 970, y: 100, label: 'MySQL', sub: 'trade_order' },
-}
+const flowNodeOk = computed(() => ({
+  collector: traderRunning.value,
+  trader: traderRunning.value,
+  orderapi: flowUp('주문 접수 API'),
+  'orders-topic': flowUp('Kafka 브로커'),
+  matching: flowUp('매칭 엔진'),
+  'exec-topic': flowUp('Kafka 브로커'),
+  recorder: flowUp('MySQL'),
+  mysql: flowUp('MySQL'),
+}))
 
-const flowNodes = computed(() => {
-  const okByKey = {
-    collector: traderRunning.value,
-    trader: traderRunning.value,
-    orderapi: flowUp('주문 접수 API'),
-    'orders-topic': flowUp('Kafka 브로커'),
-    matching: flowUp('매칭 엔진'),
-    'exec-topic': flowUp('Kafka 브로커'),
-    recorder: flowUp('MySQL'),
-    mysql: flowUp('MySQL'),
+function flowSmoothstep(e0, e1, x) {
+  const t = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1)
+  return t * t * (3 - 2 * t)
+}
+function flowLaneBlend(xFrac) {
+  if (xFrac < FLOW_BRANCH_START) return 0
+  if (xFrac < FLOW_BRANCH_END) return flowSmoothstep(FLOW_BRANCH_START, FLOW_BRANCH_END, xFrac)
+  if (xFrac < FLOW_MERGE_START) return 1
+  if (xFrac < FLOW_MERGE_END) return 1 - flowSmoothstep(FLOW_MERGE_START, FLOW_MERGE_END, xFrac)
+  return 0
+}
+function flowLaneCenterFrac(xFrac, lane) {
+  if (lane === 'trunk') return 0.5
+  const off = lane === 'upper' ? -0.32 : 0.32
+  return 0.5 + off * flowLaneBlend(xFrac)
+}
+function flowScaleFrac(n, svcKey) {
+  const r = FLOW_SCALE_RANGE[svcKey] || { min: 1, max: 5 }
+  return Math.min(Math.max((n - r.min) / (r.max - r.min), 0), 1)
+}
+function flowLaneServiceAt(xFrac, lane) {
+  if (lane === 'lower') return 'recorder'
+  return xFrac < 0.7 ? 'matching' : 'recorder'
+}
+function flowBandHalfFrac(xFrac, lane, scale) {
+  const narrow = 0.045
+  const wide = 0.135
+  const svcKey = flowLaneServiceAt(xFrac, lane)
+  return narrow + (wide - narrow) * flowScaleFrac(scale[svcKey], svcKey)
+}
+function flowRoundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+function flowAddSmoothPoints(ctx, pts) {
+  if (pts.length < 2) {
+    pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])))
+    return
   }
-  const podByKey = { orderapi: 'orderapi', matching: 'matching-engine', recorder: 'recorder' }
-  return Object.entries(flowNodeMeta).map(([key, meta]) => ({
-    key,
-    ...meta,
-    ok: okByKey[key],
-    podLabel: podByKey[key] ? podLabel(podByKey[key]) : null,
-  }))
-})
+  ctx.moveTo(pts[0][0], pts[0][1])
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2
+    const my = (pts[i][1] + pts[i + 1][1]) / 2
+    ctx.quadraticCurveTo(pts[i][0], pts[i][1], mx, my)
+  }
+  ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1])
+}
 
-const FLOW_ORDER_COLOR = '#3478f6'
-const FLOW_EXEC_COLOR = '#20c8e8'
+const flowCanvasEl = ref(null)
+let flowCtx = null
+let flowDpr = 1
+let flowParticles = []
+let flowFrameId = null
+let flowResizeObserver = null
 
-// 각 edge의 SVG path는 두 끝 노드 박스 테두리(반너비 60, 반높이 32)에서
-// 시작/끝나도록 손으로 좌표를 맞췄습니다 — flowNodeMeta 좌표를 바꾸면 같이
-// 맞춰야 합니다(범용 경로 자동 계산은 이 정도 규모에선 과합니다).
-const flowEdges = computed(() => {
-  const ok = (...keys) => keys.every((k) => flowNodes.value.find((n) => n.key === k)?.ok)
-  return [
-    { key: 'e1', d: 'M130,100 L160,100', color: FLOW_ORDER_COLOR, ok: ok('collector', 'trader') },
-    { key: 'e2', d: 'M280,100 L310,100', color: FLOW_ORDER_COLOR, ok: ok('trader', 'orderapi') },
-    { key: 'e3', d: 'M430,100 L460,100', color: FLOW_ORDER_COLOR, ok: ok('orderapi', 'orders-topic') },
-    // 포크 1: Orders 토픽 -> 매칭엔진 (위로)
-    { key: 'e4', d: 'M520,70 Q560,50 578,72', color: FLOW_ORDER_COLOR, ok: ok('orders-topic', 'matching') },
-    // 매칭엔진 -> Executions 토픽
-    { key: 'e5', d: 'M612,72 Q650,50 670,70', color: FLOW_EXEC_COLOR, ok: ok('matching', 'exec-topic') },
-    { key: 'e6', d: 'M730,100 L760,100', color: FLOW_EXEC_COLOR, ok: ok('exec-topic', 'recorder') },
-    // 포크 2: Orders 토픽 -> 기록기 직접 구독 (아래로 우회)
-    {
-      key: 'e7',
-      d: 'M520,125 C560,148 780,148 820,125',
-      color: FLOW_ORDER_COLOR,
-      ok: ok('orders-topic', 'recorder'),
-      label: '직접 구독',
-      labelX: 670,
-      labelY: 141,
-    },
-    { key: 'e8', d: 'M880,100 L910,100', color: FLOW_ORDER_COLOR, ok: ok('recorder', 'mysql') },
-  ]
-})
+function flowResizeCanvas() {
+  const canvas = flowCanvasEl.value
+  if (!canvas) return
+  const rect = canvas.parentElement.getBoundingClientRect()
+  flowDpr = window.devicePixelRatio || 1
+  canvas.width = Math.max(rect.width, 10) * flowDpr
+  canvas.height = Math.max(rect.height, 10) * flowDpr
+  canvas.style.width = `${rect.width}px`
+  canvas.style.height = `${rect.height}px`
+  flowCtx.setTransform(flowDpr, 0, 0, flowDpr, 0, 0)
+}
+
+function flowSpawnPair(tps, color, mode, w) {
+  const rate = Math.max(tps, 0)
+  const perFrame = Math.min(Math.sqrt(rate) / 1.9, 3.5)
+  let n = Math.floor(perFrame) + (Math.random() < perFrame % 1 ? 1 : 0)
+  if (rate < 0.05 && Math.random() < 0.01) n = 1
+  for (let i = 0; i < n; i++) {
+    const jitter = (Math.random() - 0.5) * 0.75
+    const speed = 1.3 + Math.random() * 0.9
+    const r = 2.0 + Math.random()
+    if (mode === 'both') {
+      const startX = 0.227 * w - 4 - Math.random() * 10
+      flowParticles.push({ x: startX, lane: 'upper', jitter, speed, color, r })
+      flowParticles.push({ x: startX, lane: 'lower', jitter, speed, color, r })
+    } else {
+      const xJitter = (Math.random() - 0.5) * 14
+      flowParticles.push({ x: mode.x + xJitter, lane: mode.lane, jitter, speed, color, r })
+    }
+  }
+}
+
+function flowNodeBoxWidth(ctx, label) {
+  return Math.max(ctx.measureText(label).width + 20, 60)
+}
+
+function drawFlowFrame() {
+  const canvas = flowCanvasEl.value
+  if (!canvas || !flowCtx) return
+  const ctx = flowCtx
+  const w = canvas.width / flowDpr
+  const h = canvas.height / flowDpr
+  const cy = h * 0.42
+  const laneSpan = h * 0.28
+
+  ctx.fillStyle = '#0a1420'
+  ctx.fillRect(0, 0, w, h)
+
+  const scale = {
+    matching: pods.value?.['matching-engine']?.ready || FLOW_SCALE_RANGE.matching.min,
+    recorder: pods.value?.recorder?.ready || FLOW_SCALE_RANGE.recorder.min,
+  }
+  const steps = 90
+  const grad = ctx.createLinearGradient(0, cy - laneSpan * 1.3, 0, cy + laneSpan * 1.3)
+  grad.addColorStop(0, 'rgba(52,120,246,0.04)')
+  grad.addColorStop(0.5, 'rgba(52,120,246,0.11)')
+  grad.addColorStop(1, 'rgba(52,120,246,0.04)')
+  for (const lane of ['upper', 'lower']) {
+    const pathPts = []
+    for (let xi = 0; xi <= steps; xi++) {
+      const xf = xi / steps
+      const half = flowBandHalfFrac(xf, lane, scale)
+      let yTop = cy + (flowLaneCenterFrac(xf, lane) - 0.5) * 2 * laneSpan - half * h
+      if (lane === 'lower') yTop = Math.max(yTop, cy)
+      pathPts.push([xf * w, yTop])
+    }
+    for (let xi = steps; xi >= 0; xi--) {
+      const xf = xi / steps
+      const half = flowBandHalfFrac(xf, lane, scale)
+      let yBot = cy + (flowLaneCenterFrac(xf, lane) - 0.5) * 2 * laneSpan + half * h
+      if (lane === 'upper') yBot = Math.min(yBot, cy)
+      pathPts.push([xf * w, yBot])
+    }
+    ctx.beginPath()
+    flowAddSmoothPoints(ctx, pathPts)
+    ctx.closePath()
+    ctx.fillStyle = grad
+    ctx.fill()
+  }
+
+  const envPts = []
+  for (let i = 0; i <= steps; i++) {
+    const xf = i / steps
+    const half = flowBandHalfFrac(xf, 'upper', scale)
+    envPts.push([xf * w, cy + (flowLaneCenterFrac(xf, 'upper') - 0.5) * 2 * laneSpan - half * h])
+  }
+  for (let i = steps; i >= 0; i--) {
+    const xf = i / steps
+    const half = flowBandHalfFrac(xf, 'lower', scale)
+    envPts.push([xf * w, cy + (flowLaneCenterFrac(xf, 'lower') - 0.5) * 2 * laneSpan + half * h])
+  }
+  ctx.beginPath()
+  flowAddSmoothPoints(ctx, envPts)
+  ctx.closePath()
+  ctx.strokeStyle = 'rgba(159,176,194,0.28)'
+  ctx.lineWidth = 1.3
+  ctx.stroke()
+
+  const m = metrics.value
+  flowSpawnPair(m?.orderAcceptTps || 0, FLOW_SVC_COLOR.orderapi, 'both', w)
+  flowSpawnPair(m?.executionTps || 0, FLOW_SVC_COLOR.recorder, { x: 0.585 * w, lane: 'upper' }, w)
+
+  for (let i = flowParticles.length - 1; i >= 0; i--) {
+    const p = flowParticles[i]
+    p.x += p.speed
+    if (p.x > w + 10) {
+      flowParticles.splice(i, 1)
+      continue
+    }
+    const xf = Math.min(Math.max(p.x, 0), w) / w
+    const laneC = flowLaneCenterFrac(xf, p.lane)
+    const half = flowBandHalfFrac(xf, p.lane, scale)
+    const py = cy + (laneC - 0.5) * 2 * laneSpan + p.jitter * half * h * 0.85
+    ctx.beginPath()
+    ctx.fillStyle = p.color
+    ctx.shadowColor = p.color
+    ctx.shadowBlur = 6
+    ctx.arc(p.x, py, p.r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.shadowBlur = 0
+  }
+
+  ctx.font = '500 10px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.fillStyle = 'rgba(159,176,194,0.85)'
+  ctx.textAlign = 'left'
+  for (const bl of flowBranchLabels) {
+    const bx = bl.x * w
+    const by = cy + (flowLaneCenterFrac(bl.x, bl.lane) - 0.5) * 2 * laneSpan
+    const half = flowBandHalfFrac(bl.x, bl.lane, scale) * h
+    const ty = bl.lane === 'upper' ? by - half - 12 : by + half + 18
+    ctx.fillText(bl.text, bx, ty)
+  }
+
+  const okMap = flowNodeOk.value
+  for (const nd of flowNodesDef) {
+    const nx = nd.x * w
+    const ny = cy + (flowLaneCenterFrac(nd.x, nd.lane) - 0.5) * 2 * laneSpan
+    ctx.font = '700 12px -apple-system, BlinkMacSystemFont, sans-serif'
+    const bw = flowNodeBoxWidth(ctx, nd.label)
+    const bh = 34
+    const drawCx = Math.min(Math.max(nx, bw / 2 + 4), w - bw / 2 - 4)
+    const bx = drawCx - bw / 2
+    const by = ny - bh / 2
+    const ok = okMap[nd.key]
+    ctx.fillStyle = 'rgba(15,26,40,0.9)'
+    flowRoundRect(ctx, bx, by, bw, bh, 7)
+    ctx.fill()
+    ctx.strokeStyle = ok ? 'rgba(159,176,194,0.35)' : '#ff5c7a'
+    ctx.lineWidth = ok ? 1.3 : 1.8
+    ctx.stroke()
+    ctx.fillStyle = '#e8f1fb'
+    ctx.textAlign = 'center'
+    ctx.font = '700 12px -apple-system, BlinkMacSystemFont, sans-serif'
+    ctx.fillText(nd.label, drawCx, ny - 2)
+    ctx.fillStyle = '#7f93a8'
+    ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
+    ctx.fillText(nd.sub, drawCx, ny + 11)
+  }
+
+  ctx.fillStyle = 'rgba(10,20,32,0.6)'
+  ctx.fillRect(6, 6, 190, 62)
+  ctx.fillStyle = '#cfe6ff'
+  ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.textAlign = 'left'
+  ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 24)
+  ctx.fillStyle = '#8ff5cf'
+  ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 42)
+  ctx.fillStyle = '#9fb0c2'
+  ctx.font = '500 10px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.fillText(`레플리카: 매칭 ${Math.round(scale.matching)} · 기록기 ${Math.round(scale.recorder)}`, 14, 58)
+
+  ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.fillStyle = '#9fb0c2'
+  ctx.fillText('워커', 10, h - 8)
+  const legendX = 44
+  const legendY = h - 11
+  ;['orderapi', 'matching', 'recorder'].forEach((svc, li) => {
+    const lx = legendX + li * 46
+    ctx.beginPath()
+    ctx.fillStyle = FLOW_SVC_COLOR[svc]
+    ctx.arc(lx, legendY - 3, 3, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#7f93a8'
+    ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
+    ctx.textAlign = 'left'
+    ctx.fillText(svc === 'orderapi' ? '접수' : svc === 'matching' ? '매칭' : '기록', lx + 6, legendY)
+  })
+
+  flowFrameId = requestAnimationFrame(drawFlowFrame)
+}
+
+function startFlowCanvas() {
+  const canvas = flowCanvasEl.value
+  if (!canvas) return
+  flowCtx = canvas.getContext('2d')
+  flowResizeCanvas()
+  flowResizeObserver = new ResizeObserver(() => flowResizeCanvas())
+  flowResizeObserver.observe(canvas.parentElement)
+  flowFrameId = requestAnimationFrame(drawFlowFrame)
+}
+
+function stopFlowCanvas() {
+  if (flowFrameId !== null) {
+    cancelAnimationFrame(flowFrameId)
+    flowFrameId = null
+  }
+  if (flowResizeObserver) {
+    flowResizeObserver.disconnect()
+    flowResizeObserver = null
+  }
+}
 
 let pollTimer = null
 
@@ -497,6 +736,7 @@ onMounted(() => {
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
   }, 1000)
+  startFlowCanvas()
 })
 
 onBeforeUnmount(() => {
@@ -508,6 +748,7 @@ onBeforeUnmount(() => {
     clearInterval(tickTimer)
     tickTimer = null
   }
+  stopFlowCanvas()
 })
 </script>
 
@@ -527,52 +768,8 @@ onBeforeUnmount(() => {
 
     <section class="panel flow-panel">
       <h3>실시간 처리 흐름</h3>
-      <svg class="flow-svg" viewBox="0 0 1040 170" preserveAspectRatio="xMidYMid meet">
-        <!-- 연결선: 상태 나쁘면 점선 회색, 정상이면 실선 + 흐르는 점 -->
-        <g v-for="edge in flowEdges" :key="edge.key">
-          <path
-            :id="`flowpath-${edge.key}`"
-            :d="edge.d"
-            fill="none"
-            :stroke="edge.ok ? edge.color : '#2a3d52'"
-            stroke-width="1.6"
-            :stroke-dasharray="edge.ok ? null : '3 3'"
-          />
-          <template v-if="edge.ok">
-            <circle r="2.4" :fill="edge.color">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0s">
-                <mpath :href="`#flowpath-${edge.key}`" />
-              </animateMotion>
-            </circle>
-            <circle r="2.4" :fill="edge.color" opacity="0.7">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="0.6s">
-                <mpath :href="`#flowpath-${edge.key}`" />
-              </animateMotion>
-            </circle>
-            <circle r="2.4" :fill="edge.color" opacity="0.4">
-              <animateMotion dur="1.8s" repeatCount="indefinite" begin="1.2s">
-                <mpath :href="`#flowpath-${edge.key}`" />
-              </animateMotion>
-            </circle>
-          </template>
-          <text v-if="edge.label" :x="edge.labelX" :y="edge.labelY" class="flow-edge-label" text-anchor="middle">
-            → {{ edge.label }}
-          </text>
-        </g>
-
-        <!-- 노드 -->
-        <foreignObject v-for="node in flowNodes" :key="node.key" :x="node.x - 62" :y="node.y - 30" width="124" height="62">
-          <div xmlns="http://www.w3.org/1999/xhtml" class="flow-node" :class="{ down: !node.ok }">
-            <span class="flow-dot" :style="{ backgroundColor: node.ok ? '#2ed39a' : '#ff5c7a' }"></span>
-            <div class="flow-label">{{ node.label }}</div>
-            <div class="flow-sub">{{ node.sub }}</div>
-            <div v-if="node.podLabel" class="flow-pods">파드 {{ node.podLabel }}</div>
-          </div>
-        </foreignObject>
-      </svg>
-      <div class="flow-rates">
-        <span><i class="order-color"></i>접수 {{ metrics ? displayValue(metrics.orderAcceptTps, 1) : '--' }}/s</span>
-        <span><i class="execution-color"></i>체결 {{ metrics ? displayValue(metrics.executionTps, 1) : '--' }}/s</span>
+      <div class="flow-canvas-wrap">
+        <canvas ref="flowCanvasEl" class="flow-canvas"></canvas>
       </div>
     </section>
 
@@ -761,78 +958,19 @@ onBeforeUnmount(() => {
   margin-bottom: 18px;
 }
 
-.flow-svg {
+.flow-canvas-wrap {
+  position: relative;
   width: 100%;
-  height: auto;
-  min-height: 140px;
+  height: 280px;
   margin-top: 10px;
-  overflow: visible;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
-.flow-edge-label {
-  fill: #71869c;
-  font-size: 10px;
-}
-
-.flow-node {
-  display: flex;
+.flow-canvas {
   width: 100%;
   height: 100%;
-  padding: 8px 6px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  text-align: center;
-  background: #11243a;
-  border: 1px solid #20344b;
-  border-radius: 10px;
-  box-sizing: border-box;
-}
-
-.flow-node.down {
-  border-color: #ff5c7a;
-}
-
-.flow-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.flow-label {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.flow-sub {
-  color: #71869c;
-  font-size: 10px;
-}
-
-.flow-pods {
-  color: #8ea2b8;
-  font-size: 10px;
-}
-
-.flow-rates {
-  display: flex;
-  margin-top: 14px;
-  gap: 18px;
-  color: #8ea2b8;
-  font-size: 12px;
-}
-
-.flow-rates span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.flow-rates i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  display: block;
 }
 
 .run-status-panel {
