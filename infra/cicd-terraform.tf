@@ -180,6 +180,35 @@ resource "aws_iam_role_policy" "github_actions_terraform_apply" {
   policy = data.aws_iam_policy_document.github_actions_terraform_apply_policy.json
 }
 
+# --- EKS access entry (2026-08-24 추가) --------------------------------------
+#
+# IAM 권한(위 ReadOnlyAccess / iam:*·ec2:*·eks:* 등)과 EKS access entry는 별개다 —
+# 전자는 "AWS API를 호출할 수 있느냐"고, 후자는 "K8s API 서버 자체에 어떤 신원으로
+# 인증되느냐"다. helm_release/kubernetes_secret 리소스(karpenter.tf/alb-controller.tf/
+# k8s-addons.tf/mysql-ec2.tf)를 추가하기 전까지는 이 두 role이 K8s 리소스를 전혀 안
+# 건드려서 이 access entry가 없어도 아무 문제가 없었는데, 추가하자마자 terraform plan이
+# "Kubernetes cluster unreachable: the server has asked for the client to provide
+# credentials"로 바로 실패해서 발견했다. 실제 RBAC 권한 자체는 access entry가 아니라
+# infra/k8s/terraform-eks-rbac.yaml(ClusterRole/ClusterRoleBinding)이 준다 —
+# github_actions_eks_describe 위 주석과 같은 "access entry로 그룹 매핑, 권한은 RBAC"
+# 패턴. plan은 읽기 전용(Secret 포함 — Helm 3가 릴리스 메타데이터를 Secret으로
+# 저장해서 helm_release를 plan하는 데도 필요), apply는 cluster-admin(이 role이 이미
+# 가진 IAM 권한 수준의 자연스러운 연장 — terraform-apply job 주석 참고, 사람 승인
+# 게이트가 없다는 전제는 그대로).
+resource "aws_eks_access_entry" "github_actions_terraform_plan" {
+  cluster_name      = aws_eks_cluster.team1.name
+  principal_arn     = aws_iam_role.github_actions_terraform_plan.arn
+  type              = "STANDARD"
+  kubernetes_groups = ["team1-tf-plan"]
+}
+
+resource "aws_eks_access_entry" "github_actions_terraform_apply" {
+  cluster_name      = aws_eks_cluster.team1.name
+  principal_arn     = aws_iam_role.github_actions_terraform_apply.arn
+  type              = "STANDARD"
+  kubernetes_groups = ["team1-tf-apply"]
+}
+
 output "github_actions_terraform_plan_role_arn" {
   value = aws_iam_role.github_actions_terraform_plan.arn
 }

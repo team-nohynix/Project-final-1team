@@ -1,0 +1,54 @@
+# terraform-plan/apply(CI)용 EKS 접근 권한 (2026-08-24 추가) — helm_release/
+# kubernetes_secret 등 K8s 리소스를 terraform으로 관리하기 시작하면서(karpenter.tf/
+# alb-controller.tf/k8s-addons.tf/mysql-ec2.tf 참고) 처음 발견한 문제: TF_PLAN_ROLE/
+# TF_APPLY_ROLE 둘 다 EKS access entry가 아예 없어서 "Kubernetes cluster unreachable:
+# the server has asked for the client to provide credentials"로 terraform plan 자체가
+# 실패했다 — IAM 권한(eks:*)과 EKS access entry(K8s API 서버 안에서의 RBAC ID)는
+# 별개라, 지금까지는 이 두 role이 K8s 리소스를 전혀 안 건드려서 안 드러났을 뿐이다.
+#
+# TF_PLAN_ROLE: 읽기 전용(get/list/watch)이지만 Secret도 포함한다 — terraform plan이
+# kubernetes_secret 리소스의 실제 데이터로 diff를 계산하려면 Secret 값 자체를 읽어야
+# 하는데, 기본 제공 ClusterRole "view"는 보안상 Secret을 일부러 뺀다. Helm 3는 릴리스
+# 메타데이터 자체를 Secret(타입 helm.sh/release.v1)으로 저장하므로 helm_release 리소스를
+# plan하는 데도 Secret 읽기가 필요하다 — 그래서 여기서는 "*" 리소스에 대해 읽기만 허용.
+#
+# TF_APPLY_ROLE: cluster-admin(내장 ClusterRole) — Helm 차트가 실제로 무슨 종류의
+# 오브젝트를 만들지(Deployment/DaemonSet/ClusterRole/CRD 등) 미리 다 예측해서 좁은
+# RBAC을 만드는 건 사실상 불가능하고 깨지기 쉽다. 이미 이 role은 IAM 쪽으로
+# iam:*/ec2:*/eks:* 같은 광범위한 쓰기 권한을 갖고 있고(terraform-apply job 주석 참고,
+# 사람 승인 게이트도 없음) 그 신뢰 수준의 자연스러운 연장으로 봄 — 어차피 이 role이
+# 이미 EKS 클러스터 자체를 지우고 새로 만들 수 있다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: team1-tf-plan-readonly
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: team1-tf-plan-readonly
+subjects:
+  - kind: Group
+    name: team1-tf-plan
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: team1-tf-plan-readonly
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: team1-tf-apply-admin
+subjects:
+  - kind: Group
+    name: team1-tf-apply
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
