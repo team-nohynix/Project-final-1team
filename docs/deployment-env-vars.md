@@ -23,8 +23,8 @@
 | 리소스 | 실제 값 |
 |---|---|
 | MSK 브로커(IAM) | `boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098` |
-| RDS 엔진 | MySQL 8.4.10 (`team1-truss-db`) — Postgres 아님, 이미 정정 완료 |
-| RDS 자격증명 | `manage_master_user_password=true` — Secrets Manager가 관리(아래 "미해결" 참고, `recorder` 코드가 아직 이걸 못 읽음) |
+| DB 엔진 | MySQL 8.4 (Docker, EC2 `team1-mysql`/`i-09f1dca7e19bbd3ff`, private IP `10.10.10.178`) — 2026-08-24 RDS(Multi-AZ)에서 자체 호스팅 EC2로 전환 완료 |
+| DB 자격증명 | K8s Secret `recorder-db-secret`(`DATABASE_URL` 키, 완성된 DSN) — Terraform 비관리, 수동 생성/관리(RDS 시절과 동일한 방식) |
 | S3 `team1-truss-market-data` | 생성+Terraform 반영 완료 |
 | S3 `team1-truss-order-records` | 생성+Terraform 반영 완료(trader가 쓸 버킷 — 더 이상 미생성 아님) |
 | S3 `team1-truss-trade-results` | 생성+Terraform 반영 완료(예전엔 드리프트였음 — 이제 해소) |
@@ -126,7 +126,7 @@ CLI 플래그:
 | 이름 | 필수 여부 | 로컬 기본값 | AWS에서 채울 값 |
 |---|---|---|---|
 | `KAFKA_BROKER` | **필수** | — | orderapi/matching과 동일 브로커 |
-| `DATABASE_URL` | **필수** | — | `go-sql-driver/mysql` DSN 형식(**URL 아님**): `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — RDS MySQL 엔드포인트로 채움. `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐. **미해결 항목 있음 — 아래 참고** |
+| `DATABASE_URL` | **필수** | — | `go-sql-driver/mysql` DSN 형식(**URL 아님**): `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — 자체 호스팅 MySQL EC2(`team1-mysql`, `10.10.10.178:3306`) 엔드포인트로 채움. `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐. 값 자체는 `recorder-db-secret` K8s Secret으로 주입(아래 "미해결" 참고 — 지금은 해소됨) |
 | `REDIS_ADDR` | **필수** | — | orderapi/matching과 동일 Redis |
 | `ORDERS_TOPIC` | 선택 | `orders` | 그대로 둠 |
 | `EXECUTIONS_TOPIC` | 선택 | `executions` | 그대로 둠 |
@@ -136,11 +136,11 @@ CLI 플래그:
 | `REDIS_PASSWORD` | 선택 (2026-08-10 추가) | 비움 | orderapi/matching과 동일 값 |
 | `REDIS_TLS_ENABLED` | 선택 (2026-08-11 추가) | `false` | orderapi/matching과 동일 값 |
 
-CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함(`mysql -h<RDS엔드포인트> -u... -p... <db> < schema.sql`).
+CLI 플래그 없음. **DB 스키마는 EC2 MySQL에서는 최초 기동 시 자동 적용됨** — `recorder/schema.sql`이 공식 `mysql` Docker 이미지의 `/docker-entrypoint-initdb.d/` 최초 기동 메커니즘으로 자동 실행된다(`infra/mysql-ec2/docker-compose.yml.tpl` 참고). RDS 시절엔 손으로 최초 1회 적용해야 했지만 이제는 그 단계가 없어졌다. 로컬 `infra/dev-mysql`은 이 메커니즘이 아직 없어 여전히 수동 적용이 필요함(Commands 절 참고).
 
-**`schema.sql` 최초 적용 방법은 [`recorder-schema-bootstrap.md`](recorder-schema-bootstrap.md) 참고** (2026-08-11) — `kubectl run --rm -i` 한 번씩, 두 줄로 DB 생성 + 스키마 적용을 끝낸다(영구 K8s Job/ConfigMap은 한 번만 하는 작업에 안 맞아서 만들었다가 다시 지움). 이미지에서 `schema.sql`만 꺼내는 방법(`docker run --rm --entrypoint cat 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest /app/schema.sql > schema.sql`)도 여전히 가능함.
+**`schema.sql` 수동 적용이 필요했던 RDS 시절 절차는 [`recorder-schema-bootstrap.md`](recorder-schema-bootstrap.md)에 역사적 기록으로만 남아 있음** — 지금 프로덕션(EC2)에는 적용되지 않는다.
 
-**미해결: `DATABASE_URL`의 비밀번호를 어떻게 채울지 아직 코드로 안 풀림.** `infra/irsa.tf`의 `sa-recorder` 역할에 `secretsmanager:GetSecretValue`가 RDS의 마스터 유저 시크릿 ARN으로 스코프되어 이미 붙어 있다 — RDS가 `manage_master_user_password=true`(AWS가 Secrets Manager로 비밀번호를 자동 관리)로 만들어졌기 때문이다. 그런데 `recorder/config.go`는 지금 `DATABASE_URL`을 완성된 DSN 문자열 그대로 `os.Getenv`로만 읽고, Secrets Manager를 호출하는 코드가 전혀 없다. IAM 권한이 이미 이렇게 좁게 스코프되어 있다는 건 "recorder가 직접 Secrets Manager를 호출해서 비밀번호를 가져와야 한다"는 설계를 전제한 것으로 보이는데, 그 부분이 아직 구현되지 않았다. 배포 전에 다음 중 하나를 정해야 한다: (a) `recorder`에 AWS SDK v2로 `secretsmanager:GetSecretValue`를 호출해 DSN을 완성하는 로직을 추가(예: `DB_SECRET_ARN` 환경변수 + 나머지 host/port/dbname은 별도 값), 또는 (b) 배포 파이프라인이 미리 시크릿 값을 읽어 `DATABASE_URL`을 완성된 문자열로 주입(이 경우 recorder의 IAM 권한 중 `secretsmanager:GetSecretValue`는 불필요해짐). 코드 담당 쪽 결정이 필요해서 여기 표에는 반영하지 않고 이렇게 별도로 남겨둔다.
+**해소됨: `DATABASE_URL`의 비밀번호를 어떻게 채울지에 대한 이전 미해결 항목.** RDS 시절엔 `manage_master_user_password=true`(Secrets Manager 자동 관리) 때문에 `recorder`가 직접 Secrets Manager를 호출해야 하는지가 불분명했다. 지금은 RDS 자체가 없으므로 그 경로는 더 이상 해당 없음 — `DATABASE_URL`은 완성된 DSN 문자열 그대로 `recorder-db-secret`이라는 K8s Secret에 담겨 있고, `recorder/config.go`는 여전히 이걸 `os.Getenv`로만 읽는다(코드 변경 없음). 이 Secret은 Terraform이 아니라 수동으로 생성/관리하며, `secretsmanager:GetSecretValue` 같은 IAM 권한은 이제 불필요하다.
 
 ---
 
@@ -155,7 +155,7 @@ CLI 플래그 없음. **DB 스키마는 자동 마이그레이션이 없음** �
 | `orderapi` | `...team1-truss:orderapi-latest` | 위 2번 표 env — HTTP 서버, `PORT` 포트로 리슨 |
 | `matching` | `...team1-truss:matching-latest` | 위 3번 표 env — 포트 없음, Kafka/Redis만 |
 | `replayengine` | `...team1-truss:replayengine-latest` | 위 5번 표 env + CLI 인자 — **1회성 실행**(Job), 완료 후 종료 |
-| `recorder` | `...team1-truss:recorder-latest` | 위 6번 표 env — 포트 없음, Kafka/Redis/RDS만 |
+| `recorder` | `...team1-truss:recorder-latest` | 위 6번 표 env — 포트 없음, Kafka/Redis/MySQL(EC2)만 |
 
 `ENTRYPOINT`가 바이너리 자체이므로(예: `ENTRYPOINT ["/app/trader"]`) CLI 플래그는 K8s manifest의 `args`로, 연결 정보는 `env`로 각각 넘기면 된다 — 이 문서의 표 구분(플래그 vs 환경변수)이 그대로 `args`/`env` 구분과 일치한다. `trader`/`replayengine`은 `Job`으로(완료 후 종료가 정상), 나머지 넷은 `Deployment`로 띄우는 게 맞다(상시 실행).
 
