@@ -63,7 +63,7 @@ func systemStatusHandler(redisClient *redis.Client, kafkaDialer *kafka.Dialer, k
 			// 살아있다는 증거입니다 — 별도 확인이 필요 없습니다.
 			{Name: "주문 접수 API", Status: "up"},
 			{Name: "Kafka 브로커", Status: boolStatus(checkKafka(ctx, kafkaDialer, kafkaBroker, ordersTopic))},
-			{Name: "매칭 엔진", Status: boolStatus(checkHTTPReachable(ctx, matchingEngineMetricsURL))},
+			{Name: "매칭 엔진", Status: boolStatus(checkHTTPReachable(ctx, matchingEngineMetricsURL, recorderHTTPClient))},
 			{Name: "MySQL", Status: boolStatus(checkRecorderHealth(ctx, recorderURL, recorderHTTPClient))},
 			{Name: "Redis 캐시", Status: boolStatus(redisClient.Ping(ctx).Err() == nil)},
 		}
@@ -116,14 +116,21 @@ func checkKafka(ctx context.Context, dialer *kafka.Dialer, broker, topic string)
 	return true
 }
 
-func checkHTTPReachable(ctx context.Context, url string) bool {
+// client는 호출부(systemStatusHandler)가 이미 갖고 있는 recorderHTTPClient를
+// 그대로 받습니다 — 2026-08-24, http.DefaultClient를 쓰던 걸 바꿈. 이
+// 핸들러가 10초마다 폴링되는 저빈도 호출이라 실제 위험은 낮지만, 이
+// 프로젝트가 예전에 커넥션 풀 설정 없는 기본 클라이언트 때문에 실제 장애를
+// 겪은 적이 있어서(trader/client의 MaxIdleConnsPerHost 사고, CLAUDE.md 참고)
+// 이 핸들러 안에서 나가는 외부 호출은 한 클라이언트로 통일해두는 쪽이 낫다고
+// 판단.
+func checkHTTPReachable(ctx context.Context, url string, client *http.Client) bool {
 	checkCtx, cancel := context.WithTimeout(ctx, systemStatusCheckTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
