@@ -59,8 +59,15 @@ spec:
                 --bootstrap-server "$BOOTSTRAP_BROKERS" \
                 --command-config /tmp/client.properties --list
           env:
+            # 2026-08-24: MSK 재생성 때마다 바뀌는 값이라 리터럴 대신 terraform이
+            # 관리하는 ConfigMap(infra/k8s-addons.tf의 backend-cluster-config)을
+            # 참조한다 — EKS 전체 destroy→apply 리허설 중 하드코딩 탓에 토픽
+            # 생성이 전부 실패했던 것을 보고 고침.
             - name: BOOTSTRAP_BROKERS
-              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-cluster-config
+                  key: KAFKA_BROKER
           volumeMounts:
             - name: jars
               mountPath: /jars

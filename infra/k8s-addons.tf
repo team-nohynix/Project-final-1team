@@ -11,6 +11,26 @@ resource "kubernetes_namespace" "backend" {
   }
 }
 
+# backend-cluster-config — MSK Serverless의 부트스트랩 브로커 주소를 담는다
+# (2026-08-24, EKS 전체 destroy→apply 리허설 중 발견해서 추가). 이 주소는
+# `boot-<임의 해시>.c1.kafka-serverless...` 형태로 클러스터를 새로 만들 때마다
+# 바뀌는데, orderapi/matching-engine/recorder-deployment.yaml과
+# kafka-admin-job.yaml 4곳에 리터럴 문자열로 박혀 있어서 MSK를 재생성할 때마다
+# 전부 손으로 고쳐야 했다(실제로 리허설 중 이것 때문에 전부 연결 실패했음).
+# recorder-db-secret과 같은 이유로 kubernetes_config_map으로 옮겨서, 그
+# 4개 매니페스트는 이제 리터럴 값 대신 이 ConfigMap을 참조한다 — terraform
+# apply 한 번이면 항상 최신 브로커 주소로 맞춰진다.
+resource "kubernetes_config_map" "backend_cluster_config" {
+  metadata {
+    name      = "backend-cluster-config"
+    namespace = kubernetes_namespace.backend.metadata[0].name
+  }
+
+  data = {
+    KAFKA_BROKER = aws_msk_serverless_cluster.team1_truss.bootstrap_brokers_sasl_iam
+  }
+}
+
 # 클러스터 부트스트랩용 Helm 애드온(KEDA/kube-state-metrics/node-exporter) — 원래
 # `helm install`로 손으로 설치돼 있던 것을 "EKS 클러스터를 통째로 지웠다 올려도
 # 원상복구되게"(2026-08-24, 사용자 요청) terraform으로 옮겼다. alb-controller.tf의
