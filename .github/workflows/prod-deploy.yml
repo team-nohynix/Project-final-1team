@@ -137,8 +137,16 @@ jobs:
   # --- 시세 수집기(backend) — Deployment "backend", namespace collector ---
 
   build-push-backend:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.backend == 'true'
+    # bootstrap-k8s(workflow_dispatch "전체 복구" 전용)를 기다린다 — 평소 push엔
+    # bootstrap-k8s가 애초에 안 도니(skipped) 거의 지연 없이 통과하고, "전체 복구"
+    # 때는 이 kubectl apply가 필요로 하는 ci-deploy-rbac.yaml이 먼저 적용돼 있어야
+    # 한다(2026-08-24, EKS 전체 destroy→apply 리허설 중 발견 — bootstrap-k8s가
+    # terraform-apply "다음"에만 돌게 해뒀더니, 정작 이 kubectl apply 쪽이 그보다
+    # 먼저 실행되면서 RBAC 없이 막혔다).
+    needs: [detect-changes, bootstrap-k8s]
+    if: |
+      needs.detect-changes.outputs.backend == 'true' &&
+      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -173,8 +181,11 @@ jobs:
   # --- 접수 API(orderapi) — Deployment "orderapi", namespace backend ------
 
   build-push-orderapi:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.orderapi == 'true'
+    # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
+    needs: [detect-changes, bootstrap-k8s]
+    if: |
+      needs.detect-changes.outputs.orderapi == 'true' &&
+      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -209,8 +220,11 @@ jobs:
   # --- 매칭 엔진(matching) — Deployment "matching-engine", namespace backend
 
   build-push-matching:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.matching == 'true'
+    # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
+    needs: [detect-changes, bootstrap-k8s]
+    if: |
+      needs.detect-changes.outputs.matching == 'true' &&
+      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -245,8 +259,11 @@ jobs:
   # --- 기록기(recorder) — Deployment "recorder", namespace backend --------
 
   build-push-recorder:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.recorder == 'true'
+    # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
+    needs: [detect-changes, bootstrap-k8s]
+    if: |
+      needs.detect-changes.outputs.recorder == 'true' &&
+      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -418,7 +435,10 @@ jobs:
   # 트리거하는 권한을 그대로 쓰는 것.
   bootstrap-k8s:
     needs: [terraform-apply]
-    if: github.event_name == 'workflow_dispatch'
+    # 커스텀 if 조건을 쓰면 GitHub Actions가 기본 success() 체크를 자동으로 같이
+    # 걸어주지 않는다 — needs.terraform-apply.result == 'success'를 명시해야
+    # terraform-apply가 실패했는데도 이 job이 그냥 도는 걸 막을 수 있다.
+    if: github.event_name == 'workflow_dispatch' && needs.terraform-apply.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
