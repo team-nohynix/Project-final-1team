@@ -816,8 +816,8 @@ function drawFlowFrame() {
     ctx.fillStyle = 'rgba(15,26,40,0.9)'
     flowRoundRect(ctx, bx, by, bw, bh, 7)
     ctx.fill()
-    ctx.strokeStyle = ok ? 'rgba(159,176,194,0.35)' : '#ff5c7a'
-    ctx.lineWidth = ok ? 1.3 : 1.8
+    ctx.strokeStyle = ok ? '#2ed39a' : '#ff5c7a'
+    ctx.lineWidth = ok ? 1.6 : 1.8
     ctx.stroke()
     ctx.fillStyle = '#e8f1fb'
     ctx.textAlign = 'center'
