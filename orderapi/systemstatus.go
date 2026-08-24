@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -82,7 +83,15 @@ func fetchPodCounts(ctx context.Context, deployments appsv1.DeploymentInterface)
 	for _, name := range podDeployments {
 		dep, err := deployments.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			continue // 조회 실패한 배포는 응답에서 그냥 빠짐 — 나머지는 정상 표시
+			// 조회 실패한 배포는 응답에서 그냥 빠짐(나머지는 정상 표시) —
+			// 다만 로그는 남긴다. RBAC resourceNames 범위(infra/k8s/backend/
+			// orderapi-matching-restart-rbac.yaml)를 안 넓히고 podDeployments에
+			// 이름만 추가하면 매번 여기서 Forbidden으로 조용히 빠지는데,
+			// 로그가 없으면 "pods가 왜 비어있지"를 원인 추적하기 어렵다
+			// (2026-08-24 실측 — orderapi/recorder를 RBAC에 안 넣고 배포해서
+			// matching-engine만 나오던 걸 이 로그 없이 알아챔).
+			log.Printf("시스템 상태 — 파드 수 조회 실패 (deployment=%s): %v", name, err)
+			continue
 		}
 		out[name] = podCounts{Ready: dep.Status.ReadyReplicas, Desired: dep.Status.Replicas}
 	}
