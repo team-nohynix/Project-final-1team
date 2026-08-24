@@ -215,7 +215,7 @@ LLM을 쓰지 않는 봇은 매 판단 주기마다 아래 규칙을 그대로 �
 
 ### Claude 연동 (AWS Bedrock)
 
-판단 로직은 Claude를 호출해 방향 신호를 만든다. 팀이 이미 AWS 인프라(EKS·S3·RDS·ElastiCache)를 사용 중이므로, Anthropic에 별도로 결제하는 대신 **AWS Bedrock**을 경유해 호출한다.
+판단 로직은 Claude를 호출해 방향 신호를 만든다. 팀이 이미 AWS 인프라(EKS·S3·MySQL(EC2)·ElastiCache)를 사용 중이므로, Anthropic에 별도로 결제하는 대신 **AWS Bedrock**을 경유해 호출한다.
 
 - EKS 파드에 IRSA(IAM Roles for Service Accounts)로 부여된 역할로 인증하며, API 키를 코드나 설정 파일에 남기지 않는다(NFR-18). 파드 단위로 권한을 부여하므로 EC2 인스턴스 프로필보다 최소 권한 원칙에 가깝다
 - 기본 모델은 `claude-sonnet-5`(Bedrock 모델 ID: `anthropic.claude-sonnet-5`)이며, 호출량 대비 비용이 부담되면 `claude-haiku-4-5`로 낮춘다

@@ -119,34 +119,11 @@ resource "aws_security_group" "team1_sg_msk" {
   }
 }
 
-resource "aws_security_group" "team1_sg_rds" {
-  name = "team1-sg-rds"
-  # description은 SG를 ForceNew(전체 교체)시키는 필드라 엔진명이 바뀌어도 여기선 안 건드린다
-  # — RDS가 이 SG에 이미 붙어 있으면 ENI 분리 권한 문제로 교체 자체가 실패한다.
-  description = "team1 RDS (PostgreSQL) - backend node group (recorder) only"
-  vpc_id      = aws_vpc.team1_vpc.id
-
-  ingress {
-    description     = "recorder to RDS write"
-    from_port       = 3306
-    to_port         = 3306
-    protocol        = "tcp"
-    security_groups = [aws_security_group.team1_sg_eks_backend.id]
-  }
-
-  egress {
-    description = "allow all outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Team = "team1"
-    Name = "team1-sg-rds"
-  }
-}
+# 2026-08-24: RDS(team1-truss-db)를 삭제하고 EC2 자체 호스팅 MySQL로 옮기면서
+# (root 스택 mysql-ec2.tf) team1_sg_rds가 완전히 orphan이 됐다 — 새 인스턴스는
+# 별도 전용 SG(team1_sg_mysql_ec2, mysql-ec2.tf)를 쓴다. 이 SG를 참조하는
+# 리소스가 하나도 안 남아서(outputs.tf의 security_group_ids.rds 출력도 같이
+# 지움) 통째로 제거한다.
 
 resource "aws_security_group" "team1_sg_redis" {
   name        = "team1-sg-redis"

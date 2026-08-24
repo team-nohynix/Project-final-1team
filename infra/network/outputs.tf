@@ -20,7 +20,6 @@ output "security_group_ids" {
     eks_cluster        = aws_security_group.team1_sg_eks_cluster.id
     eks_backend        = aws_security_group.team1_sg_eks_backend.id
     msk                = aws_security_group.team1_sg_msk.id
-    rds                = aws_security_group.team1_sg_rds.id
     redis              = aws_security_group.team1_sg_redis.id
     alb_public         = aws_security_group.team1_sg_alb_public.id
     lambda_job_trigger = aws_security_group.team1_sg_lambda_job_trigger.id

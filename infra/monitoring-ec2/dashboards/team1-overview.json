@@ -1569,7 +1569,7 @@
     },
     {
       "id": 210,
-      "title": "MySQL CPU% (RDS)",
+      "title": "MySQL CPU% (EC2)",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -1609,10 +1609,10 @@
       "targets": [
         {
           "region": "ap-northeast-2",
-          "namespace": "AWS/RDS",
+          "namespace": "AWS/EC2",
           "metricName": "CPUUtilization",
           "dimensions": {
-            "DBInstanceIdentifier": "team1-truss-db-instance-1"
+            "InstanceId": "i-09f1dca7e19bbd3ff"
           },
           "statistic": "Average",
           "refId": "A",
