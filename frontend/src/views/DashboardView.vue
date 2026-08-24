@@ -9,9 +9,15 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 //   여기 없습니다). 이 핸들러는 Redis 캐시(10초 주기 갱신)를 읽으므로
 //   폴링해도 매번 새로 MySQL을 때리지 않습니다(recorder/server.go 주석 참고,
 //   과거 RDS CPU 포화 사고가 이 캐시가 생긴 이유).
-// - 시스템 구성요소 상태: orderapi GET /v1/system-status (2026-08-24 신규,
-//   orderapi/systemstatus.go) — API/Kafka/매칭엔진/MySQL/Redis 각각을 얕게
-//   확인합니다.
+// - 시스템 구성요소 상태 + 실시간 처리 흐름(파이프라인 다이어그램, 그라파나
+//   "Team1 AI Trader" 대시보드의 것을 이 화면에도 반영): orderapi GET
+//   /v1/system-status (2026-08-24, orderapi/systemstatus.go) — API/Kafka/
+//   매칭엔진/MySQL/Redis 얕은 헬스체크 + orderapi/matching-engine/recorder
+//   파드 레플리카 수(ready/desired). 시세 수집기/AI 트레이더는 별도 헬스체크
+//   대상이 없는 배치성 워크로드라 세션 가드(last-run)의 owner=trader로
+//   대신 표시합니다.
+// - 실행 상태(페이퍼 트레이딩/리플레이 진행 여부, 안 돌고 있으면 최근 실행
+//   요약): orderapi GET /v1/sessions/last-run.
 // - 데이터 정합성 검사: 가장 최근 시뮬레이션(replayengine) 실행 하나의
 //   결과만 보여줍니다(실시간 누적 아님) — orderapi GET /v1/sessions/last-run
 //   으로 그 실행의 owner/startedAt/endedAt/date를 얻고, 그 구간으로
@@ -25,6 +31,9 @@ const POLL_INTERVAL_MS = 10000
 
 const metrics = ref(null)
 const systemStatus = ref(null)
+const pods = ref({})
+const lastRun = ref(null)
+const lastRunFound = ref(false)
 const loadError = ref('')
 
 const integrityData = ref(null)
@@ -300,11 +309,28 @@ async function fetchSystemStatus() {
   if (!res.ok) throw new Error(`상태 조회 실패: ${res.status}`)
   const data = await res.json()
   systemStatus.value = data.components
+  pods.value = data.pods || {}
+}
+
+// 실행 상태 패널 + 실시간 처리 흐름의 "시세 수집기"/"AI 트레이더" 노드가
+// 같이 씁니다 — 세션 가드(orderapi/session) 덕분에 이 last-run 하나가 지금
+// 뭐가 돌고 있는지(IN_PROGRESS) 또는 가장 최근에 뭐가 끝났는지를 항상
+// 정확히 알려줍니다(동시 실행 불가 원칙 참고).
+async function fetchLastRun() {
+  const res = await fetch('/order-api/v1/sessions/last-run')
+  if (res.status === 404) {
+    lastRun.value = null
+    lastRunFound.value = false
+    return
+  }
+  if (!res.ok) throw new Error(`실행 상태 조회 실패: ${res.status}`)
+  lastRun.value = await res.json()
+  lastRunFound.value = true
 }
 
 async function refresh() {
   try {
-    await Promise.all([fetchDashboardMetrics(), fetchSystemStatus()])
+    await Promise.all([fetchDashboardMetrics(), fetchSystemStatus(), fetchLastRun()])
     loadError.value = ''
   } catch (e) {
     // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
@@ -322,17 +348,97 @@ async function refresh() {
   }
 }
 
+// ---- 실행 상태 (페이퍼 트레이딩 / 리플레이) ----
+const RUN_STATUS_LABELS = {
+  IN_PROGRESS: '실행 중',
+  COMPLETED: '완료',
+  STOPPED: '중지됨',
+  FAILED: '실패',
+}
+const RUN_OWNER_LABELS = {
+  trader: '페이퍼 트레이딩',
+  replayengine: '리플레이(주문 재생)',
+}
+
+const isRunInProgress = computed(() => lastRunFound.value && lastRun.value?.status === 'IN_PROGRESS')
+const runTypeLabel = computed(() => RUN_OWNER_LABELS[lastRun.value?.owner] || lastRun.value?.owner || '-')
+const runStatusLabel = computed(() => RUN_STATUS_LABELS[lastRun.value?.status] || lastRun.value?.status || '-')
+
+// 실시간 경과 시간 표시용 — POLL_INTERVAL_MS(10초)보다 자주 갱신해야 "실행
+// 중" 배지의 경과 시간이 그럴듯하게 흐르므로 별도의 1초 틱을 둔다. 서버에
+// 다시 묻지 않고 클라이언트 시계로만 계산하는 값이라 폴링과는 무관하다.
+const nowTick = ref(Date.now())
+let tickTimer = null
+
+function formatElapsed(startedAt) {
+  if (!startedAt) return '-'
+  const ms = nowTick.value - new Date(startedAt).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return '-'
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  return h > 0 ? `${h}시간 ${m}분 ${s}초` : m > 0 ? `${m}분 ${s}초` : `${s}초`
+}
+
+const runElapsed = computed(() => (isRunInProgress.value ? formatElapsed(lastRun.value.startedAt) : '-'))
+
+function formatKST(iso) {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleString('ko-KR', { hour12: false })
+}
+
+// ---- 실시간 처리 흐름 (Grafana "Team1 AI Trader - 실시간 메트릭"의
+// 파이프라인 다이어그램을 이 화면에도 반영, 2026-08-24) ----
+// 시세 수집기/AI 트레이더는 별도 헬스체크 엔드포인트가 없어(둘 다 세션이
+// 끝나면 파드/Job 자체가 사라지는 배치성 워크로드라 "지금 떠 있는 파드"로
+// 헬스체크할 대상이 없음), 세션 가드(last-run)의 owner=trader 여부로
+// 대신합니다 — 페이퍼 트레이딩이 진행 중이면 이 둘도 당연히 진행 중입니다.
+const traderRunning = computed(() => isRunInProgress.value && lastRun.value?.owner === 'trader')
+
+function componentStatusOf(name) {
+  const c = systemStatus.value?.find((x) => x.name === name)
+  return c?.status || null
+}
+const flowUp = (name) => componentStatusOf(name) === 'up'
+
+function podLabel(deploymentName) {
+  const p = pods.value?.[deploymentName]
+  if (!p) return null
+  return `${p.ready}/${p.desired}`
+}
+
+const flowNodes = computed(() => [
+  { key: 'collector', label: '시세 수집기', sub: 'backend(배치)', ok: traderRunning.value, podLabel: null },
+  { key: 'trader', label: 'AI 트레이더', sub: 'trader(Job)', ok: traderRunning.value, podLabel: null },
+  { key: 'orderapi', label: '접수', sub: 'orderapi', ok: flowUp('주문 접수 API'), podLabel: podLabel('orderapi') },
+  { key: 'orders-topic', label: 'Orders 토픽', sub: 'Kafka', ok: flowUp('Kafka 브로커'), podLabel: null },
+  { key: 'matching', label: '매칭 엔진', sub: 'matching-engine', ok: flowUp('매칭 엔진'), podLabel: podLabel('matching-engine') },
+  { key: 'exec-topic', label: 'Executions 토픽', sub: 'Kafka', ok: flowUp('Kafka 브로커'), podLabel: null },
+  { key: 'recorder', label: '기록기', sub: 'recorder', ok: flowUp('MySQL'), podLabel: podLabel('recorder') },
+  { key: 'mysql', label: 'MySQL', sub: 'trade_order', ok: flowUp('MySQL'), podLabel: null },
+])
+
 let pollTimer = null
 
 onMounted(() => {
   refresh()
   pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS)
+  tickTimer = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
 })
 
 onBeforeUnmount(() => {
   if (pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+  if (tickTimer !== null) {
+    clearInterval(tickTimer)
+    tickTimer = null
   }
 })
 </script>
@@ -350,6 +456,48 @@ onBeforeUnmount(() => {
         실시간
       </div>
     </header>
+
+    <section class="panel flow-panel">
+      <h3>실시간 처리 흐름</h3>
+      <div class="flow-row">
+        <template v-for="(node, i) in flowNodes" :key="node.key">
+          <div class="flow-node" :class="{ down: !node.ok }">
+            <span class="flow-dot" :style="{ backgroundColor: node.ok ? '#2ed39a' : '#ff5c7a' }"></span>
+            <div class="flow-label">{{ node.label }}</div>
+            <div class="flow-sub">{{ node.sub }}</div>
+            <div v-if="node.podLabel" class="flow-pods">파드 {{ node.podLabel }}</div>
+          </div>
+          <div v-if="i < flowNodes.length - 1" class="flow-arrow">→</div>
+        </template>
+      </div>
+      <div class="flow-rates">
+        <span><i class="order-color"></i>접수 {{ metrics ? displayValue(metrics.orderAcceptTps, 1) : '--' }}/s</span>
+        <span><i class="execution-color"></i>체결 {{ metrics ? displayValue(metrics.executionTps, 1) : '--' }}/s</span>
+      </div>
+    </section>
+
+    <section class="panel run-status-panel">
+      <h3>실행 상태</h3>
+      <div v-if="isRunInProgress" class="run-status-row run-active">
+        <span class="run-badge running">실행 중</span>
+        <div class="run-status-text">
+          <strong>{{ runTypeLabel }}</strong>
+          <span>시작 {{ formatKST(lastRun.startedAt) }} · 경과 {{ runElapsed }}</span>
+        </div>
+      </div>
+      <div v-else-if="lastRunFound" class="run-status-row">
+        <span class="run-badge">종료됨</span>
+        <div class="run-status-text">
+          <strong>최근 실행: {{ runTypeLabel }} — {{ runStatusLabel }}</strong>
+          <span>{{ formatKST(lastRun.startedAt) }} ~ {{ formatKST(lastRun.endedAt) }}</span>
+          <span v-if="lastRun.message" class="run-message">{{ lastRun.message }}</span>
+        </div>
+      </div>
+      <div v-else class="run-status-row">
+        <span class="run-badge">기록 없음</span>
+        <div class="run-status-text"><strong>아직 실행된 적이 없습니다.</strong></div>
+      </div>
+    </section>
 
     <section class="metrics-grid">
       <article v-for="metric in metricCards" :key="metric.label" class="metric-card">
@@ -507,6 +655,126 @@ onBeforeUnmount(() => {
   border-radius: 18px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.flow-panel {
+  margin-bottom: 18px;
+}
+
+.flow-row {
+  display: flex;
+  margin-top: 16px;
+  align-items: stretch;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.flow-node {
+  display: flex;
+  min-width: 108px;
+  padding: 12px 10px;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  background: #11243a;
+  border: 1px solid #20344b;
+  border-radius: 10px;
+}
+
+.flow-node.down {
+  border-color: #ff5c7a;
+}
+
+.flow-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.flow-label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.flow-sub {
+  color: #71869c;
+  font-size: 10px;
+}
+
+.flow-pods {
+  color: #8ea2b8;
+  font-size: 10px;
+}
+
+.flow-arrow {
+  display: flex;
+  align-items: center;
+  color: #3478f6;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.flow-rates {
+  display: flex;
+  margin-top: 14px;
+  gap: 18px;
+  color: #8ea2b8;
+  font-size: 12px;
+}
+
+.flow-rates span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-rates i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.run-status-panel {
+  margin-bottom: 18px;
+}
+
+.run-status-row {
+  display: flex;
+  margin-top: 14px;
+  align-items: center;
+  gap: 14px;
+}
+
+.run-badge {
+  padding: 6px 14px;
+  color: #8ea2b8;
+  background: #11243a;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.run-badge.running {
+  color: #0d1b2a;
+  background: #2ed39a;
+}
+
+.run-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+
+.run-status-text span {
+  color: #8ea2b8;
+  font-size: 12px;
+}
+
+.run-message {
+  color: #ffb84d !important;
 }
 
 .metrics-grid {

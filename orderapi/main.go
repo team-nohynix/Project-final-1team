@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"k8s.io/client-go/kubernetes"
+	appsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	"k8s.io/client-go/rest"
 
 	"orderapi/backpressure"
@@ -110,17 +111,6 @@ func main() {
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 
-	// GET /v1/system-status(2026-08-24, systemstatus.go 참고) — 프론트
-	// DashboardView "시스템 구성요소 상태" 패널. 이 조회 전용 Kafka Dialer는
-	// resetMatchingEngineBookHandler의 것(K8s in-cluster 접근이 성공해야만
-	// 만들어짐)과 달리 항상 만듭니다 — 시스템 상태 패널은 K8s 연동 여부와
-	// 무관하게 항상 떠 있어야 하는 기능이라서입니다.
-	statusKafkaDialer, err := kafkaclient.NewDialer(ctx, cfg.KafkaUseIAMAuth)
-	if err != nil {
-		log.Fatalf("Kafka Dialer 생성 실패 (시스템 상태 확인용): %v", err)
-	}
-	mux.HandleFunc("GET /v1/system-status", systemStatusHandler(redisClient, statusKafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic, cfg.RecorderURL, recorderHTTPClient))
-
 	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
 	// 일괄 정리 자체는 이제 비동기라(2026-08-20, sessioncleanup.go 참고) 이
@@ -148,12 +138,19 @@ func main() {
 	// K8s 클러스터 안에서(서비스어카운트 토큰 마운트된 채로) 돌 때만 성공합니다 —
 	// 로컬 개발 환경에서는 실패하는 게 정상이라 라우트 자체를 등록하지 않고
 	// 넘어갑니다(RECORDER_URL과 같은 선택적 기능 패턴).
+	// deployments는 nil일 수 있습니다(로컬 개발 등 K8s in-cluster 접근이
+	// 안 되는 환경) — reset-matching-engine-book뿐 아니라 아래
+	// systemStatusHandler(파드 레플리카 수)도 이 값을 공유해서 씁니다.
+	// DeploymentInterface는 네임스페이스 단위라 matching-engine 전용이
+	// 아니라 backend 네임스페이스의 어떤 Deployment든(orderapi/recorder
+	// 포함) 조회할 수 있습니다.
+	var deployments appsv1.DeploymentInterface
 	if k8sCfg, err := rest.InClusterConfig(); err != nil {
-		log.Printf("K8s in-cluster config 획득 실패 — POST /v1/admin/reset-matching-engine-book 비활성화 (로컬 개발 환경이면 정상): %v", err)
+		log.Printf("K8s in-cluster config 획득 실패 — POST /v1/admin/reset-matching-engine-book 비활성화, 시스템 상태의 파드 수도 비활성화 (로컬 개발 환경이면 정상): %v", err)
 	} else if clientset, err := kubernetes.NewForConfig(k8sCfg); err != nil {
 		log.Printf("K8s 클라이언트 생성 실패 — POST /v1/admin/reset-matching-engine-book 비활성화: %v", err)
 	} else {
-		deployments := clientset.AppsV1().Deployments(matchingEngineNamespace)
+		deployments = clientset.AppsV1().Deployments(matchingEngineNamespace)
 		// force=true 워터마크 강제 설정(adminreset.go의 forceResetWatermarksToLatest)이
 		// orders 토픽 파티션의 최신 오프셋을 직접 읽어야 해서, 프로듀서(producer)와는
 		// 별개로 순수 조회용 Dialer가 필요합니다 — kafkaClient.NewDialer가 useIAM=false면
@@ -166,6 +163,17 @@ func main() {
 		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", resetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
 		log.Printf("K8s 연동 활성화 — POST /v1/admin/reset-matching-engine-book 사용 가능 (namespace=%s, deployment=%s)", matchingEngineNamespace, matchingEngineDeploymentName)
 	}
+
+	// GET /v1/system-status(2026-08-24, systemstatus.go 참고) — 프론트
+	// DashboardView "시스템 구성요소 상태" + "실시간 처리 흐름" 패널. 이
+	// 조회 전용 Kafka Dialer는 위 reset-matching-engine-book의 것(K8s
+	// in-cluster 접근이 성공해야만 만들어짐)과 달리 항상 만듭니다 — 상태
+	// 패널 자체는 K8s 연동 여부와 무관하게 항상 떠 있어야 하는 기능이라서입니다.
+	statusKafkaDialer, err := kafkaclient.NewDialer(ctx, cfg.KafkaUseIAMAuth)
+	if err != nil {
+		log.Fatalf("Kafka Dialer 생성 실패 (시스템 상태 확인용): %v", err)
+	}
+	mux.HandleFunc("GET /v1/system-status", systemStatusHandler(redisClient, statusKafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic, cfg.RecorderURL, recorderHTTPClient, deployments))
 
 	// ORDER_RECORDS_BUCKET이 비어있으면(로컬 개발 등) trader/replayengine과
 	// 같은 기본값 규칙으로 로컬 ./orders 디렉터리를 읽습니다 — config.go 참고.

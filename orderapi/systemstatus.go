@@ -7,6 +7,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	kafka "github.com/segmentio/kafka-go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	appsv1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 )
 
 // systemStatusCheckTimeout은 구성요소 하나를 확인하는 데 쓰는 상한입니다 —
@@ -28,12 +30,30 @@ type componentStatus struct {
 	Status string `json:"status"` // "up" | "down"
 }
 
+// podCounts는 DashboardView "실시간 처리 흐름" 패널이 각 노드 아래 "레플리카
+// N개"를 표시하는 데 씁니다 — Ready는 지금 실제로 트래픽을 받을 준비가 된
+// 파드 수, Desired는 Deployment가 지금 맞추려는 목표 수(KEDA가 오토스케일링
+// 중이면 그 시점의 목표치)입니다.
+type podCounts struct {
+	Ready   int32 `json:"ready"`
+	Desired int32 `json:"desired"`
+}
+
+// podDeployments는 podCounts를 채울 때 조회할 Deployment 이름 목록입니다 —
+// infra/k8s/backend/*-deployment.yaml의 metadata.name과 반드시 같아야 합니다.
+var podDeployments = []string{"orderapi", "matching-engine", "recorder"}
+
 // systemStatusHandler는 GET /v1/system-status를 처리합니다 — 프론트
-// DashboardView의 "시스템 구성요소 상태" 패널(주문 접수 API/Kafka 브로커/매칭
-// 엔진/MySQL/Redis 캐시)을 지원합니다. 각 구성요소를 얕게(연결/응답 가능
-// 여부만) 확인합니다 — 이 엔드포인트 자체가 상태 대시보드용이라, 확인 로직이
-// 무거워지면 그 자체가 또 다른 부하 원인이 되므로 일부러 얕게 유지합니다.
-func systemStatusHandler(redisClient *redis.Client, kafkaDialer *kafka.Dialer, kafkaBroker, ordersTopic, recorderURL string, recorderHTTPClient *http.Client) http.HandlerFunc {
+// DashboardView의 "시스템 구성요소 상태" + "실시간 처리 흐름" 패널(주문 접수
+// API/Kafka 브로커/매칭 엔진/MySQL/Redis 캐시 상태, 각 구성요소 파드 수)을
+// 지원합니다. 각 구성요소를 얕게(연결/응답 가능 여부만) 확인합니다 — 이
+// 엔드포인트 자체가 상태 대시보드용이라, 확인 로직이 무거워지면 그 자체가
+// 또 다른 부하 원인이 되므로 일부러 얕게 유지합니다.
+//
+// deployments는 nil일 수 있습니다(main.go 참고, K8s in-cluster 접근이 안
+// 되는 로컬 개발 환경) — 그 경우 pods는 빈 맵으로 응답합니다(프론트는 그
+// 노드의 레플리카 수를 그냥 "--"로 표시하면 됩니다).
+func systemStatusHandler(redisClient *redis.Client, kafkaDialer *kafka.Dialer, kafkaBroker, ordersTopic, recorderURL string, recorderHTTPClient *http.Client, deployments appsv1.DeploymentInterface) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -47,8 +67,26 @@ func systemStatusHandler(redisClient *redis.Client, kafkaDialer *kafka.Dialer, k
 			{Name: "Redis 캐시", Status: boolStatus(redisClient.Ping(ctx).Err() == nil)},
 		}
 
-		writeJSON(w, http.StatusOK, map[string][]componentStatus{"components": components})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"components": components,
+			"pods":       fetchPodCounts(ctx, deployments),
+		})
 	}
+}
+
+func fetchPodCounts(ctx context.Context, deployments appsv1.DeploymentInterface) map[string]podCounts {
+	out := make(map[string]podCounts, len(podDeployments))
+	if deployments == nil {
+		return out
+	}
+	for _, name := range podDeployments {
+		dep, err := deployments.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			continue // 조회 실패한 배포는 응답에서 그냥 빠짐 — 나머지는 정상 표시
+		}
+		out[name] = podCounts{Ready: dep.Status.ReadyReplicas, Desired: dep.Status.Replicas}
+	}
+	return out
 }
 
 func boolStatus(ok bool) string {
