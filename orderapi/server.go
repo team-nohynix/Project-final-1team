@@ -131,6 +131,7 @@ func acceptOrderHandler(store *order.Store, idem *idempotency.Store, producer ka
 			// 특정하지 않습니다 — 클라이언트 입장에선 원인이 뭐든 "잠시 후 재시도"가
 			// 동일한 대응이라 구분해서 알려줄 실익도 없습니다.
 			ordersTotalCounter.WithLabelValues("rejected_backpressure").Inc()
+			recordDroppedOrder()
 			writeError(w, reqID, http.StatusTooManyRequests, "CONSUMER_LAG_EXCEEDED", "시스템이 처리 지연 중입니다. 잠시 후 다시 시도해주세요.")
 			return
 		}

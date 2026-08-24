@@ -110,6 +110,7 @@ func main() {
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(sessionStore, producer, recorderHTTPClient, cfg.RecorderURL, matchingLagChecker))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
+	mux.HandleFunc("GET /v1/metrics/dropped-orders", droppedOrdersHandler())
 
 	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —
 	// cleanupUnresolvedOrders(세션 종료 자동 정리)와 같은 전제(config.go 참고).
