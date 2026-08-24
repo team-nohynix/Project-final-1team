@@ -16,7 +16,7 @@
 2. ~~설계 문서가 RDS를 PostgreSQL로 설계해뒀던 것~~ — **RDS는 MySQL(Multi-AZ DB 클러스터)로 적용 완료.**
 3. ~~설계 문서가 EKS를 역할별 3개 클러스터로 분리해뒀던 것~~ — 멘토링 반려 후 **단일 EKS 클러스터**(관리형 노드그룹 + Fargate Profile 3종으로 워크로드만 격리)로 재설계·적용 완료.
 
-이 문서 작성 시점엔 **VPC(퍼블릭 서브넷 1개)와 S3 버킷 2개, IAM 역할 1개뿐**이었지만(아래 "현재 상태" 표는 그 시점 기록), 지금은 EKS/MSK/RDS/ElastiCache/CloudFront가 전부 실제로 적용돼 있다 — 위 안내 배너와 [`../CLAUDE.md`](../CLAUDE.md) 참고.
+이 문서 작성 시점엔 **VPC(퍼블릭 서브넷 1개)와 S3 버킷 2개, IAM 역할 1개뿐**이었지만(아래 "현재 상태" 표는 그 시점 기록), 지금은 EKS/MSK/ElastiCache/CloudFront가 전부 실제로 적용돼 있고, DB는 RDS에서 자체 호스팅 MySQL(EC2)로 전환되어 적용돼 있다 — 위 안내 배너와 [`../CLAUDE.md`](../CLAUDE.md) 참고.
 
 ---
 
@@ -82,12 +82,14 @@
 - **`infra/elasticache.tf`는 `transit_encryption_enabled=true`인데 `auth_token`은 안 둔다** — "TLS는 필수, 비밀번호는 없음" 조합이라, 2026-08-11에 별도로 `REDIS_TLS_ENABLED`를 추가했다(`REDIS_PASSWORD` 하나로는 이 조합을 표현 못 함). 지금 이 인프라 설정대로면 `REDIS_TLS_ENABLED=true`, `REDIS_PASSWORD`는 비워둠.
 - 둘 다 비워두면 인증/TLS 없이 붙는다(로컬과 동일).
 
-## 7. RDS — MySQL (PostgreSQL 아님, 위 "먼저 확인해줄 것" 참고)
+## 7. DB — MySQL, EC2 자체 호스팅 (RDS 아님, 2026-08-24 전환)
 
-- 엔진: **MySQL 8+**.
+- 엔진: **MySQL 8.4**, 공식 `mysql` Docker 이미지로 EC2 인스턴스 위에서 직접 운영(`team1-mysql`, `i-09f1dca7e19bbd3ff`, `m6i.2xlarge`, private IP `10.10.10.178`, `eks_backend` 서브넷).
 - `recorder`가 `DATABASE_URL`로 받는 값은 URL이 아니라 `go-sql-driver/mysql`의 DSN 형식: `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC`.
-- 스키마 자동 마이그레이션 없음 — `recorder/schema.sql`을 RDS에 최초 1회 수동 적용해야 함.
-- **적용된 실제 구성은 Single-AZ가 아니라 Multi-AZ DB 클러스터**(라이터 1 + 리더 2) — 인스턴스 클래스는 `db.m6gd.large`(로컬 NVMe "d" 계열, Multi-AZ 클러스터가 요구).
+- 스키마는 공식 `mysql` 이미지의 `/docker-entrypoint-initdb.d/` 최초 기동 메커니즘으로 자동 적용된다 — RDS 시절처럼 `recorder/schema.sql`을 손으로 최초 1회 적용할 필요가 없다.
+- 자격증명은 `recorder-db-secret`이라는 K8s Secret(`DATABASE_URL` 키, 완성된 DSN)으로 전달 — Terraform 관리 대상이 아니라 RDS 시절과 동일하게 수동으로 생성/관리한다.
+- 네트워크: 보안그룹 `team1_sg_mysql_ec2`가 `eks_backend` 보안그룹에서만 3306을 허용 — RDS 시절과 동일하게 퍼블릭 액세스 없음.
+- **RDS(Multi-AZ DB 클러스터, `db.m6gd.large`)는 2026-08-21에 삭제됐다** — 부하테스트에서 recorder 쓰기량이 CPU를 지속적으로 99%까지 밀어붙이는 걸 실측했고, 이중 비용을 피하려고 기존 RDS부터 먼저 내린 뒤 이 EC2 구성으로 전환했다(상세는 `infra/rds.tf`의 주석 참고).
 
 ## 8. 네트워크 / 컴퓨트
 

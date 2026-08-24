@@ -15,9 +15,9 @@
 
 ## 1. 설계 범위
 
-이 ERD는 [requirements.md](requirements.md) 1.2.1 데이터 흐름에서 **DB(RDS/MySQL)** 저장 대상으로 명시된 데이터만을 다룬다.
+이 ERD는 [requirements.md](requirements.md) 1.2.1 데이터 흐름에서 **DB(MySQL)** 저장 대상으로 명시된 데이터만을 다룬다.
 
-> "기록기가 체결 결과를 DB(RDS/MySQL)에 저장한다. 저장 대상은 페이퍼 트레이딩 이력, 리플레이 이력, 리플레이시 발생하는 체결 결과로 구분해 관리한다" (1.2.1)
+> "기록기가 체결 결과를 DB(MySQL)에 저장한다. 저장 대상은 페이퍼 트레이딩 이력, 리플레이 이력, 리플레이시 발생하는 체결 결과로 구분해 관리한다" (1.2.1)
 
 ### 범위 제외 (다른 저장소로 관리)
 | 데이터 | 저장소 | 제외 사유 |
@@ -26,7 +26,7 @@
 | 리플레이시 발생하는 주문 결과(실시간 조회용) | Redis(ElastiCache) | 조회 API·트레이더·리플레이 엔진이 즉시 읽는 캐시 용도(1.2.1-5) |
 | 업비트 시세 원본(초/분/일/주/월/년 OHLCV, 개별 체결) | S3 | 시계열 원본 데이터, 관계형 모델 대상 아님(1.2.1, FR-14) |
 | 페이퍼 트레이딩 주문 기록 파일 | S3 | 리플레이 입력 파일(FR-17), 파일 형태로 저장 |
-| TPS·컨슈머 랙·응답시간 등 운영 지표, 로그 | 모니터링 스택(Prometheus 등) | 시계열 지표, RDS 대상 아님(FR-21, NFR-16) |
+| TPS·컨슈머 랙·응답시간 등 운영 지표, 로그 | 모니터링 스택(Prometheus 등) | 시계열 지표, DB 저장 대상 아님(FR-21, NFR-16) |
 
 이 ERD가 다루는 것은 **주문·체결·리플레이 실행·엔진 배정**이며, 근거 요구사항은 FR-01\~04(주문), FR-05\~11(매칭·재분배), FR-13(거래 내역 조회), FR-17\~19(주문 기록·리플레이·분산 실행)이다. (트레이더 봇(FR-16)은 봇별 DB 테이블이 아니라 로그/모니터링 스택으로 다루기로 했다 — 4장 참고.)
 
@@ -96,7 +96,7 @@ erDiagram
 매칭 엔진이 체결한 결과(FR-06, FR-09). 매수·매도 주문 번호를 각각 참조해 "체결 결과의 매수·매도 주문 번호가 실제 체결 주문과 일치"(FR-09 검증)를 보장한다. 거래 내역 조회(FR-13)는 이 테이블을 최신순으로 조회한다.
 
 ### MATCHING_ENGINE_ASSIGNMENT
-매칭 엔진 수 증감에 따른 마켓 재분배 이력(FR-11). "한 마켓은 항상 정확히 한 엔진만 담당"(1.2.2) 원칙을 `released_at IS NULL` 조건으로 검증할 수 있다. FR-11은 실제로 구현·검증됐고(`matching/main.go`의 `marketRegistry.Acquire`/`Release`), **2026-08-07부터 실제로 이 테이블에 값이 채워진다**: `matching`이 `Acquire`/`Release` 시점마다 Kafka `assignments` 토픽에 `ASSIGNED`/`RELEASED` 이벤트를 발행하고(`matching/kafkaclient/assignment_producer.go`), 기록기가 그걸 구독해 행을 기록한다(`recorder/store/mysql.go`의 `AssignMarket`/`ReleaseMarket`) — `matching`은 여전히 RDS에 직접 쓰지 않는다(role B는 Kafka 경유만, 팀 결정: "기록기가 모든 DB 입력을 담당"). `REPLAY_ENGINE_MARKET`(제거됨, 4장 참고)과 달리 이 배정은 측정된 부하에 따라 동적으로 정해지므로 사후에 재계산할 수 없어서, 기록해둘 실질적인 가치가 있다.
+매칭 엔진 수 증감에 따른 마켓 재분배 이력(FR-11). "한 마켓은 항상 정확히 한 엔진만 담당"(1.2.2) 원칙을 `released_at IS NULL` 조건으로 검증할 수 있다. FR-11은 실제로 구현·검증됐고(`matching/main.go`의 `marketRegistry.Acquire`/`Release`), **2026-08-07부터 실제로 이 테이블에 값이 채워진다**: `matching`이 `Acquire`/`Release` 시점마다 Kafka `assignments` 토픽에 `ASSIGNED`/`RELEASED` 이벤트를 발행하고(`matching/kafkaclient/assignment_producer.go`), 기록기가 그걸 구독해 행을 기록한다(`recorder/store/mysql.go`의 `AssignMarket`/`ReleaseMarket`) — `matching`은 여전히 DB에 직접 쓰지 않는다(role B는 Kafka 경유만, 팀 결정: "기록기가 모든 DB 입력을 담당"). `REPLAY_ENGINE_MARKET`(제거됨, 4장 참고)과 달리 이 배정은 측정된 부하에 따라 동적으로 정해지므로 사후에 재계산할 수 없어서, 기록해둘 실질적인 가치가 있다.
 
 ## 4. 설계 근거 메모
 
