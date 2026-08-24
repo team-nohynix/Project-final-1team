@@ -1,5 +1,9 @@
 # recorder DB 스키마 최초 적용
 
+> **2026-08-24 갱신: 이 문서의 수동 적용 절차는 더 이상 필요 없다.** 팀이 RDS(`team1-truss-db`)를 삭제하고 자체 호스팅 MySQL EC2(`team1-mysql`, `i-09f1dca7e19bbd3ff`)로 전환하면서, `recorder/schema.sql`을 `infra/mysql-ec2/`가 EC2 위 컨테이너의 `/docker-entrypoint-initdb.d/`에 올려두게 됐다 — 공식 `mysql` Docker 이미지가 데이터 디렉터리가 비어있는 최초 기동에만 이 디렉터리의 파일을 자동 실행하므로, 아래처럼 `kubectl run`으로 손으로 적용할 필요가 없어졌다(RDS는 이 기동 훅을 제공하지 않아서 손으로 해야 했던 것). 아래 내용은 RDS 시절 절차의 역사적 기록으로만 남겨둔다.
+
+## (참고용, RDS 시절 절차 — 더 이상 실행하지 않음)
+
 `recorder`는 스키마를 자동으로 만들지 않는다(마이그레이션 툴 없음, 이 repo의 컨벤션 — `CLAUDE.md` 참고). RDS(`team1-truss-db`, MySQL 8.4)에 딱 한 번, 아래 명령으로 손으로 적용하면 된다. 자동화(K8s Job 등)는 만들지 않기로 했다 — 한 번만 하는 작업에 굳이 유지보수 부담을 지는 상용 파이프라인을 붙일 필요가 없다는 판단.
 
 ## 사전 준비
