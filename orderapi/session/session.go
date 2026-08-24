@@ -51,10 +51,32 @@ var (
 		Name: "session_started_at_timestamp",
 		Help: "현재(또는 가장 최근) 실행이 시작된 유닉스 타임스탬프(초) — 경과시간은 time() - 이 값",
 	})
+	// sessionOwnerKindGauge는 2026-08-24 추가 — Grafana "최근 실행 종류" 패널이
+	// 페이퍼 트레이딩(owner=trader)과 리플레이(owner=replayengine)를 구분해
+	// 보여줄 수 있게 합니다. sessionStartedAtGauge와 같은 이유로 Release에서는
+	// 안 건드립니다 — "지금 진행 중이거나 가장 최근에 있었던 실행이 뭐였는지"를
+	// 세션이 끝나도 계속 보여주기 위함입니다. 값은 Grafana 값 매핑으로 텍스트로
+	// 바꿉니다: 0=기록 없음, 1=페이퍼 트레이딩(trader), 2=리플레이(replayengine).
+	sessionOwnerKindGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "session_owner_kind",
+		Help: "현재(또는 가장 최근) 실행의 종류 — 0=없음, 1=trader(페이퍼 트레이딩), 2=replayengine(리플레이)",
+	})
 )
 
 func init() {
-	prometheus.MustRegister(sessionActiveGauge, sessionStartedAtGauge)
+	prometheus.MustRegister(sessionActiveGauge, sessionStartedAtGauge, sessionOwnerKindGauge)
+}
+
+// ownerKind는 sessionOwnerKindGauge 값 규칙(위 주석)을 owner 문자열에서 계산합니다.
+func ownerKind(owner string) float64 {
+	switch owner {
+	case "trader":
+		return 1
+	case "replayengine":
+		return 2
+	default:
+		return 0
+	}
 }
 
 // activeKey는 지금 활성 그룹의 runID만 담습니다(배타성 보장은 이 키 하나로만
@@ -339,6 +361,7 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID, date string, speed
 		}
 		sessionActiveGauge.Set(1)
 		sessionStartedAtGauge.Set(float64(now.Unix()))
+		sessionOwnerKindGauge.Set(ownerKind(owner))
 	}
 
 	return Info{
