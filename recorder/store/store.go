@@ -55,6 +55,13 @@ type ExecutionResult struct {
 	BuyFound       bool
 	SellFound      bool
 	ModeMismatched bool
+	// Inserted는 2026-08-24 추가 — 이 체결이 실제로 새로 저장됐는지(true) 아니면
+	// (buy_order_id, sell_order_id) 자연 키가 이미 있어서 INSERT IGNORE로
+	// 걸러진 재전달 중복이었는지(false)입니다. ApplyExecutionEvents가 이 값을
+	// 합산해 recorder_execution_total 카운터를 늘리므로, 배치가 재전달돼
+	// 재처리되더라도 카운터가 두 번 안 늘어납니다(InsertOrdersBatch의 inserted
+	// 반환값과 같은 이유).
+	Inserted bool
 }
 
 // Store는 TRADE_ORDER/EXECUTION에 대한 쓰기를 추상화합니다. InsertOrdersBatch/
@@ -77,8 +84,10 @@ type Store interface {
 	CancelOrdersBatch(ctx context.Context, cancels []CancelInput) error
 	// ApplyExecutionsBatch는 체결 여러 건을 한 트랜잭션(한 번의 커밋) 안에서:
 	// 각 체결의 매수/매도 양쪽 주문 remaining_quantity/status를 갱신하고
-	// (존재하는 쪽만), execution 행들을 한 번의 다중 행 INSERT로 저장합니다.
-	// 반환되는 []ExecutionResult는 입력 execs와 같은 순서·같은 길이입니다.
+	// (존재하는 쪽만), execution 행들을 저장합니다. (buy_order_id,
+	// sell_order_id)가 이미 저장돼 있는 체결은(배치 재전달로 인한 중복,
+	// 2026-08-24 실측) 잔량 반영도 저장도 건너뜁니다 — ExecutionResult.Inserted
+	// 참고. 반환되는 []ExecutionResult는 입력 execs와 같은 순서·같은 길이입니다.
 	ApplyExecutionsBatch(ctx context.Context, execs []ExecutionInput) ([]ExecutionResult, error)
 	// AssignMarket은 FR-11 배정 이벤트를 기록합니다(released_at=NULL인 새 행 추가).
 	// assignments 토픽은 물량이 적어(리밸런스 시에만 발생) 배칭하지 않습니다.

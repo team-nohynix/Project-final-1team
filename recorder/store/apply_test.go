@@ -136,6 +136,28 @@ func TestApplyExecutionEventsCallsStoreWithDecodedFields(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionEventsAppliedCountsOnlyInserted(t *testing.T) {
+	// 2026-08-24: 배치 재전달로 일부 체결이 INSERT IGNORE에 걸러진 경우
+	// (Inserted=false), applied는 그 항목을 세면 안 됩니다 — 세면 재전달마다
+	// TPS 카운터가 중복 집계됩니다(CLAUDE.md의 "배치 재처리 안전성" 참고).
+	s := &fakeStore{execResults: []ExecutionResult{
+		{BuyFound: true, SellFound: true, Mode: "REPLAY", Inserted: true},
+		{BuyFound: true, SellFound: true, Mode: "REPLAY", Inserted: false},
+		{BuyFound: true, SellFound: true, Mode: "REPLAY", Inserted: true},
+	}}
+	applied, err := ApplyExecutionEvents(context.Background(), s, []events.ExecutionEvent{
+		{Market: "KRW-BTC", BuyOrderID: "b1", SellOrderID: "s1", Price: "100", Quantity: "1"},
+		{Market: "KRW-BTC", BuyOrderID: "b2", SellOrderID: "s2", Price: "100", Quantity: "1"},
+		{Market: "KRW-ETH", BuyOrderID: "b3", SellOrderID: "s3", Price: "50", Quantity: "2"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if applied != 2 {
+		t.Fatalf("applied = %d, want 2 (재전달로 걸러진 1건은 제외)", applied)
+	}
+}
+
 func TestApplyExecutionEventsBatchesMultiple(t *testing.T) {
 	s := &fakeStore{execResults: []ExecutionResult{
 		{BuyFound: true, SellFound: true, Mode: "PAPER_TRADING"},

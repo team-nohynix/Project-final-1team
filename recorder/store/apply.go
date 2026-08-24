@@ -64,10 +64,14 @@ func ApplyOrderEvents(ctx context.Context, s Store, evs []events.OrderEvent) (ac
 // 반영하고, Store가 보고한 결과(주문을 못 찾음/mode 불일치)를 항목별로 로그로
 // 남깁니다. ApplyOrderEvents와 같은 배칭 목적입니다.
 //
-// 반환하는 applied는 이번 호출로 저장된 체결 건수입니다 — execution 행은
-// buy/sell 주문을 찾았는지와 무관하게 항상 저장되므로(FR-09), 성공 시 항상
-// len(evs)와 같습니다. ApplyOrderEvents의 accepted와 같은 이유로 recorder/
-// metrics.go가 체결 TPS 카운터를 늘리는 데 씁니다 — 같은 이유로 에러 시 0을
+// 반환하는 applied는 이번 호출로 "실제로 새로" 저장된 체결 건수입니다 —
+// 2026-08-24 전까지는 execution 행이 buy/sell 주문을 찾았는지와 무관하게
+// 항상 저장돼서 항상 len(evs)와 같았지만, 배치 재전달로 인한 중복 체결
+// 사고(CLAUDE.md 참고) 대응으로 execution에도 (buy_order_id, sell_order_id)
+// 유니크 인덱스 + INSERT IGNORE가 붙으면서 재전달된 배치는 실제로 저장되는
+// 행이 0건일 수 있습니다 — 그래서 결과의 Inserted 플래그를 그대로 합산합니다.
+// ApplyOrderEvents의 accepted와 같은 이유로 recorder/metrics.go가 체결 TPS
+// 카운터를 늘리는 데 씁니다(재전달로 중복 집계되지 않도록) — 에러 시 0을
 // 반환합니다.
 func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEvent) (applied int, err error) {
 	if len(evs) == 0 {
@@ -101,8 +105,11 @@ func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEv
 			log.Printf("체결 양쪽 주문의 mode가 다름 (buyOrderId=%s, sellOrderId=%s) — 매수측 mode(%s) 사용",
 				ev.BuyOrderID, ev.SellOrderID, result.Mode)
 		}
+		if result.Inserted {
+			applied++
+		}
 	}
-	return len(evs), nil
+	return applied, nil
 }
 
 // ApplyAssignmentEvent는 assignments 토픽에서 디코딩된 이벤트 하나를 Store에

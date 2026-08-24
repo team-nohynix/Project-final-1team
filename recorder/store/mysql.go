@@ -348,9 +348,28 @@ func (s *MySQLStore) CancelOrdersBatch(ctx context.Context, cancels []CancelInpu
 // 늘려도(파티션 기반 수평 확장이라 레플리카별 처리량 자체는 그대로) 근본
 // 해결이 안 됐습니다. mode 조회를 IN(...) 쿼리 1번으로, 잔량 차감을
 // UPDATE...JOIN 1번(order_id별 SUM으로 합산)으로 묶어 200건 배치 기준 왕복을
-// 800번에서 사실상 3번(mode 조회 1 + 잔량 UPDATE 1 + execution INSERT 1)으로
-// 줄였습니다. 트랜잭션 하나로 묶이는 것 자체(배치당 커밋 1번)는 기존과 동일.
-// 반환값은 execs와 같은 순서·같은 길이입니다.
+// 800번에서 사실상 4번(mode 조회 1 + 중복 확인 1 + 잔량 UPDATE 1 + execution
+// INSERT 1)으로 줄였습니다. 트랜잭션 하나로 묶이는 것 자체(배치당 커밋 1번)는
+// 기존과 동일. 반환값은 execs와 같은 순서·같은 길이입니다.
+//
+// **2026-08-24, 배치 재처리(재전달) 안전성 확보 — 실제 사고 대응.** recorder가
+// DB 커밋은 성공했는데 그 배치의 Kafka 오프셋 커밋 전에 죽으면(재배포/스케일
+// 아웃 중 다수 파드가 동시에 뜨면서 MySQL/Kafka 초기 연결이 몰려 실패하는
+// 식으로 실제 발생 — main()의 접속 실패 시 즉시 log.Fatal하는 구조라 크래시
+// 루프로 이어짐), 재시작 후 그 배치가 통째로 다시 처리됩니다. execution은
+// 매번 idgen으로 새 ID를 만들어 INSERT하기 때문에(trade_order의 INSERT IGNORE
+// 같은 자연 키 보호가 없었음) 완전히 똑같은 체결이 새 ID로 한 번 더 쌓였고,
+// 같은 트랜잭션 안에서 applyFillsBatch도 같이 재실행되면서 remaining_quantity가
+// 상대 차감(- d.qty_sum) 방식이라 두 번 깎여버렸습니다(실제 발견: 2026-08-24,
+// 대시보드 정합성 검사의 "중복 체결" 지표로 처음 포착). 고친 방식: execution에
+// (buy_order_id, sell_order_id) 유니크 인덱스를 추가하고(schema.sql의
+// uq_execution_order_pair — 가격-시간 우선순위 매칭 특성상 같은 두 주문은
+// 논리적으로 한 번만 매칭될 수 있어 자연 키로 안전함) INSERT를 IGNORE로
+// 바꿨습니다. 그것만으로는 execution 중복 저장만 막고 잔량 이중 차감은 못
+// 막으므로(INSERT IGNORE와 applyFillsBatch는 서로 다른 문장), 인서트 전에
+// 이 배치의 쌍들이 이미 저장돼 있는지 먼저 확인해서, 이미 있는 쌍은
+// applyFillsBatch 대상에서 아예 빼버립니다 — "이미 반영됐던 체결"은 잔량
+// 계산에 다시 참여하지 않습니다.
 func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []ExecutionInput) ([]ExecutionResult, error) {
 	if len(execs) == 0 {
 		return nil, nil
@@ -374,13 +393,26 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 			return fmt.Errorf("체결 일괄 반영 실패 (mode 조회): %w", err)
 		}
 
-		if err := applyFillsBatch(ctx, tx, execs); err != nil {
-			return fmt.Errorf("체결 일괄 반영 실패 (잔량 갱신): %w", err)
+		alreadyRecorded, err := fetchExistingExecutionPairs(ctx, tx, execs)
+		if err != nil {
+			return fmt.Errorf("체결 일괄 반영 실패 (중복 확인): %w", err)
+		}
+
+		newExecs := make([]ExecutionInput, 0, len(execs))
+		for _, in := range execs {
+			if !alreadyRecorded[in.BuyOrderID+"|"+in.SellOrderID] {
+				newExecs = append(newExecs, in)
+			}
+		}
+		if len(newExecs) > 0 {
+			if err := applyFillsBatch(ctx, tx, newExecs); err != nil {
+				return fmt.Errorf("체결 일괄 반영 실패 (잔량 갱신): %w", err)
+			}
 		}
 
 		results = make([]ExecutionResult, len(execs))
 		var sb strings.Builder
-		sb.WriteString(`INSERT INTO execution (execution_id, market_code, buy_order_id, sell_order_id, price, quantity, mode, executed_at) VALUES `)
+		sb.WriteString(`INSERT IGNORE INTO execution (execution_id, market_code, buy_order_id, sell_order_id, price, quantity, mode, executed_at) VALUES `)
 		args := make([]any, 0, len(execs)*7)
 
 		for i, in := range execs {
@@ -398,11 +430,20 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 			results[i] = ExecutionResult{
 				ExecutionID: execID, Mode: mode,
 				BuyFound: buyFound, SellFound: sellFound, ModeMismatched: mismatched,
+				Inserted: !alreadyRecorded[in.BuyOrderID+"|"+in.SellOrderID],
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+		res, err := tx.ExecContext(ctx, sb.String(), args...)
+		if err != nil {
 			return fmt.Errorf("체결 일괄 저장 실패 (%d건): %w", len(execs), err)
+		}
+		// INSERT IGNORE는 재전달로 스킵된 중복을 RowsAffected에서 제외합니다 —
+		// len(newExecs)와 이론상 같은 값이어야 하지만(위 alreadyRecorded 판정과
+		// 동일 기준), 실제 반영된 행 수를 그대로 신뢰하는 쪽이 안전합니다
+		// (InsertOrdersBatch와 같은 이유).
+		if _, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("영향받은 행 수 확인 실패: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("체결 일괄 반영 실패 (커밋): %w", err)
@@ -413,6 +454,47 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 		return nil, err
 	}
 	return results, nil
+}
+
+// fetchExistingExecutionPairs는 이 배치의 (buy_order_id, sell_order_id) 쌍
+// 중 execution 테이블에 이미 저장돼 있는 게 있는지 확인합니다 — 배치 전체가
+// 재처리되는 상황(recorder가 DB 커밋 후 Kafka 오프셋 커밋 전에 죽었다가
+// 재시작하는 경우, 2026-08-24 실측)에서 applyFillsBatch가 잔량을 두 번
+// 차감하지 않도록 걸러내는 용도입니다. uq_execution_order_pair 유니크
+// 인덱스를 그대로 타므로 배치 크기가 커져도 저렴합니다.
+func fetchExistingExecutionPairs(ctx context.Context, tx *sql.Tx, execs []ExecutionInput) (map[string]bool, error) {
+	var sb strings.Builder
+	sb.WriteString(`
+		SELECT e.buy_order_id, e.sell_order_id
+		FROM execution e
+		JOIN (`)
+	args := make([]any, 0, len(execs)*2)
+	for i, in := range execs {
+		if i > 0 {
+			sb.WriteString(" UNION ALL ")
+		}
+		sb.WriteString("SELECT ? AS buy_order_id, ? AS sell_order_id")
+		args = append(args, in.BuyOrderID, in.SellOrderID)
+	}
+	sb.WriteString(`
+		) batch ON e.buy_order_id = batch.buy_order_id AND e.sell_order_id = batch.sell_order_id
+	`)
+
+	rows, err := tx.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var buy, sell string
+		if err := rows.Scan(&buy, &sell); err != nil {
+			return nil, err
+		}
+		existing[buy+"|"+sell] = true
+	}
+	return existing, rows.Err()
 }
 
 // fetchModes는 이 배치가 참조하는 주문 id들(매수+매도, 중복 가능)의 mode를
@@ -519,6 +601,17 @@ func applyFillsBatch(ctx context.Context, tx *sql.Tx, execs []ExecutionInput) er
 // 알 수 있다"는 이 테이블의 존재 목적 자체가 깨졌었음) 새 ASSIGNED가 유일한
 // 진짜 담당자라는 걸 알 수 있습니다 — Kafka 그룹의 Generation.Start 계약("새
 // 배정을 받았다는 건 이전 담당자가 이미 완전히 멈췄다")이 이 가정을 보장합니다.
+//
+// **INSERT IGNORE, 2026-08-24** — execution과 같은 배치 재전달 문제(이쪽은
+// 건당 처리라 "배치"는 아니지만, 이 함수 하나의 커밋과 그 이벤트의 Kafka
+// 오프셋 커밋 사이에 크래시가 나면 재전달로 이 함수 전체가 다시 호출될 수
+// 있음)에 대한 대비입니다. 재호출되면 새 assignment_id로 감사 이력에 중복
+// 행이 하나 더 쌓이긴 하지만(released_at IS NULL 판정 자체는 자기 자신을
+// 다시 닫았다가 새로 여는 식으로 결국 회복돼 서비스 상태는 안 깨짐) 이력이
+// 지저분해지는 건 막을 이유가 있어, uq_assignment_market_engine_assigned
+// (market_code, engine_instance_id, assigned_at) 유니크 인덱스 + INSERT
+// IGNORE로 막습니다 — 같은 엔진이 같은 마켓을 밀리초 단위로 똑같은 시각에
+// 두 번 "새로" 배정받는 건 재전달이 아니고서야 있을 수 없는 조합입니다.
 func (s *MySQLStore) AssignMarket(ctx context.Context, in AssignmentInput) error {
 	assignedAt, err := parseTimestamp(in.At)
 	if err != nil {
@@ -540,7 +633,7 @@ func (s *MySQLStore) AssignMarket(ctx context.Context, in AssignmentInput) error
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO matching_engine_assignment (assignment_id, market_code, engine_instance_id, assigned_at)
+		INSERT IGNORE INTO matching_engine_assignment (assignment_id, market_code, engine_instance_id, assigned_at)
 		VALUES (?, ?, ?, ?)
 	`, idgen.NewAssignmentID(), in.Market, in.EngineInstanceID, assignedAt); err != nil {
 		return fmt.Errorf("마켓 배정 기록 실패 (market=%s): %w", in.Market, err)

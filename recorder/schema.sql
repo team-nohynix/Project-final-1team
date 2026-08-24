@@ -40,6 +40,27 @@ BEGIN
 END //
 DELIMITER ;
 
+-- 2026-08-24: create_index_if_absent과 완전히 같은 재실행 안전성 목적이지만
+-- UNIQUE INDEX 전용입니다 — 별도 프로시저로 둔 이유는 기존 9개 CALL 자리를
+-- 전부 안 건드리고(인자 늘리면 다 고쳐야 함) 최소 변경으로 추가하기 위함.
+-- execution/matching_engine_assignment의 배치 재전달 중복 저장 사고(CLAUDE.md
+-- 참고) 대응으로 추가.
+DROP PROCEDURE IF EXISTS create_unique_index_if_absent;
+DELIMITER //
+CREATE PROCEDURE create_unique_index_if_absent(IN tbl VARCHAR(64), IN idx VARCHAR(64), IN idx_def VARCHAR(512))
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE table_schema = DATABASE() AND table_name = tbl AND index_name = idx
+    ) THEN
+        SET @sql = CONCAT('CREATE UNIQUE INDEX ', idx, ' ON ', tbl, ' (', idx_def, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END //
+DELIMITER ;
+
 CREATE TABLE IF NOT EXISTS market (
     market_code   VARCHAR(20) PRIMARY KEY,
     korean_name   VARCHAR(50) NOT NULL,
@@ -148,6 +169,22 @@ CALL create_index_if_absent('execution', 'idx_execution_sell_order', 'sell_order
 -- 단독 필터가 idx_execution_market_executed_at(선행 컬럼 market_code)을 못 쓰고
 -- execution 테이블을 통째로 훑고 있었다.
 CALL create_index_if_absent('execution', 'idx_execution_executed_at', 'executed_at');
+-- 2026-08-24: 실제 사고 대응 — recorder가 DB 커밋 후 그 배치의 Kafka 오프셋
+-- 커밋 전에 죽으면(재배포/스케일아웃 중 다수 파드가 동시에 MySQL/Kafka에
+-- 붙으려다 연결 실패 → main()이 즉시 log.Fatal → 크래시 루프, 실제로 발생)
+-- 재시작 후 그 배치가 통째로 재처리된다. execution은 매번 새 랜덤 ID로
+-- INSERT해서(trade_order의 order_id 같은 자연 키 보호가 없었음) 완전히
+-- 똑같은 체결이 새 ID로 중복 저장됐다(대시보드 "중복 체결" 지표로 실측
+-- 발견). 매수 하나-매도 하나 조합은 가격-시간 우선순위 매칭 특성상 논리적
+-- 으로 한 번만 매칭될 수 있으므로 이 조합을 자연 키로 써서 막는다 —
+-- recorder/store/mysql.go의 ApplyExecutionsBatch가 이 인덱스를 이용해
+-- INSERT IGNORE + 잔량 이중 차감 방지를 같이 처리한다.
+--
+-- **주의(운영 적용 시)**: 이 사고로 이미 쌓인 중복 execution 행이 있는 DB에
+-- 이 인덱스를 그대로 적용하면 "Duplicate entry" 에러로 실패한다 — 먼저
+-- 중복 행을 정리해야 한다(docs 또는 별도 정리 스크립트 참고, 이 커밋에는
+-- 포함하지 않음 — 운영 DB 데이터 삭제는 별도 검토·승인이 필요한 작업).
+CALL create_unique_index_if_absent('execution', 'uq_execution_order_pair', 'buy_order_id, sell_order_id');
 
 -- FR-11 마켓 재분배 이력. matching이 assignments 토픽에 배정/반납 이벤트를
 -- 발행하고(matching/kafkaclient/assignment_producer.go), 기록기가 그걸 구독해
@@ -164,10 +201,17 @@ CREATE TABLE IF NOT EXISTS matching_engine_assignment (
     CONSTRAINT fk_assignment_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
 CALL create_index_if_absent('matching_engine_assignment', 'idx_assignment_market_open', 'market_code, released_at');
+-- 2026-08-24: execution과 같은 배치 재전달 문제의 저위험 버전 — AssignMarket이
+-- 재호출되면 감사 이력에 새 assignment_id로 중복 행이 하나 더 쌓인다(서비스
+-- 상태 자체는 released_at IS NULL 판정이 자기 회복해서 안 깨짐). 같은 엔진이
+-- 같은 마켓을 밀리초 단위로 완전히 같은 시각에 "새로" 배정받는 건 재전달이
+-- 아니고서야 있을 수 없는 조합이라 자연 키로 안전하다.
+CALL create_unique_index_if_absent('matching_engine_assignment', 'uq_assignment_market_engine_assigned', 'market_code, engine_instance_id, assigned_at');
 
 -- 인덱스 생성이 전부 끝났으니 헬퍼 프로시저는 정리합니다 — schema.sql은 테이블/
 -- 인덱스/시드 데이터의 모음이라는 의미를 유지하려는 것뿐, 남겨둬도 해는 없습니다.
 DROP PROCEDURE IF EXISTS create_index_if_absent;
+DROP PROCEDURE IF EXISTS create_unique_index_if_absent;
 
 -- 20개 마켓 마스터 데이터 시드 (backend/upbit.TargetMarkets, orderapi/validate.TargetMarkets와
 -- 같은 20개 목록 — 모듈 독립 원칙에 따라 이 파일에도 값을 그대로 적어둔다).
