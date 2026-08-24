@@ -12,6 +12,17 @@ import (
 // resetCleanupAllStatus는 cleanupAllLatest(패키지 전역, sessioncleanup.go
 // 참고)를 테스트마다 깨끗한 상태로 되돌립니다 — 이 전역 상태를 여러 테스트가
 // 공유하므로 필요합니다.
+// withFastCleanupRetry는 cleanupFetchRetryDelay(sessioncleanup.go)를 테스트
+// 동안만 짧게 낮춥니다 — fetchAllUnresolvedOrdersWithRetry가 재시도 사이에
+// 실제로 몇 초씩 기다리면, 실패 경로를 검증하는 테스트가 그만큼 느려집니다
+// (cleanupFetchMaxAttempts=3이면 최대 (3-1)*지연만큼).
+func withFastCleanupRetry(t *testing.T) {
+	t.Helper()
+	original := cleanupFetchRetryDelay
+	cleanupFetchRetryDelay = time.Millisecond
+	t.Cleanup(func() { cleanupFetchRetryDelay = original })
+}
+
 func resetCleanupAllStatus(t *testing.T) {
 	t.Helper()
 	cleanupAllMu.Lock()
@@ -161,17 +172,55 @@ func TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen(t *testing.T) {
 	}
 }
 
-func TestCleanupUnresolvedOrdersRecorderErrorDoesNotPanic(t *testing.T) {
+// TestCleanupUnresolvedOrdersRetriesTransientFailure는 2026-08-24 추가 —
+// 세션 종료 직후 recorder가 일시적으로 실패하다가 몇 초 뒤 회복되는 실측
+// 상황(cleanupFetchRetryDelay 주석 참고)을 재현합니다. 처음 두 번은 실패,
+// 세 번째(cleanupFetchMaxAttempts)에 성공하면 그 결과를 그대로 써야 합니다.
+func TestCleanupUnresolvedOrdersRetriesTransientFailure(t *testing.T) {
+	withFastCleanupRetry(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < cleanupFetchMaxAttempts {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
+
+	if calls != cleanupFetchMaxAttempts {
+		t.Errorf("recorder 호출 횟수 = %d, want %d", calls, cleanupFetchMaxAttempts)
+	}
+	if pub.cancelCalls != 1 {
+		t.Errorf("cancelCalls = %d, want 1 (재시도 끝에 성공한 결과가 반영돼야 함)", pub.cancelCalls)
+	}
+}
+
+// TestCleanupUnresolvedOrdersLeavesNoteAfterRetriesExhausted는 2026-08-24
+// 추가 — 재시도를 다 써도 계속 실패하면(cleanupFetchMaxAttempts번 전부 실패)
+// "실행 결과" 화면에 수동 정리가 필요하다는 안내가 남는지 확인합니다.
+// TestCleanupUnresolvedOrdersSkipsAndLeavesNoteWhenMatchingLagging(매칭 랙으로
+// 건너뛰는 경우)와 같은 목적이지만 트리거 조건이 다릅니다.
+func TestCleanupUnresolvedOrdersLeavesNoteAfterRetriesExhausted(t *testing.T) {
+	withFastCleanupRetry(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
 	pub := &fakePublisher{}
-	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute)) // panic 안 나면 통과
+	store := &fakeSessionStore{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, store, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute)) // panic 안 나면 통과
 
 	if pub.cancelCalls != 0 {
 		t.Errorf("cancelCalls = %d, want 0", pub.cancelCalls)
+	}
+	if store.lastNoteRunID != "run_1" || store.lastNote == "" {
+		t.Errorf("실행 결과 메시지에 안내가 안 남음: runId=%q, note=%q", store.lastNoteRunID, store.lastNote)
 	}
 }
 
@@ -349,6 +398,7 @@ func TestRunCleanupAllUnresolvedOrders(t *testing.T) {
 }
 
 func TestRunCleanupAllUnresolvedOrdersRecorderErrorMarksFailed(t *testing.T) {
+	withFastCleanupRetry(t)
 	resetCleanupAllStatus(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

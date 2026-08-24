@@ -26,6 +26,23 @@ type unresolvedOrdersResponse struct {
 	Orders []unresolvedOrder `json:"orders"`
 }
 
+// cleanupFetchMaxAttempts/cleanupFetchRetryDelay — 2026-08-24 추가. 세션 종료
+// 직후는 recorder가 방금 끝난 부하테스트를 아직 소화 중이라 일시적으로 느리거나
+// 응답이 늦은 경우가 실측으로 확인됐다(fetchAllUnresolvedOrders가 context
+// deadline exceeded로 실패, 그 뒤 몇 시간째 아무도 수동으로 다시 안 돌려서
+// 미처리 주문 5만여 건이 그대로 방치된 사고). 원래 설계는 "이번에 실패해도
+// 다음 세션이 끝날 때 전체 백로그를 다시 정리하니 괜찮다"는 전제였는데(아래
+// cleanupUnresolvedOrders 주석 참고), 다음 세션이 한동안 안 돌면 그 전제가
+// 깨진다 — 실패가 대부분 이런 일시적 상황이라면, 세션 하나 안에서 몇 초
+// 간격으로 몇 번만 다시 시도해도 대부분 저절로 풀린다. AITraderView.vue의
+// fetchOrderSummaryWithRetry(최종 집계 조회 재시도)와 같은 이유·같은 패턴.
+const cleanupFetchMaxAttempts = 3
+
+// cleanupFetchRetryDelay는 var입니다(const 아님) — 테스트가 실패 경로를
+// 검증할 때 실제로 몇 초씩 기다리지 않도록 짧게 낮춰 쓸 수 있는 테스트
+// 시임(seam)입니다(sessioncleanup_test.go 참고).
+var cleanupFetchRetryDelay = 5 * time.Second
+
 // cleanupUnresolvedOrders는 세션 하나가 완전히 끝났을 때(그룹의 마지막
 // 멤버가 반납했을 때) recorder에 남아있는 미종결 주문 전부를 취소합니다
 // (2026-08-19 도입, 2026-08-20에 범위를 "이 세션 몫만"에서 "전체"로 넓힘) —
@@ -95,9 +112,13 @@ func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recor
 		return
 	}
 
-	orders, err := fetchAllUnresolvedOrders(ctx, httpClient, recorderURL)
+	orders, err := fetchAllUnresolvedOrdersWithRetry(ctx, httpClient, recorderURL)
 	if err != nil {
-		log.Printf("세션 정리 실패 — 미종결 주문 조회 실패 (runId=%s): %v", runID, err)
+		log.Printf("세션 정리 실패 — 미종결 주문 조회 실패 (%d회 재시도 후 포기, runId=%s): %v", cleanupFetchMaxAttempts, runID, err)
+		note := "미종결 주문 자동 정리가 반복 실패했습니다 — 수동 일괄 정리(POST /v1/admin/cleanup-unresolved-orders) 필요"
+		if noteErr := sessionStore.AppendLastRunNote(ctx, runID, note); noteErr != nil {
+			log.Printf("실행 결과 메시지에 정리 실패 경고 남기기 실패 (runId=%s): %v", runID, noteErr)
+		}
 		return
 	}
 	if len(orders) == 0 {
@@ -227,7 +248,7 @@ func cleanupAllStatusHandler() http.HandlerFunc {
 // 처리 중에도 폴링하는 쪽이 "멈춘 건지 진행 중인 건지"를 알 수 있게
 // 하기 위함이지, 그 이상 촘촘하게 잠금을 걸 이유는 없습니다.
 func runCleanupAllUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL string, producer kafkaclient.Publisher) {
-	orders, err := fetchAllUnresolvedOrders(ctx, httpClient, recorderURL)
+	orders, err := fetchAllUnresolvedOrdersWithRetry(ctx, httpClient, recorderURL)
 	if err != nil {
 		log.Printf("일괄 정리 실패 — 전체 미종결 주문 조회 실패: %v", err)
 		cleanupAllMu.Lock()
@@ -271,6 +292,30 @@ func runCleanupAllUnresolvedOrders(ctx context.Context, httpClient *http.Client,
 // runCleanupAllUnresolvedOrders(수동) 둘 다 이걸 씁니다 — 2026-08-20부터
 // 둘의 "무엇을 정리할지" 로직 자체가 동일해졌기 때문(차이는 트리거 시점과
 // 응답 방식뿐).
+// fetchAllUnresolvedOrdersWithRetry는 fetchAllUnresolvedOrders를 cleanupFetchMaxAttempts번까지
+// cleanupFetchRetryDelay 간격으로 재시도합니다 — 세션 종료 직후 recorder가
+// 일시적으로 느린 상황(cleanupFetchMaxAttempts 상수 주석 참고)을 첫 시도 실패로
+// 바로 포기하지 않게 합니다. 둘 다(자동/수동 정리) 이 래퍼를 씁니다.
+func fetchAllUnresolvedOrdersWithRetry(ctx context.Context, httpClient *http.Client, recorderURL string) ([]unresolvedOrder, error) {
+	var lastErr error
+	for attempt := 1; attempt <= cleanupFetchMaxAttempts; attempt++ {
+		orders, err := fetchAllUnresolvedOrders(ctx, httpClient, recorderURL)
+		if err == nil {
+			return orders, nil
+		}
+		lastErr = err
+		if attempt < cleanupFetchMaxAttempts {
+			log.Printf("미종결 주문 조회 실패, %v 후 재시도 (%d/%d): %v", cleanupFetchRetryDelay, attempt, cleanupFetchMaxAttempts, err)
+			select {
+			case <-time.After(cleanupFetchRetryDelay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return nil, lastErr
+}
+
 func fetchAllUnresolvedOrders(ctx context.Context, httpClient *http.Client, recorderURL string) ([]unresolvedOrder, error) {
 	u := recorderURL + "/v1/orders/unresolved/all"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
