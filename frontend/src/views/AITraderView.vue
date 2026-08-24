@@ -1676,7 +1676,7 @@ const resetMatchingEngineBook = async () => {
 }
 .market-table {
   margin-top: 12px;
-  max-height: 180px;
+  max-height: 420px;
   overflow-y: auto;
   border-radius: 8px;
   border: 1px solid #163247;
