@@ -52,6 +52,12 @@ const (
 	readerMaxBytes      = 10e6
 	readerMaxWait       = 500 * time.Millisecond
 	readerQueueCapacity = 1000
+
+	// pipelineDepth — 2026-08-21, fetch↔flush 파이프라인화(아래 Run 참고).
+	// 채널 용량 1이면 "쓰기 중인 배치 1개 + 큐에서 대기 중인 배치 1개"까지
+	// 겹칠 수 있어 이미 유의미한 오버랩을 얻고, 메모리 사용량도 batchSize의
+	// 몇 배 수준으로 예측 가능하게 묶입니다.
+	pipelineDepth = 1
 )
 
 // OrderReader는 orders 토픽을 소비합니다.
@@ -92,59 +98,114 @@ func NewOrderReader(ctx context.Context, broker, topic, groupID string, useIAM b
 // CommitMessages를 쓰는 건 배칭 전과 동일합니다.
 //
 // 디코딩 실패(메시지 자체가 깨짐)는 재시도해도 똑같이 실패하므로 즉시
-// 건너뛰지만, 그 전에 지금까지 쌓인 배치를 먼저 플러시합니다 — 순서가
+// 건너뛰지만, 그 전에 지금까지 쌓인 배치를 먼저 큐에 넣습니다 — 순서가
 // 중요합니다: 디코딩 실패한 메시지의 오프셋을 먼저 커밋해버리면, 그보다
 // 낮은 오프셋인 아직 미처리 배치가 있을 때 그 오프셋들을 영원히 건너뛰게
 // 됩니다(파티션 안에서 오프셋 커밋은 반드시 실제로 처리(또는 의도적으로
 // 건너뛰기로 확정)된 순서를 지켜야 함). handleBatch 실패는 커밋하지 않고
 // 에러를 반환해 이 리더를 멈춥니다 — main.go가 log.Fatal로 전체 프로세스를
 // 재시작시키면, 다음 실행이 마지막으로 커밋된 오프셋부터 다시 읽어 재시도합니다.
+//
+// **파이프라인화, 2026-08-21** — 완성된 배치를 fetch 루프 안에서 동기적으로
+// flush하는 대신 별도 "쓰기(writer)" 고루틴에 채널(items)로 넘깁니다. fetch
+// 루프는 넘기자마자 바로 다음 배치를 모으기 시작하므로, "DB에 쓰는 동안
+// fetch가 완전히 멈춰있던" 사이클 시간(= fetch 시간 + flush 시간)이 사실상
+// flush 시간 하나로 좁혀집니다. items는 단일 생산자(fetch 루프)·단일
+// 소비자(writer)라 도착 순서가 자동으로 보존됩니다 — 디코딩 실패로 인한
+// "단독 커밋"도 별개 경로로 빼지 않고 같은 채널에 그대로 넣어서, 앞서 넣은
+// (아직 writer가 처리 안 했을 수도 있는) 배치보다 먼저 커밋되는 오프셋 역전을
+// 구조적으로 막습니다 — 동기 처리였을 땐 fetch 루프 안에서 순서가 저절로
+// 지켜졌지만, writer가 비동기가 된 뒤로는 명시적으로 지켜야 하는 불변조건이
+// 됐습니다. writer 쪽 실패는 runCtx를 취소해 fetch 루프에 즉시 알리고,
+// Run은 writer가 완전히 끝날 때까지(<-writerDone) 기다린 뒤에야 반환합니다 —
+// 이미 큐에 들어간 배치가 있다면 그게 실제로 처리(성공 또는 실패)될 때까지
+// 기다려주는 게, fetch 에러가 먼저 났다고 무조건 버리는 것보다 낫습니다.
 func (r *OrderReader) Run(ctx context.Context, handleBatch func(ctx context.Context, evs []events.OrderEvent) error) error {
+	type writeItem struct {
+		evs  []events.OrderEvent
+		msgs []kafka.Message
+		skip bool // true면 handleBatch 없이 msgs만 커밋(디코딩 실패 건너뛰기)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	items := make(chan writeItem, pipelineDepth)
+	writerDone := make(chan struct{})
+	var writerErr error
+
+	go func() {
+		defer close(writerDone)
+		for item := range items {
+			if !item.skip {
+				if err := handleBatch(ctx, item.evs); err != nil {
+					writerErr = fmt.Errorf("orders 배치 처리 실패 (%d건): %w", len(item.evs), err)
+					cancel()
+					return
+				}
+			}
+			if err := r.reader.CommitMessages(ctx, item.msgs...); err != nil {
+				writerErr = fmt.Errorf("orders 오프셋 커밋 실패 (%d건): %w", len(item.msgs), err)
+				cancel()
+				return
+			}
+		}
+	}()
+
 	var batch []events.OrderEvent
 	var msgs []kafka.Message
 
-	flush := func() error {
+	// enqueue는 지금까지 모은 배치를 writer에게 넘기고 로컬 버퍼를 비웁니다.
+	// batch/msgs의 소유권이 writer로 넘어가므로 [:0] 재사용이 아니라 nil로
+	// 리셋합니다 — writer가 아직 읽는 중인 배열을 fetch 루프가 append로
+	// 덮어써버리는 데이터 레이스를 막기 위함입니다.
+	enqueue := func() bool {
 		if len(batch) == 0 {
-			return nil
+			return true
 		}
-		if err := handleBatch(ctx, batch); err != nil {
-			return fmt.Errorf("orders 배치 처리 실패 (%d건): %w", len(batch), err)
+		select {
+		case items <- writeItem{evs: batch, msgs: msgs}:
+			batch = nil
+			msgs = nil
+			return true
+		case <-runCtx.Done():
+			return false
 		}
-		if err := r.reader.CommitMessages(ctx, msgs...); err != nil {
-			return fmt.Errorf("orders 오프셋 커밋 실패 (%d건): %w", len(batch), err)
-		}
-		batch = batch[:0]
-		msgs = msgs[:0]
-		return nil
 	}
 
+	var fetchErr error
+loop:
 	for {
-		fetchCtx, cancel := context.WithTimeout(ctx, batchFlushInterval)
+		fetchCtx, fcancel := context.WithTimeout(runCtx, batchFlushInterval)
 		msg, err := r.reader.FetchMessage(fetchCtx)
-		cancel()
+		fcancel()
 		if err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("orders 토픽 읽기 중단: %w", ctx.Err())
+			if runCtx.Err() != nil {
+				break loop
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
-				// 배치 시간 트리거 — 그동안 새 메시지가 없었어도 쌓인 게 있으면 플러시.
-				if err := flush(); err != nil {
-					return err
+				// 배치 시간 트리거 — 그동안 새 메시지가 없었어도 쌓인 게 있으면 큐에 넣음.
+				if !enqueue() {
+					break loop
 				}
 				continue
 			}
-			return fmt.Errorf("orders 토픽 읽기 실패: %w", err)
+			fetchErr = fmt.Errorf("orders 토픽 읽기 실패: %w", err)
+			break loop
 		}
 
 		ev, decodeErr := events.DecodeOrderEvent(msg.Value)
 		if decodeErr != nil {
 			log.Printf("orders 메시지 디코딩 실패, 건너뜀: %v", decodeErr)
-			// 낮은 오프셋의 미처리 배치를 먼저 커밋해야 오프셋 순서가 안 깨집니다.
-			if err := flush(); err != nil {
-				return err
+			// 낮은 오프셋의 미처리 배치를 먼저 큐에 넣어야 오프셋 순서가 안
+			// 깨집니다 — 같은 채널에 순서대로 넣는 것으로 보장합니다.
+			if !enqueue() {
+				break loop
 			}
-			if err := r.reader.CommitMessages(ctx, msg); err != nil {
-				log.Printf("orders 오프셋 커밋 실패: %v", err)
+			select {
+			case items <- writeItem{msgs: []kafka.Message{msg}, skip: true}:
+			case <-runCtx.Done():
+				break loop
 			}
 			continue
 		}
@@ -153,11 +214,25 @@ func (r *OrderReader) Run(ctx context.Context, handleBatch func(ctx context.Cont
 		msgs = append(msgs, msg)
 
 		if len(batch) >= batchSize {
-			if err := flush(); err != nil {
-				return err
+			if !enqueue() {
+				break loop
 			}
 		}
 	}
+
+	close(items)
+	<-writerDone
+
+	if fetchErr != nil {
+		return fetchErr
+	}
+	if writerErr != nil {
+		return writerErr
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("orders 토픽 읽기 중단: %w", ctx.Err())
+	}
+	return nil
 }
 
 func (r *OrderReader) Close() error {
