@@ -614,6 +614,52 @@ function drawFlowFrame() {
   ctx.lineWidth = 1.3
   ctx.stroke()
 
+  // 안쪽(서로 마주보는) 경계 — 트렁크 구간(분기 전/병합 후)처럼 두 레인이
+  // 이미 cy에 붙어있는 곳까지 그리면 가로지르는 seam 선처럼 보이므로,
+  // laneBlend(xf) > 0으로 실제 갈라진 구간에서만 그린다(그라파나 원본과 동일).
+  {
+    const upperPts = []
+    const lowerPts = []
+    for (let gi = 0; gi <= steps; gi++) {
+      const gxf = gi / steps
+      const uC = flowLaneCenterFrac(gxf, 'upper')
+      const uH = flowBandHalfFrac(gxf, 'upper', scale)
+      const lC = flowLaneCenterFrac(gxf, 'lower')
+      const lH = flowBandHalfFrac(gxf, 'lower', scale)
+      const uInner = Math.min(cy + (uC - 0.5) * 2 * laneSpan + uH * h, cy)
+      const lInner = Math.max(cy + (lC - 0.5) * 2 * laneSpan - lH * h, cy)
+      if (flowLaneBlend(gxf) > 0.001) {
+        upperPts.push([gxf * w, uInner])
+        lowerPts.push([gxf * w, lInner])
+      } else {
+        upperPts.push(null)
+        lowerPts.push(null)
+      }
+    }
+    const strokeBroken = (pts) => {
+      ctx.beginPath()
+      let run = []
+      const flushRun = () => {
+        if (run.length >= 2) flowAddSmoothPoints(ctx, run)
+        else if (run.length === 1) ctx.moveTo(run[0][0], run[0][1])
+        run = []
+      }
+      pts.forEach((pt) => {
+        if (!pt) {
+          flushRun()
+          return
+        }
+        run.push(pt)
+      })
+      flushRun()
+      ctx.strokeStyle = 'rgba(159,176,194,0.28)'
+      ctx.lineWidth = 1.3
+      ctx.stroke()
+    }
+    strokeBroken(upperPts)
+    strokeBroken(lowerPts)
+  }
+
   const m = metrics.value
   flowSpawnPair(m?.orderAcceptTps || 0, FLOW_SVC_COLOR.orderapi, 'both', w)
   flowSpawnPair(m?.executionTps || 0, FLOW_SVC_COLOR.recorder, { x: 0.585 * w, lane: 'upper' }, w)
