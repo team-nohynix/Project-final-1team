@@ -25,10 +25,14 @@ func NewExecutionReader(ctx context.Context, broker, topic, groupID string, useI
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}
 	return &ExecutionReader{reader: kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{broker},
-		Topic:   topic,
-		GroupID: groupID,
-		Dialer:  dialer,
+		Brokers:       []string{broker},
+		Topic:         topic,
+		GroupID:       groupID,
+		Dialer:        dialer,
+		MinBytes:      readerMinBytes,
+		MaxBytes:      readerMaxBytes,
+		MaxWait:       readerMaxWait,
+		QueueCapacity: readerQueueCapacity,
 	})}, nil
 }
 

@@ -22,9 +22,36 @@ import (
 // "RDS admission control via recorder consumer lag" 참고)의 건수/시간 이중
 // 트리거입니다 — matching/engine.Engine.shouldSnapshot(), recorder/archive.Batcher와
 // 같은 패턴. OrderReader/ExecutionReader가 각각 자기 배치를 갖습니다.
+//
+// batchSize는 2026-08-21, DB 배치화(applyFillsBatch/CancelOrdersBatch —
+// mysql.go 참고) 이후 200→500으로 상향했습니다: 그 전엔 배치 하나의 DB
+// 왕복 횟수가 건수에 비례해서(최대 O(n)) 배치를 키우면 DB 쪽 비용도 같이
+// 커졌지만, 지금은 배치 하나의 왕복 횟수가 건수와 무관하게 고정(약 3번)이라
+// 배치를 키우는 게 거의 공짜로 처리량을 올리는 레버가 됐습니다.
 const (
-	batchSize          = 200
+	batchSize          = 500
 	batchFlushInterval = 2 * time.Second
+
+	// readerMinBytes/readerMaxBytes/readerMaxWait/readerQueueCapacity —
+	// 2026-08-21, 배치 처리 타이밍이 아니라 그 앞단인 Kafka 저수준 fetch
+	// 자체가 별도 병목이라는 게 확인돼 추가(kafka-go@v0.4.51의 reader.go
+	// 실제 소스로 확인한 기본값: MinBytes=1, MaxBytes=1e6, MaxWait=10s,
+	// QueueCapacity=100). 기본값 MinBytes=1은 브로커가 1바이트만 있어도
+	// 즉시 응답해버리고, 기본 QueueCapacity=100은 batchSize(200이었을 때도)
+	// 보다 작아서, 앱이 FetchMessage를 batchSize번 부르는 동안 실제로는
+	// 여러 번의 개별 브로커 왕복이 끼어드는 구조였습니다 — DB가 유휴 상태인데도
+	// 컨슈머 랙이 안 줄던 현상의 원인. 명시적으로 크게 잡아서 kafka-go가
+	// 내부적으로 더 큰 단위로 브로커에서 받아오고, 애플리케이션(FetchMessage
+	// 반복 호출)은 이미 채워진 내부 버퍼에서 꺼내 쓰게 만듭니다. MaxWait을
+	// 기본 10초보다 훨씬 짧은 500ms로 낮춘 이유: MinBytes(1MB)를 못 채우는
+	// 저부하 구간(예: 물량이 적은 마켓의 파티션)에서도 최대 500ms 안엔
+	// 응답이 오도록 지연 상한을 두기 위함 — 그래도 앱 레벨 batchFlushInterval
+	// (2초)보다 훨씬 짧아서 새로운 병목이 되지는 않습니다. QueueCapacity는
+	// 새 batchSize(500)보다 넉넉하게 잡았습니다.
+	readerMinBytes      = 1e6
+	readerMaxBytes      = 10e6
+	readerMaxWait       = 500 * time.Millisecond
+	readerQueueCapacity = 1000
 )
 
 // OrderReader는 orders 토픽을 소비합니다.
@@ -40,10 +67,14 @@ func NewOrderReader(ctx context.Context, broker, topic, groupID string, useIAM b
 		return nil, fmt.Errorf("Kafka SASL 메커니즘 생성 실패: %w", err)
 	}
 	return &OrderReader{reader: kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{broker},
-		Topic:   topic,
-		GroupID: groupID,
-		Dialer:  dialer,
+		Brokers:       []string{broker},
+		Topic:         topic,
+		GroupID:       groupID,
+		Dialer:        dialer,
+		MinBytes:      readerMinBytes,
+		MaxBytes:      readerMaxBytes,
+		MaxWait:       readerMaxWait,
+		QueueCapacity: readerQueueCapacity,
 	})}, nil
 }
 
