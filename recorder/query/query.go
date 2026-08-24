@@ -140,6 +140,13 @@ type Querier interface {
 	// DashboardMetrics.Series(고정 10분/1분, 캐시됨)와 달리 임의의 [from, to)
 	// 구간을 라이브로 계산합니다 — throughputMaxRange 주석 참고.
 	ThroughputSeries(ctx context.Context, from, to time.Time) ([]MetricsBucket, error)
+	// IntegrityCheck는 mode+[from,to) 구간의 데이터 정합성을 검사합니다 —
+	// "시스템 종합 현황" 대시보드의 "데이터 정합성 검사" 패널(2026-08-24)
+	// 지원. "주문 유실"은 여기 없음 — orderapi의 GET /v1/jobs/replay-preview
+	// 의 totalOrders(예정된 주문량)와 OrderSummary.Accepted(실제 접수량)의
+	// 차이로 프론트가 직접 계산한다(replayengine은 429 등을 재시도 없이
+	// 스킵하므로, 이 차이가 곧 스킵된 주문 수 — DB 조회가 필요 없음).
+	IntegrityCheck(ctx context.Context, mode string, from, to time.Time) (IntegrityCheck, error)
 }
 
 // UnresolvedOrder는 UnresolvedOrders 응답의 항목 하나입니다. Market은
@@ -185,6 +192,32 @@ type MarketOrderSummary struct {
 type SideOrderSummary struct {
 	Side  string `json:"side"`
 	Count int64  `json:"count"`
+}
+
+// IntegrityCheck는 GET /v1/orders/integrity의 응답입니다 — "시스템 종합
+// 현황" 대시보드의 "데이터 정합성 검사" 패널 지원(2026-08-24). 세 지표 다
+// 0이면 정상입니다.
+type IntegrityCheck struct {
+	// DuplicateExecutions는 한 주문에 대해 체결된 수량 합이 원래 주문
+	// 수량을 넘는 경우의 건수입니다 — Kafka at-least-once 재전달이 이중
+	// 반영됐거나 매칭 로직에 버그가 있으면 잡힙니다.
+	DuplicateExecutions int64 `json:"duplicateExecutions"`
+	// SequenceReversals는 체결 시각이 그 체결에 관련된 주문(매수 또는 매도)의
+	// 접수 시각보다 이른(물리적으로 불가능한) 경우의 건수입니다.
+	SequenceReversals int64 `json:"sequenceReversals"`
+	// BuyFilled/SellFilled는 각각 매수/매도 주문의 (quantity-remaining_quantity)
+	// 합계(=그 구간에 실제로 체결된 양)입니다. 매칭은 항상 매수 하나-매도
+	// 하나를 정확히 같은 양만큼 짝지어 채우므로(FR-06), 이론적으로 두 값은
+	// 항상 같아야 합니다 — 어긋나면 한쪽 주문에만 체결이 반영되고 반대쪽엔
+	// 안 됐거나(주문 유실과 같은 근본 원인일 수 있음), applyFillsBatch 로직
+	// 자체에 문제가 있다는 신호입니다. 다만 이전 세션이 남긴 잔존 주문이
+	// 이번 세션 주문과 매칭된 드문 경우엔 세션 경계에 걸려 정상적으로도
+	// 어긋날 수 있습니다(ResolveMode의 mode-mismatch와 같은 성격의 노이즈) —
+	// 그래서 0이 아니라고 무조건 심각한 버그는 아니고, 일단 로그를 봐야 하는
+	// 신호로 다루는 게 맞습니다. 문자열인 이유는 price/quantity와 동일(DECIMAL
+	// 정밀도를 JSON 숫자 왕복에서 잃지 않기 위함).
+	BuyFilled  string `json:"buyFilled"`
+	SellFilled string `json:"sellFilled"`
 }
 
 // MetricsBucket은 DashboardMetrics.Series의 항목 하나 — 1분 단위 버킷의
@@ -758,6 +791,64 @@ func (q *MySQLQuerier) orderSummaryBySide(ctx context.Context, mode string, from
 		out = append(out, sd)
 	}
 	return out, rows.Err()
+}
+
+// IntegrityCheck는 mode+[from,to) 구간의 데이터 정합성을 검사합니다 — 타입
+// 설명(query.go의 IntegrityCheck) 참고. 세 쿼리 다 저빈도(대시보드 새로고침
+// 시에만) 호출을 전제로 하므로, 다른 쿼리들처럼 인덱스 커버리지에 예민하게
+// 최적화하지 않았습니다.
+func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to time.Time) (IntegrityCheck, error) {
+	if to.IsZero() {
+		to = time.Now().UTC()
+	}
+
+	var c IntegrityCheck
+
+	// 중복 체결: 한 주문(매수 또는 매도)에 대해 체결된 수량 합이 원래 주문
+	// 수량을 넘는 경우.
+	if err := q.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT f.order_id FROM (
+				SELECT buy_order_id AS order_id, quantity FROM execution
+				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+				UNION ALL
+				SELECT sell_order_id AS order_id, quantity FROM execution
+				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+			) f
+			JOIN trade_order o ON o.order_id = f.order_id
+			GROUP BY f.order_id
+			HAVING SUM(f.quantity) > o.quantity
+		) over_filled
+	`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions); err != nil {
+		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", err)
+	}
+
+	// 순서 역전: 체결 시각이 그 체결에 관련된 주문(매수 또는 매도)의 접수
+	// 시각보다 이른 경우. LEFT JOIN이라 관련 주문을 못 찾은 쪽은 NULL이 되고,
+	// NULL과의 비교는 항상 FALSE라 그 execution은 이 조건으로는 안 걸립니다
+	// (주문 유실은 별개 지표에서 다룸).
+	if err := q.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM execution e
+		LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
+		LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
+		WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
+			AND (e.executed_at < ob.submitted_at OR e.executed_at < os.submitted_at)
+	`, mode, from, to).Scan(&c.SequenceReversals); err != nil {
+		return IntegrityCheck{}, fmt.Errorf("순서 역전 검사 실패: %w", err)
+	}
+
+	// 매수·매도 총량: 각 주문의 quantity-remaining_quantity(=실제 체결량) 합.
+	if err := q.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
+		FROM trade_order
+		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+	`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled); err != nil {
+		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", err)
+	}
+
+	return c, nil
 }
 
 // UnresolvedOrders는 mode+[from,to) 구간에서 아직 ACCEPTED/PARTIALLY_FILLED

@@ -12,11 +12,23 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 // - 시스템 구성요소 상태: orderapi GET /v1/system-status (2026-08-24 신규,
 //   orderapi/systemstatus.go) — API/Kafka/매칭엔진/MySQL/Redis 각각을 얕게
 //   확인합니다.
+// - 데이터 정합성 검사: 가장 최근 시뮬레이션(replayengine) 실행 하나의
+//   결과만 보여줍니다(실시간 누적 아님) — orderapi GET /v1/sessions/last-run
+//   으로 그 실행의 owner/startedAt/endedAt/date를 얻고, 그 구간으로
+//   recorder GET /v1/orders/summary + GET /v1/orders/integrity를 조회합니다.
+//   "주문 유실"만 recorder 쿼리가 아니라 orderapi GET /v1/jobs/replay-preview
+//   의 totalOrders(예정된 주문량)와 orders/summary의 accepted(실제 접수량)
+//   차이로 프론트에서 직접 계산합니다 — replayengine은 429 등 Submit 실패를
+//   재시도 없이 스킵하므로(FR-18 재현성 유지 목적), 이 차이가 곧 스킵된 주문
+//   수입니다(recorder DB 조회가 필요 없음).
 const POLL_INTERVAL_MS = 10000
 
 const metrics = ref(null)
 const systemStatus = ref(null)
 const loadError = ref('')
+
+const integrityData = ref(null)
+const integrityNote = ref('')
 
 const displayValue = (v, digits = 0) => {
   if (v === null || v === undefined) return '--'
@@ -130,6 +142,110 @@ function selectRange(minutes) {
   if (!isDefaultRange.value) fetchRangeSeries()
 }
 
+// ---- 데이터 정합성 검사 ----
+const OK_COLOR = '#2ed39a'
+const PROBLEM_COLOR = '#ff5c7a'
+const NO_DATA_COLOR = '#8ea2b8'
+
+// 매수/매도 총량 차이는 DECIMAL(24,8) 문자열끼리의 뺄셈이라 부동소수점
+// 오차가 아주 미세하게 낄 수 있어(표시용 계산이라 허용), 그 오차보다
+// 넉넉히 큰 값만 "불일치"로 판단합니다.
+const QTY_DIFF_EPSILON = 1e-6
+
+function formatQtyDiff(v) {
+  return Number(v).toLocaleString('ko-KR', { maximumFractionDigits: 8 })
+}
+
+const integrityCards = computed(() => {
+  const d = integrityData.value
+  if (!d) {
+    return [
+      { label: '순서 역전', value: '--', color: NO_DATA_COLOR },
+      { label: '주문 유실', value: '--', color: NO_DATA_COLOR },
+      { label: '중복 체결', value: '--', color: NO_DATA_COLOR },
+      { label: '매수·매도 총량 불일치', value: '--', color: NO_DATA_COLOR },
+    ]
+  }
+  return [
+    {
+      label: '순서 역전',
+      value: displayValue(d.sequenceReversals),
+      color: d.sequenceReversals === 0 ? OK_COLOR : PROBLEM_COLOR,
+    },
+    {
+      label: '주문 유실',
+      value: d.orderLoss === null ? '--' : displayValue(d.orderLoss),
+      color: d.orderLoss === null ? NO_DATA_COLOR : d.orderLoss === 0 ? OK_COLOR : PROBLEM_COLOR,
+    },
+    {
+      label: '중복 체결',
+      value: displayValue(d.duplicateExecutions),
+      color: d.duplicateExecutions === 0 ? OK_COLOR : PROBLEM_COLOR,
+    },
+    {
+      label: '매수·매도 총량 불일치',
+      value: formatQtyDiff(d.buySellDiff),
+      color: d.buySellDiff <= QTY_DIFF_EPSILON ? OK_COLOR : PROBLEM_COLOR,
+    },
+  ]
+})
+
+async function fetchIntegrityCheck() {
+  const lastRunRes = await fetch('/order-api/v1/sessions/last-run')
+  if (lastRunRes.status === 404) {
+    integrityData.value = null
+    integrityNote.value = '아직 실행된 시뮬레이션이 없습니다.'
+    return
+  }
+  if (!lastRunRes.ok) throw new Error(`실행 정보 조회 실패: ${lastRunRes.status}`)
+  const lastRun = await lastRunRes.json()
+
+  if (lastRun.owner !== 'replayengine') {
+    integrityData.value = null
+    integrityNote.value = '가장 최근 실행이 리플레이(부하 테스트)가 아니라 정합성 검사를 표시할 수 없습니다.'
+    return
+  }
+  if (!lastRun.endedAt) {
+    integrityData.value = null
+    integrityNote.value = '리플레이가 아직 진행 중입니다 — 종료 후 결과가 표시됩니다.'
+    return
+  }
+
+  const from = lastRun.startedAt
+  const to = lastRun.endedAt
+  const qs = `mode=REPLAY&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+
+  const [previewRes, summaryRes, integrityRes] = await Promise.all([
+    lastRun.date
+      ? fetch(`/order-api/v1/jobs/replay-preview?date=${encodeURIComponent(lastRun.date)}`)
+      : Promise.resolve(null),
+    fetch(`/recorder-api/v1/orders/summary?${qs}`),
+    fetch(`/recorder-api/v1/orders/integrity?${qs}`),
+  ])
+
+  if (!summaryRes.ok) throw new Error(`주문 집계 조회 실패: ${summaryRes.status}`)
+  if (!integrityRes.ok) throw new Error(`정합성 검사 조회 실패: ${integrityRes.status}`)
+
+  const summary = await summaryRes.json()
+  const integrity = await integrityRes.json()
+
+  // 오래된 실행(이 필드가 생기기 전 기록)이라 date가 없으면 "주문 유실"만
+  // 표시를 못 하고 나머지 세 지표는 그대로 보여줍니다.
+  let orderLoss = null
+  if (previewRes && previewRes.ok) {
+    const preview = await previewRes.json()
+    orderLoss = Math.max(0, (preview.totalOrders ?? 0) - (summary.accepted ?? 0))
+  }
+
+  integrityData.value = {
+    orderLoss,
+    duplicateExecutions: integrity.duplicateExecutions ?? 0,
+    sequenceReversals: integrity.sequenceReversals ?? 0,
+    buySellDiff: Math.abs(Number(integrity.buyFilled ?? 0) - Number(integrity.sellFilled ?? 0)),
+  }
+  integrityNote.value = ''
+}
+
 const chartWidth = 600
 const chartHeight = 250
 const chartPadTop = 14
@@ -194,6 +310,15 @@ async function refresh() {
     // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
     // 잠깐의 네트워크 실패로 화면이 전부 '--'로 깜빡이지 않게.
     loadError.value = e instanceof Error ? e.message : String(e)
+  }
+
+  // 정합성 검사는 별도 에러 상태로 분리 — 이게 실패해도 위 지표/상태
+  // 패널까지 같이 흔들리면 안 됩니다.
+  try {
+    await fetchIntegrityCheck()
+  } catch (e) {
+    integrityData.value = null
+    integrityNote.value = e instanceof Error ? e.message : String(e)
   }
 }
 
@@ -337,23 +462,13 @@ onBeforeUnmount(() => {
 
     <section class="integrity-panel">
       <h3>데이터 정합성 검사</h3>
+      <p v-if="integrityNote" class="integrity-note">{{ integrityNote }}</p>
+      <p v-else class="integrity-note">가장 최근 부하 테스트(리플레이) 실행 결과입니다.</p>
 
       <div class="integrity-grid">
-        <div>
-          <span>순서 역전</span>
-          <strong>{{ '--' }}</strong>
-        </div>
-        <div>
-          <span>주문 유실</span>
-          <strong>{{ '--' }}</strong>
-        </div>
-        <div>
-          <span>중복 체결</span>
-          <strong>{{ '--' }}</strong>
-        </div>
-        <div>
-          <span>매수·매도 총량 불일치</span>
-          <strong>{{ '--' }}</strong>
+        <div v-for="card in integrityCards" :key="card.label">
+          <span>{{ card.label }}</span>
+          <strong :style="{ color: card.color }">{{ card.value }}</strong>
         </div>
       </div>
     </section>
@@ -663,7 +778,12 @@ onBeforeUnmount(() => {
 }
 
 .integrity-grid strong {
-  color: #2ed39a;
   font-size: 24px;
+}
+
+.integrity-note {
+  margin: 6px 0 0;
+  color: #8ea2b8;
+  font-size: 12px;
 }
 </style>

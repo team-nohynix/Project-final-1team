@@ -42,6 +42,10 @@ type claimRequest struct {
 	// trader/replayengine이 자기 -speed 플래그 값을 그대로 보냅니다. 안 보내면
 	// 0으로 기록될 뿐 클레임 자체를 막지 않습니다.
 	Speed float64 `json:"speed,omitempty"`
+	// Date는 선택입니다(2026-08-24, "시스템 종합 현황" 대시보드의 "주문 유실"
+	// 지표 지원 — session.RunRecord.Date 참고). replayengine만 의미 있는 값을
+	// 보냅니다; trader는 비워 보냅니다.
+	Date string `json:"date,omitempty"`
 }
 
 // claimResponse는 POST /v1/sessions의 201 응답 본문입니다. ttlSeconds를 실어주는
@@ -71,7 +75,7 @@ func claimSessionHandler(store session.Store) http.HandlerFunc {
 			return
 		}
 
-		info, err := store.Claim(r.Context(), req.Owner, req.RunID, req.Speed)
+		info, err := store.Claim(r.Context(), req.Owner, req.RunID, req.Date, req.Speed)
 		if err != nil {
 			var conflict *session.ConflictError
 			if errors.As(err, &conflict) {
@@ -226,6 +230,9 @@ type lastRunResponse struct {
 	EndedAt   string  `json:"endedAt,omitempty"`
 	Message   string  `json:"message,omitempty"`
 	Speed     float64 `json:"speed,omitempty"`
+	// Date는 2026-08-24 추가 — session.RunRecord.Date 참고, replayengine
+	// 실행에서만 채워짐.
+	Date string `json:"date,omitempty"`
 }
 
 func toLastRunResponse(record session.RunRecord) lastRunResponse {
@@ -236,6 +243,7 @@ func toLastRunResponse(record session.RunRecord) lastRunResponse {
 		StartedAt: record.StartedAt.Format(time.RFC3339),
 		Message:   record.Message,
 		Speed:     record.Speed,
+		Date:      record.Date,
 	}
 	if !record.EndedAt.IsZero() {
 		resp.EndedAt = record.EndedAt.Format(time.RFC3339)

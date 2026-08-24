@@ -134,6 +134,15 @@ type RunOutcome struct {
 // 맥락이라 우선순위 높게 추가함). trader/replayengine이 -speed 플래그로
 // 이미 알고 있는 값을 Claim 시점에 실어 보낸다 — 실행 도중 안 바뀌는 값이라
 // 시작 시점에 한 번만 기록하면 충분하다.
+//
+// Date는 2026-08-24 추가 — "시스템 종합 현황" 대시보드의 "주문 유실"
+// 지표(예정된 주문량 vs 실제 접수량) 지원. replayengine이 -date 플래그로
+// 재생한 날짜를 실어 보낸다(어느 날짜의 기록 파일을 재생했는지는 그 실행이
+// 끝난 뒤에도 대시보드가 GET /v1/jobs/replay-preview?date=...를 다시 조회할
+// 수 있어야 알 수 있는데, RunRecord 자체엔 그때까지 이 값이 없었음). trader가
+// 보낸 -date는 시장 데이터 재생 날짜일 뿐 FR-17 기록 파일의 "예정된 주문량"
+// 개념과 무관해서(생성된 주문 수는 여전히 관측 불가 — CLAUDE.md 참고) 비워
+// 보낸다 — 이 필드는 replayengine 실행에서만 의미가 있다.
 type RunRecord struct {
 	RunID     string
 	Owner     string
@@ -142,6 +151,7 @@ type RunRecord struct {
 	EndedAt   time.Time // Status가 IN_PROGRESS면 zero value
 	Message   string
 	Speed     float64
+	Date      string
 }
 
 func membersKey(runID string) string { return membersKeyPrefix + runID }
@@ -203,7 +213,8 @@ type Store interface {
 	// 만드는 호출(=그 실행의 첫 멤버)일 때만 RunRecord에 기록됩니다 — 이미
 	// 활성인 그룹에 합류하는 멤버(리플레이 샤드 2번째 이후)가 보낸 값은
 	// 무시합니다(같은 실행이면 모든 샤드가 같은 speed를 쓰는 게 당연하므로).
-	Claim(ctx context.Context, owner, runID string, speed float64) (Info, error)
+	// date도 같은 규칙(첫 멤버 값만 기록) — RunRecord.Date 참고.
+	Claim(ctx context.Context, owner, runID, date string, speed float64) (Info, error)
 	// Heartbeat는 세션 TTL을 갱신하면서, 이 그룹에 정지 요청이 들어와 있는지도
 	// 같이 확인합니다(2026-08-20, RequestStop 참고) — 호출부(trader/replayengine의
 	// RunHeartbeat)가 이미 이 주기로 서버와 왕복하고 있으므로, 별도 폴링 루프
@@ -277,7 +288,7 @@ return 0
 // Claim은 owner 이름으로 runID 그룹에 합류합니다. runID가 비어있으면(트레이더
 // 등 원래부터 한 프로세스로만 도는 호출자) 서버가 하나 생성해 "멤버 1개짜리
 // 그룹"을 만듭니다 — 이 경우 예전(그룹 개념 도입 전) 동작과 완전히 동일합니다.
-func (s *RedisStore) Claim(ctx context.Context, owner, runID string, speed float64) (Info, error) {
+func (s *RedisStore) Claim(ctx context.Context, owner, runID, date string, speed float64) (Info, error) {
 	now := time.Now().UTC()
 	if runID == "" {
 		runID = newSessionID()
@@ -322,7 +333,7 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID string, speed float
 			s.client.Set(ctx, prevRunKey, body, 0)
 		}
 
-		record := RunRecord{RunID: runID, Owner: owner, Status: RunStatusInProgress, StartedAt: now, Speed: speed}
+		record := RunRecord{RunID: runID, Owner: owner, Status: RunStatusInProgress, StartedAt: now, Speed: speed, Date: date}
 		if body, err := json.Marshal(record); err == nil {
 			s.client.Set(ctx, lastRunKey, body, 0)
 		}
@@ -456,6 +467,7 @@ func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome 
 			record.Owner = existing.Owner
 			record.StartedAt = existing.StartedAt
 			record.Speed = existing.Speed
+			record.Date = existing.Date
 		}
 	}
 	if body, err := json.Marshal(record); err == nil {

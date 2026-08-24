@@ -33,6 +33,7 @@ type fakeSessionStore struct {
 
 	lastRunID       string
 	lastSpeed       float64
+	lastDate        string
 	lastHeartbeatID string
 	lastReleaseID   string
 	lastOutcome     session.RunOutcome
@@ -41,9 +42,10 @@ type fakeSessionStore struct {
 	lastNote        string
 }
 
-func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID string, speed float64) (session.Info, error) {
+func (f *fakeSessionStore) Claim(ctx context.Context, owner, runID, date string, speed float64) (session.Info, error) {
 	f.lastRunID = runID
 	f.lastSpeed = speed
+	f.lastDate = date
 	if f.claimErr != nil {
 		return session.Info{}, f.claimErr
 	}
