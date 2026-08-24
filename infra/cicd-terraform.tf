@@ -209,6 +209,61 @@ resource "aws_eks_access_entry" "github_actions_terraform_apply" {
   kubernetes_groups = ["team1-tf-apply"]
 }
 
+# RBAC 자체도 여기(terraform, kubernetes provider)에 둔다 — 처음엔 infra/k8s/의
+# 다른 RBAC들처럼 YAML+kubectl apply로 뒀었는데, 그러면 순환 문제가 생긴다:
+# terraform apply 자체가(같은 apply 안의 helm_release/kubernetes_secret/
+# kubernetes_namespace 리소스들이) 이 RBAC이 이미 존재해야 K8s API에 붙을 수
+# 있는데, YAML은 bootstrap-k8s job이 terraform-apply "다음"에 적용하니 정작
+# terraform-apply 자기 자신이 그 RBAC 없이 먼저 돌게 된다 — EKS를 정말로
+# 처음부터(access entry도, 이 RBAC도 전혀 없는 상태에서) 복구해야 하는
+# 시나리오에서 막힌다. kubernetes_cluster_role_binding으로 옮기면 같은 terraform
+# apply 안에서 access entry → 이 바인딩 → helm_release/secret/namespace 순서로
+# depends_on이 걸려 자기완결적으로 풀린다.
+resource "kubernetes_cluster_role" "tf_plan_readonly" {
+  metadata {
+    name = "team1-tf-plan-readonly"
+  }
+  rule {
+    api_groups = ["*"]
+    resources  = ["*"]
+    verbs      = ["get", "list", "watch"]
+  }
+}
+
+resource "kubernetes_cluster_role_binding" "tf_plan_readonly" {
+  metadata {
+    name = "team1-tf-plan-readonly"
+  }
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role.tf_plan_readonly.metadata[0].name
+  }
+  subject {
+    kind      = "Group"
+    name      = "team1-tf-plan"
+    api_group = "rbac.authorization.k8s.io"
+  }
+}
+
+# cluster-admin은 모든 K8s 클러스터에 기본 내장된 ClusterRole이라 따로 정의할
+# 필요가 없다 — 바인딩만 있으면 된다.
+resource "kubernetes_cluster_role_binding" "tf_apply_admin" {
+  metadata {
+    name = "team1-tf-apply-admin"
+  }
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = "cluster-admin"
+  }
+  subject {
+    kind      = "Group"
+    name      = "team1-tf-apply"
+    api_group = "rbac.authorization.k8s.io"
+  }
+}
+
 output "github_actions_terraform_plan_role_arn" {
   value = aws_iam_role.github_actions_terraform_plan.arn
 }
