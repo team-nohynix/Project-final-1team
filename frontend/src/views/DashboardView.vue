@@ -46,7 +46,7 @@ const loadError = ref('')
 const integrityData = ref(null)
 const integrityNote = ref('')
 
-// orderapi GET /v1/metrics/cluster (clustermetrics.go) — 그라파나
+// orderapi GET /v1/cluster-metrics (clustermetrics.go) — 그라파나
 // team1-overview 대시보드가 이미 쓰는 PromQL 그대로 재사용(2026-08-24,
 // 사용자 제안). PROMETHEUS_URL 미설정 환경(로컬 등)에서는 404가 나므로
 // clusterMetricsError로 별도 표시하고 나머지 화면에는 영향 없게 한다.
@@ -54,7 +54,7 @@ const clusterMetrics = ref(null)
 const clusterMetricsError = ref('')
 
 async function fetchClusterMetrics() {
-  const res = await fetch('/order-api/v1/metrics/cluster')
+  const res = await fetch('/order-api/v1/cluster-metrics')
   if (!res.ok) throw new Error(`클러스터 지표 조회 실패: ${res.status}`)
   clusterMetrics.value = await res.json()
 }
@@ -145,7 +145,7 @@ const rangeSeries = ref(null)
 const rangeLoading = ref(false)
 const rangeError = ref('')
 
-// 드롭된(429 백프레셔로 거절된) 주문 — orderapi GET /v1/metrics/dropped-orders.
+// 드롭된(429 백프레셔로 거절된) 주문 — orderapi GET /v1/dropped-orders.
 // recorder의 접수/체결 시계열과 달리 MySQL이 아니라 orderapi 프로세스
 // 메모리에서 나오는 값이라(droppedmetrics.go 주석 참고) 별도 fetch가
 // 필요합니다 — bucketStart로 병합해서 같은 차트에 세 번째 선으로 그립니다.
@@ -159,7 +159,7 @@ const droppedSeriesRange = ref({})
 async function fetchDroppedSeries(minutes) {
   const to = new Date()
   const from = new Date(to.getTime() - minutes * 60000)
-  const url = `/order-api/v1/metrics/dropped-orders?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
+  const url = `/order-api/v1/dropped-orders?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
   const res = await fetch(url)
   if (!res.ok) throw new Error(`드롭된 주문 조회 실패: ${res.status}`)
   const data = await res.json()

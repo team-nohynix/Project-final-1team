@@ -50,7 +50,7 @@ func TestClusterMetricsHandlerHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/cluster", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/cluster-metrics", nil)
 	clusterMetricsHandler(newPromQuerier(srv.URL))(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -100,7 +100,7 @@ func TestClusterMetricsHandlerFiltersZeroRestartPods(t *testing.T) {
 	defer srv.Close()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/cluster", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/cluster-metrics", nil)
 	clusterMetricsHandler(newPromQuerier(srv.URL))(rec, req)
 
 	var got clusterMetricsResponse
@@ -117,7 +117,7 @@ func TestClusterMetricsHandlerPrometheusDownReturns502(t *testing.T) {
 	defer srv.Close()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/cluster", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/cluster-metrics", nil)
 	clusterMetricsHandler(newPromQuerier(srv.URL))(rec, req)
 
 	if rec.Code != http.StatusBadGateway {

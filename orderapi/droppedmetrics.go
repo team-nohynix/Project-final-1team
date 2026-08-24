@@ -53,7 +53,7 @@ func recordDroppedOrder() {
 	}
 }
 
-// droppedBucketDTO는 GET /v1/metrics/dropped-orders 응답의 항목 하나 —
+// droppedBucketDTO는 GET /v1/dropped-orders 응답의 항목 하나 —
 // recorder MetricsBucket과 같은 필드 이름(bucketStart)을 써서 프론트가 두
 // 시계열을 bucketStart 키로 그대로 병합할 수 있게 합니다.
 type droppedBucketDTO struct {
@@ -61,12 +61,17 @@ type droppedBucketDTO struct {
 	Dropped     int64  `json:"dropped"`
 }
 
-// droppedOrdersHandler는 GET /v1/metrics/dropped-orders?from=&to=(둘 다
+// droppedOrdersHandler는 GET /v1/dropped-orders?from=&to=(둘 다
 // RFC3339 필수, recorder GET /v1/metrics/throughput과 동일한 규약)를
 // 처리합니다. 라이브 프로세스 메모리 조회라 recorder 쪽과 달리 DB 부하
 // 걱정은 없지만, 프론트의 호출 빈도 규칙(자동 폴링 금지, 기간 바꿀 때만)은
 // 그대로 따릅니다 — 두 시계열을 같은 화면에서 나란히 그리므로 하나만 자주
 // 부르면 오히려 헷갈립니다.
+//
+// 경로가 "/v1/metrics/dropped-orders"가 아니라 "/v1/dropped-orders"인 이유는
+// clustermetrics.go 주석 참고 — 공유 ALB Ingress가 "/v1/metrics" 프리픽스를
+// 통째로 recorder로 보내서, orderapi에 그 아래로 라우트를 새로 등록해도
+// 바깥에서는 recorder의 404로 가로채입니다.
 func droppedOrdersHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)

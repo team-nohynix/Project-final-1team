@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// GET /v1/metrics/cluster (2026-08-24, 사용자 제안) — 활성 노드 수/백엔드 전체
+// GET /v1/cluster-metrics (2026-08-24, 사용자 제안) — 활성 노드 수/백엔드 전체
 // 파드 수/파드 재시작 누적/매칭엔진 호가창 잔량/오토스케일링 현황을
 // 그라파나 team1-overview 대시보드가 이미 쓰고 있는 PromQL을 그대로
 // 모니터링 EC2의 Prometheus(infra/monitoring-ec2.tf, 포트 9090)에 물어봐서
@@ -21,6 +21,17 @@ import (
 // 다시 만들 필요 없이, 그라파나가 이미 검증해 쓰고 있는 값을 재사용합니다.
 // 각 PromQL은 grafana team1-overview 대시보드(panel id 7/205/6/9107/9300)의
 // target.expr을 그대로 옮긴 것 — 패널이 바뀌면 여기도 같이 확인해야 합니다.
+//
+// 경로가 "/v1/metrics/..."가 아니라 "/v1/cluster-metrics"인 이유(실측으로
+// 발견) — orderapi/recorder를 같이 태우는 공유 ALB Ingress(infra/k8s/backend/
+// orderapi-ingress.yaml, 있다면 확인)가 "/v1/metrics" 프리픽스를 통째로
+// recorder:8082로 보내도록 이미 규칙이 잡혀 있어서(recorder가 GET
+// /v1/metrics/dashboard·/v1/metrics/throughput을 그 프리픽스로 서빙하기
+// 때문), orderapi가 새로 "/v1/metrics/*" 아래에 라우트를 등록해봤자 그
+// Ingress 규칙에 먼저 가로채여 recorder의 404로 떨어집니다(orderapi mux
+// 자체엔 라우트가 정상 등록돼 있고 파드 안에서 직접 찔러보면 200이 나오는데
+// 바깥에서는 404가 나서 처음엔 원인을 못 찾았습니다) — 그래서 이 프리픽스
+// 충돌이 없는 별도 경로를 씁니다.
 
 // promMatchingMaxReplicas/promRecorderMaxReplicas는 KEDA ScaledObject의
 // maxReplicaCount를 그대로 옮긴 상수입니다(infra/k8s/backend/

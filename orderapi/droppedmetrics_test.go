@@ -17,7 +17,7 @@ func resetDroppedBuckets() {
 func TestDroppedOrdersHandlerMissingRange(t *testing.T) {
 	resetDroppedBuckets()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/dropped-orders", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dropped-orders", nil)
 	droppedOrdersHandler()(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
@@ -36,7 +36,7 @@ func TestDroppedOrdersHandlerInvalidRange(t *testing.T) {
 	now := time.Now().UTC()
 	from := now.Format(time.RFC3339)
 	to := now.Add(-time.Minute).Format(time.RFC3339) // to보다 이전 — 순서가 뒤집힘
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/dropped-orders?from="+from+"&to="+to, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dropped-orders?from="+from+"&to="+to, nil)
 	droppedOrdersHandler()(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
@@ -55,7 +55,7 @@ func TestDroppedOrdersHandlerRangeTooWide(t *testing.T) {
 	now := time.Now().UTC()
 	from := now.Add(-25 * time.Hour).Format(time.RFC3339)
 	to := now.Format(time.RFC3339)
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/dropped-orders?from="+from+"&to="+to, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dropped-orders?from="+from+"&to="+to, nil)
 	droppedOrdersHandler()(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
@@ -77,7 +77,7 @@ func TestDroppedOrdersHandlerReturnsZeroFilledBucketsAndCounts(t *testing.T) {
 	from := now.Add(-4 * time.Minute).Format(time.RFC3339)
 	to := now.Format(time.RFC3339)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/dropped-orders?from="+from+"&to="+to, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dropped-orders?from="+from+"&to="+to, nil)
 	droppedOrdersHandler()(rec, req)
 
 	if rec.Code != http.StatusOK {

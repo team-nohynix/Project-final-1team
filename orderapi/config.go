@@ -113,7 +113,7 @@ func LoadConfig() Config {
 	// 정상 동작해야 합니다.
 	recorderURL := os.Getenv("RECORDER_URL")
 
-	// PROMETHEUS_URL도 선택입니다 — 값이 있으면 GET /v1/metrics/cluster가
+	// PROMETHEUS_URL도 선택입니다 — 값이 있으면 GET /v1/cluster-metrics가
 	// 활성 노드 수/백엔드 전체 파드 수/파드 재시작 누적/매칭엔진 호가창
 	// 잔량/오토스케일링 현황을 그라파나 team1-overview 대시보드가 이미
 	// 쓰고 있는 PromQL 그대로 모니터링 EC2의 Prometheus(infra/monitoring-ec2.tf,
