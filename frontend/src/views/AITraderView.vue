@@ -95,6 +95,8 @@ function saveStateToSession() {
       // stop request state
       stopRequested: stopRequested.value,
       stopRequestInFlight: stopRequestInFlight.value,
+      // final summary retry state (2026-08-24)
+      finalSummaryFailed: finalSummaryFailed.value,
       // timestamp to help debugging
       savedAt: new Date().toISOString(),
     }
@@ -433,6 +435,7 @@ const resetExecution = () => {
   runEndedAt.value = null
   runSpeed.value = null
   stopRequested.value = false
+  finalSummaryFailed.value = false
 }
 
 // ---- Paper trading: integrate with POST /order-api/v1/jobs, GET /order-api/v1/sessions/last-run,
@@ -457,6 +460,11 @@ const runSpeed = ref<number | null>(null)
 const stopRequested = ref(false)
 // stop 요청이 네트워크로 전송 중인지(중복 클릭 방지)
 const stopRequestInFlight = ref(false)
+
+// 종료 시점 최종 집계 조회가 자동 재시도(fetchOrderSummaryWithRetry)까지 다
+// 실패했는지 — true면 화면에 수동 "다시 조회" 버튼을 보여줌 (2026-08-24)
+const finalSummaryFailed = ref(false)
+const finalSummaryRetryLoading = ref(false)
 
 const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
@@ -520,6 +528,30 @@ const fetchOrderSummary = async (startedAt: string, endedAt?: string | null) => 
   }
 }
 
+// 종료 시점 최종 집계 조회가 실패했을 때 재시도 실패로 화면이 옛 숫자에
+// 멈춰버리는 문제 대응 (2026-08-24 실측 — 실행은 정상 COMPLETED됐는데
+// 종료 직후 recorder가 그 실행의 주문을 아직 다 못 썼거나 집계 쿼리 자체가
+// 일시적으로 느려서(504 등) 한 번 실패했고, 재시도가 없어 그대로 멈췄던
+// 사고). 3초 간격 최대 10회(총 30초)까지 재시도 — 이 화면이 이미 다른
+// 폴링(시세 수집, 세션 상태)에도 쓰는 간격과 통일. 여러 클라이언트가 동시에
+// 몰리는 상황이 아니라 화면 하나가 자기 갱신을 재시도하는 것뿐이라 지터 있는
+// 지수 백오프 없이 고정 간격으로 충분하다고 판단.
+const fetchOrderSummaryWithRetry = async (
+  startedAt: string,
+  endedAt?: string | null,
+  maxAttempts = 10,
+  intervalMs = 3000,
+) => {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const summary = await fetchOrderSummary(startedAt, endedAt)
+    if (summary !== null) return summary
+    if (attempt < maxAttempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+  }
+  return null
+}
+
 // Helpers: market fill percent and buy/sell ratio
 const marketFillRate = (m: MarketOrderSummary) => {
   if (!m || !m.accepted) return 0
@@ -538,6 +570,26 @@ const buySellRatio = computed(() => {
     sellPercent: total > 0 ? Math.round((sell / total) * 100) : 0,
   }
 })
+
+// 자동 재시도까지 다 실패한 뒤 사용자가 누르는 수동 재조회 버튼용 (2026-08-24)
+const retryFinalSummary = async () => {
+  if (finalSummaryRetryLoading.value) return
+  if (!runStartedAt.value) return
+  finalSummaryRetryLoading.value = true
+  try {
+    const summary = await fetchOrderSummary(runStartedAt.value, runEndedAt.value)
+    if (summary === null) {
+      infoMessage.value = '최종 주문 집계 조회 실패: 잠시 후 다시 시도해주세요.'
+    } else {
+      paperTradingResult.value = summary
+      finalSummaryFailed.value = false
+      infoMessage.value = ''
+    }
+  } finally {
+    finalSummaryRetryLoading.value = false
+    saveStateToSession()
+  }
+}
 
 // 중지 요청: POST /order-api/v1/sessions/{runId}/stop
 const stopPaperTrading = async () => {
@@ -658,11 +710,13 @@ const pollLastRun = async () => {
         executionStatus.value = status === 'COMPLETED' ? 'success' : 'error'
       }
       infoMessage.value = data.message || ''
-      const summary = await fetchOrderSummary(startedAt, endedAt)
+      const summary = await fetchOrderSummaryWithRetry(startedAt, endedAt)
       if (summary === null) {
-        infoMessage.value = '최종 주문 집계 조회 실패: recorder 경로가 설정되어 있는지 확인하세요.'
+        infoMessage.value = '최종 주문 집계 조회 실패: 아래 "다시 조회" 버튼을 눌러주세요.'
+        finalSummaryFailed.value = true
       } else {
         paperTradingResult.value = summary
+        finalSummaryFailed.value = false
       }
       // Clear the previousRunId marker now that we've observed a terminal run
       previousRunId.value = ''
@@ -689,6 +743,7 @@ const startPaperTrading = async () => {
   executionError.value = ''
   paperTradingResult.value = null
   infoMessage.value = ''
+  finalSummaryFailed.value = false
   try {
     // Record current last-run's runId before sending a new start request.
     // This prevents misinterpreting a still-stale last-run record as the new run.
@@ -770,6 +825,7 @@ watch(
     requestedCollectDate,
     stopRequested,
     stopRequestInFlight,
+    finalSummaryFailed,
   ],
   () => {
     if (restoringFromStorage) return
@@ -802,6 +858,7 @@ onMounted(async () => {
       // stopRequested persistence
       stopRequested.value = stored.stopRequested ?? stopRequested.value
       stopRequestInFlight.value = stored.stopRequestInFlight ?? stopRequestInFlight.value
+      finalSummaryFailed.value = stored.finalSummaryFailed ?? finalSummaryFailed.value
 
       // Collection state
       collectJobId.value = stored.collectJobId ?? collectJobId.value
@@ -1040,6 +1097,15 @@ const resetMatchingEngineBook = async () => {
 
         <div v-if="errorMessage" class="error-note">{{ errorMessage }}</div>
         <div v-if="infoMessage" class="info-note">{{ infoMessage }}</div>
+        <button
+          v-if="finalSummaryFailed"
+          class="btn-dark"
+          style="margin-top:8px"
+          :disabled="finalSummaryRetryLoading"
+          @click="retryFinalSummary"
+        >
+          {{ finalSummaryRetryLoading ? '조회 중...' : '다시 조회' }}
+        </button>
       </section>
 
       <aside class="panel right-panel">

@@ -596,6 +596,17 @@ func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to t
 // 메인 집계와 달리 COALESCE가 필요 없다 — GROUP BY는 결과에 없는 마켓을
 // 아예 안 돌려주므로(빈 그룹이 없음), 한 그룹에 행이 1개라도 있으면
 // SUM(CASE...)이 NULL이 아니라 항상 0 이상의 숫자가 나온다.
+//
+// **`FORCE INDEX (idx_trade_order_mode_submitted)` — 2026-08-24 실측 성능
+// 버그 수정.** 랙도 0이고 DB도 한가한 상태에서 이 API가 45초씩 걸리는 걸
+// 발견해 EXPLAIN으로 확인한 결과, 옵티마이저가 `GROUP BY market_code`의
+// 정렬(파일소트)을 피하려고 `idx_trade_order_market_status(market_code, status)`를
+// 골랐는데, 이 인덱스엔 mode/submitted_at이 없어서 그 조건을 인덱스로 거르지
+// 못하고 **테이블 전체(약 547,157행)를 인덱스 풀스캔**한 뒤에야 걸러냈다 —
+// 실제 조건에 맞는 행은 151,733건뿐이라 3.6배를 더 훑은 셈. `mode`+
+// `submitted_at`로 먼저 걸러 151K건만 남기고(선택도가 훨씬 좋음), 그
+// 결과만 정렬/그룹핑하는 게 훨씬 빠르므로 인덱스를 강제 지정한다 —
+// `orderSummaryBySide`도 같은 구조라 동일하게 적용.
 func (q *MySQLQuerier) orderSummaryByMarket(ctx context.Context, mode string, from, to time.Time) ([]MarketOrderSummary, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT
@@ -603,7 +614,7 @@ func (q *MySQLQuerier) orderSummaryByMarket(ctx context.Context, mode string, fr
 			COUNT(*),
 			SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END),
 			SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END)
-		FROM trade_order
+		FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
 		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
 		GROUP BY market_code
 		ORDER BY market_code
@@ -624,11 +635,12 @@ func (q *MySQLQuerier) orderSummaryByMarket(ctx context.Context, mode string, fr
 	return out, rows.Err()
 }
 
-// orderSummaryBySide는 매수/매도 접수 건수를 집계합니다.
+// orderSummaryBySide는 매수/매도 접수 건수를 집계합니다. FORCE INDEX 이유는
+// orderSummaryByMarket 주석 참고 — 같은 잘못된 인덱스 선택 문제.
 func (q *MySQLQuerier) orderSummaryBySide(ctx context.Context, mode string, from, to time.Time) ([]SideOrderSummary, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT side, COUNT(*)
-		FROM trade_order
+		FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
 		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
 		GROUP BY side
 		ORDER BY side

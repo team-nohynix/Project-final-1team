@@ -113,6 +113,20 @@ func run() (err error) {
 		}
 	})
 	defer func() {
+		// **실제 데드락 버그, 2026-08-23 발견·수정**: defer는 LIFO라 이 defer가
+		// 위쪽의 `defer cancel()`보다 먼저 실행된다. sigWG의 고루틴은
+		// "SIGTERM 수신" 또는 "ctx.Done()" 둘 중 하나로만 빠져나오는데, 정상
+		// 완료 시(SIGTERM도 안 오고, 정지 요청도 없었던 경우) `cancel()`을
+		// 호출하는 건 이 함수 맨 위에 있는 `defer cancel()` 하나뿐이고, 그건
+		// 이 defer가 다 끝나야(LIFO) 실행된다 — 즉 아래 `sigWG.Wait()`가
+		// `cancel()`이 불리기를 기다리는데, 그 `cancel()`은 `sigWG.Wait()`가
+		// 끝나기를 기다리는 순환 대기였다. 실제로 정상 종료된 리플레이 파드가
+		// 세션을 반납 못 하고 `Running`으로 영원히 남아, orderapi 세션이
+		// `IN_PROGRESS`에서 절대 안 풀리는 사고로 나타났다(프론트가 "새 실행을
+		// 시작 못 함"으로 관측). 여기서 명시적으로 한 번 더 호출해 고친다 —
+		// `cancel()`은 여러 번 불러도 안전(idempotent)하므로 위의
+		// `defer cancel()`은 안전망으로 그대로 둔다.
+		cancel()
 		signal.Stop(sigCh)
 		stopHeartbeat()
 		heartbeatWG.Wait()
