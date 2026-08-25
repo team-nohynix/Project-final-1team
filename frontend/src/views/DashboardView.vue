@@ -661,7 +661,11 @@ function flowLaneBlend(xFrac) {
 }
 function flowLaneCenterFrac(xFrac, lane) {
   if (lane === 'trunk') return 0.5
-  const off = lane === 'upper' ? -0.32 : 0.32
+  // 0.32였을 때 매칭엔진 박스가 트렁크(아래 줄)에 너무 가깝게 붙어 보인다는
+  // 지적(2026-08-25, 실제 스크린샷 픽셀 좌표로 위아래 여백이 대칭인 것까진
+  // 확인했지만 — 대칭이어도 트렁크와의 절대 분리 폭 자체가 부족해 보임) —
+  // 위/아래 레인을 트렁크에서 더 멀리 띄운다.
+  const off = lane === 'upper' ? -0.42 : 0.42
   return 0.5 + off * flowLaneBlend(xFrac)
 }
 function flowScaleFrac(n, svcKey) {
