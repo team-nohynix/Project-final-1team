@@ -60,6 +60,25 @@ resource "helm_release" "kube_state_metrics" {
   version          = "8.4.0" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
+  # 차트 기본값은 Service에 prometheus.io/scrape=true만 붙이고 port/path
+  # annotation은 안 붙인다. monitoring-ec2/prometheus.yml.tpl의 k8s-services
+  # job은 이 둘이 다 있어야 파드 프록시 경로(/api/v1/namespaces/.../pods/
+  # ...:$port/proxy$path)를 만드는데, 없으면 그 relabel 규칙이 통째로
+  # 스킵되고 __address__(EKS API 서버 자체)에 Prometheus 기본 경로("/metrics")로
+  # 그대로 스크레이프해버린다 — 그 결과 EKS API 서버 자신의 내부 메트릭
+  # (aggregator_discovery_* 등)을 kube-state-metrics 데이터인 것처럼 성공
+  # (up=1)으로 오인하고, 정작 kube_pod_*/kube_deployment_*/kube_node_*는
+  # 전혀 안 들어와서 이걸 쓰는 그라파나 패널이 전부 "No data"가 된다
+  # (2026-08-25, EKS 전체 destroy→apply 리허설 후 그라파나에서 실측 발견).
+  values = [yamlencode({
+    service = {
+      annotations = {
+        "prometheus.io/port" = "8080"
+        "prometheus.io/path" = "/metrics"
+      }
+    }
+  })]
+
   depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth, helm_release.aws_load_balancer_controller]
 }
 
@@ -70,6 +89,17 @@ resource "helm_release" "node_exporter" {
   chart            = "prometheus-node-exporter"
   version          = "4.56.1" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
+
+  # kube_state_metrics 바로 위 주석과 같은 이유 — 이 차트도 기본값으로는
+  # port/path annotation을 안 붙인다.
+  values = [yamlencode({
+    service = {
+      annotations = {
+        "prometheus.io/port" = "9100"
+        "prometheus.io/path" = "/metrics"
+      }
+    }
+  })]
 
   depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth, helm_release.aws_load_balancer_controller]
 }

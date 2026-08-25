@@ -289,7 +289,7 @@
       "id": 6,
       "targets": [
         {
-          "expr": "sum by (pod) (kube_pod_container_status_restarts_total{exported_namespace=\"backend\"})",
+          "expr": "sum by (exported_pod) (kube_pod_container_status_restarts_total{exported_namespace=\"backend\"})",
           "format": "table",
           "instant": true
         }
@@ -305,7 +305,7 @@
             },
             "renameByName": {
               "Value": "재시작 횟수",
-              "pod": "파드"
+              "exported_pod": "파드"
             }
           }
         }
@@ -377,7 +377,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", pod=~\"^backend-.*\"})",
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", exported_pod=~\"^backend-.*\"})",
           "legendFormat": "running"
         }
       ],
@@ -421,7 +421,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"collector\", pod=~\"^backend-.*\"})",
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"collector\", exported_pod=~\"^backend-.*\"})",
           "legendFormat": "restarts"
         }
       ],
@@ -507,7 +507,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_status_phase{exported_namespace=\"ai-trader\", phase=\"Running\", pod=~\"^ai-trader-.*\"})",
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"ai-trader\", phase=\"Running\", exported_pod=~\"^ai-trader-.*\"})",
           "legendFormat": "running"
         }
       ],
@@ -551,7 +551,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"ai-trader\", pod=~\"^ai-trader-.*\"})",
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"ai-trader\", exported_pod=~\"^ai-trader-.*\"})",
           "legendFormat": "restarts"
         }
       ],
@@ -757,7 +757,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^orderapi-.*\"})",
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", exported_pod=~\"^orderapi-.*\"})",
           "legendFormat": "running"
         }
       ],
@@ -804,7 +804,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^orderapi-.*\"})",
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", exported_pod=~\"^orderapi-.*\"})",
           "legendFormat": "restarts"
         }
       ],
@@ -1130,7 +1130,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^matching-engine-.*\"})",
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", exported_pod=~\"^matching-engine-.*\"})",
           "legendFormat": "running"
         }
       ],
@@ -1177,7 +1177,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^matching-engine-.*\"})",
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", exported_pod=~\"^matching-engine-.*\"})",
           "legendFormat": "restarts"
         }
       ],
@@ -1545,7 +1545,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", pod=~\"^recorder-.*\"})",
+          "expr": "sum(kube_pod_status_phase{exported_namespace=\"backend\", phase=\"Running\", exported_pod=~\"^recorder-.*\"})",
           "legendFormat": "running"
         }
       ],
@@ -1592,7 +1592,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", pod=~\"^recorder-.*\"})",
+          "expr": "sum(kube_pod_container_status_restarts_total{exported_namespace=\"backend\", exported_pod=~\"^recorder-.*\"})",
           "legendFormat": "restarts"
         }
       ],
@@ -2658,7 +2658,7 @@
       },
       "targets": [
         {
-          "expr": "(count(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", pod=~\"^backend-.*\"}) > bool 0) or vector(0)",
+          "expr": "(count(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", exported_pod=~\"^backend-.*\"}) > bool 0) or vector(0)",
           "legendFormat": "상태"
         }
       ],
@@ -2774,7 +2774,7 @@
       },
       "targets": [
         {
-          "expr": "(count(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", pod=~\"^backend-.*\"}) > bool 0) or vector(0)",
+          "expr": "(count(kube_pod_status_phase{exported_namespace=\"collector\", phase=\"Running\", exported_pod=~\"^backend-.*\"}) > bool 0) or vector(0)",
           "legendFormat": "상태"
         }
       ],
