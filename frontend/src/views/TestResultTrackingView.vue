@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onBeforeUnmount, onMounted } from 'vue'
+import { ref, onBeforeUnmount, onMounted, computed } from 'vue'
 
 // input
 const traceId = ref('')
@@ -255,6 +255,35 @@ async function fetchSummary() {
     summary.value = { accepted: null, filled: null, unfilled: null }
   }
 }
+
+// derived metrics (reuse same formulas as template)
+const TPS_GOAL = 10000
+const FILL_GOAL = 90 // percent
+
+const averageTPS = computed(() => {
+  if (summary.value.accepted == null || !runInfo.value || !runInfo.value.startedAt) return null
+  const durationSec = Math.max(1, ((runInfo.value.endedAt ? new Date(runInfo.value.endedAt).getTime() : Date.now()) - new Date(runInfo.value.startedAt).getTime())/1000)
+  return ((summary.value.accepted||0) / durationSec)
+})
+
+const fillRate = computed(() => {
+  if (!summary.value || summary.value.accepted == null) return null
+  return (summary.value.filled || 0) / (summary.value.accepted || 1) * 100
+})
+
+const tpsPass = computed(() => {
+  return averageTPS.value != null && averageTPS.value >= TPS_GOAL
+})
+
+const fillPass = computed(() => {
+  return fillRate.value != null && fillRate.value >= FILL_GOAL
+})
+
+const overallState = computed(() => {
+  // If both key metrics are completely absent, show 'no-data'
+  if (averageTPS.value == null && fillRate.value == null) return 'no-data'
+  return (tpsPass.value && fillPass.value) ? 'pass' : 'fail'
+})
 </script>
 
 <template>
@@ -323,19 +352,27 @@ async function fetchSummary() {
     <div class="mid-cards">
       <div class="left">
         <h4 class="card-title">목표 대비 처리 성능</h4>
-        <div style="display:flex; flex-direction:column; gap:12px">
-          <div>
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px">
+          <div style="flex:1"></div>
+          <div :class="['overall-badge', overallState === 'pass' ? 'pass' : overallState === 'fail' ? 'fail' : 'no-data']" style="font-weight:800; padding:6px 12px; border-radius:14px">
+            <template v-if="overallState === 'pass'">종합 목표 달성</template>
+            <template v-else-if="overallState === 'fail'">종합 목표 미달</template>
+            <template v-else>데이터 없음</template>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:row; gap:12px">
+          <div style="flex:1">
             <div style="color:#9fb0c2; font-size:13px">평균 처리량 (평균 TPS)</div>
-            <div style="font-weight:800; font-size:20px; margin-top:6px">{{ summary.accepted != null && runInfo && runInfo.startedAt ? ( ((summary.accepted||0) / Math.max(1, ((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000))).toFixed(2) : '--' }} req/s</div>
+            <div :style="{ fontWeight: 800, fontSize: '20px', marginTop: '6px', color: (averageTPS != null ? (tpsPass ? '#2ed39a' : '#ff6b6b') : undefined) }">{{ averageTPS != null ? averageTPS.toFixed(2) : '--' }} req/s <small :style="{ color: (averageTPS != null ? (tpsPass ? '#2ed39a' : '#ff6b6b') : '#9fb0c2'), marginLeft: '8px', fontSize: '12px' }">{{ averageTPS != null ? (tpsPass ? '달성' : '미달') : '' }}</small></div>
             <div class="progress-bar-track" style="margin-top:8px">
               <div class="progress-bar-fill" :style="{ width: summary.accepted && runInfo && runInfo.startedAt ? Math.min(100, ((summary.accepted||0) / Math.max(1, ((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000)) / 10000 * 100) + '%' : '0%' }"></div>
             </div>
             <div style="color:#9fb0c2; margin-top:6px">목표: 10,000건/초</div>
           </div>
 
-          <div>
+          <div style="flex:1">
             <div style="color:#9fb0c2; font-size:13px">체결률</div>
-            <div style="font-weight:800; font-size:20px; margin-top:6px">{{ summary.accepted ? ((summary.filled||0) / (summary.accepted||1) * 100).toFixed(2) + '%' : '--' }}</div>
+            <div :style="{ fontWeight: 800, fontSize: '20px', marginTop: '6px', color: (fillRate != null ? (fillPass ? '#2ed39a' : '#ff6b6b') : undefined) }">{{ fillRate != null ? fillRate.toFixed(2) + '%' : '--' }} <small :style="{ color: (fillRate != null ? (fillPass ? '#2ed39a' : '#ff6b6b') : '#9fb0c2'), marginLeft: '8px', fontSize: '12px' }">{{ fillRate != null ? (fillPass ? '달성' : '미달') : '' }}</small></div>
             <div class="progress-bar-track" style="margin-top:8px">
               <div class="progress-bar-fill" :style="{ width: summary.accepted ? Math.min(100, ((summary.filled||0) / (summary.accepted||1) * 100) / 90 * 100) + '%' : '0%' }"></div>
             </div>
@@ -356,6 +393,7 @@ async function fetchSummary() {
         <input v-model="traceId" type="text" class="trace-input" placeholder="Order ID를 입력하세요" />
         <button type="button" class="btn-primary" :disabled="uiState === 'loading'" @click="doSearch">검색</button>
       </div>
+      <div class="trace-hint">디버깅용 기능입니다 — 주문 접수 응답, S3 주문 기록, 서버 로그에서 확인한 주문 ID를 입력하세요.</div>
 
       <div class="trace-result">
         <div v-if="uiState === 'loading'" class="center-msg">조회 중입니다...</div>
@@ -422,6 +460,24 @@ async function fetchSummary() {
 </template>
 
 <style scoped>
+.overall-badge.pass { background: #2ed39a; color: #052018 }
+.overall-badge.fail { background: #ff6b6b; color: #3a0d0d }
+.overall-badge.no-data { background: #223244; color: #9fb0c2 }
+.trace-hint { color: #9fb0c2; font-size: 13px; margin-top: 10px; }
+
+/* progress bar visuals */
+.progress-bar-track {
+  background: #0b1e2f;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #3478f6;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
 .trt-page {
   width: 100%;
   max-width: none;
