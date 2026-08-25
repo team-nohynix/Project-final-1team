@@ -1,0 +1,45 @@
+# recorder 전용 NodePool — c6i.large(2vCPU/allocatable ~3.1Gi)로는 60배속 데모
+# 종료 시점의 몰아치는 체결 배치를 recorder가 못 버텨서(512Mi/1Gi 둘 다
+# OOMKilled 실측, 2026-08-25) 2.5Gi까지 올렸는데, 그마저도 team1-backend
+# NodePool의 유일한 인스턴스 타입(c6i.large) allocatable 대부분을 recorder
+# 혼자 차지하는 상태였다. team1-backend는 매칭엔진 성능 측정 대상이라
+# 인스턴스 타입을 고정해야 하므로(nodepool-backend.yaml 주석 참고) 거기에
+# 손대는 대신, recorder만 별도 NodePool로 분리해 더 큰 인스턴스에서 여유
+# 있게 돌린다 — 매칭엔진/접수API가 스케줄되는 노드 풀에는 전혀 영향 없음.
+# EC2NodeClass(subnet/SG/instanceProfile)는 nodepool-backend.yaml의
+# team1-backend를 그대로 재사용한다(둘 다 같은 backend 네임스페이스 VPC
+# 리소스를 쓰므로 중복 정의할 이유가 없음).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: team1-recorder
+spec:
+  template:
+    metadata:
+      labels:
+        team1.io/workload: recorder
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: team1-backend
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["c6i.xlarge"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      taints:
+        - key: workload
+          value: recorder
+          effect: NoSchedule
+  limits:
+    cpu: "8" # c6i.xlarge(4vCPU) 최대 2대 상당 — recorder는 replicas 1~10(KEDA)이지만
+             # 실제로 한 번에 여러 대가 뜨는 워크로드가 아니라 여유만 확보하는 목적
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m

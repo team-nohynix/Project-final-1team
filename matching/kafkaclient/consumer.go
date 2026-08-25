@@ -9,12 +9,29 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	kafka "github.com/segmentio/kafka-go"
 	"github.com/shopspring/decimal"
 
 	"matching/engine"
 	"matching/orderbook"
+)
+
+// maxConsecutiveNextFailures/nextRetry* — cg.Next()가 실패할 때(그룹 조인/리밸런스
+// 도중의 일시적 에러, 예: "[27] Rebalance In Progress")를 곧장 fatal로 취급하지
+// 않고 재시도하는 데 쓰는 백오프 파라미터입니다. 2026-08-25, 매칭 엔진 10개 파드
+// 전부가 같은 초에 이 에러로 동시 종료되는 걸 라이브로 확인했습니다 — 한 파드의
+// 재시작이 그룹을 다시 흔들어 마침 그 순간 조인 중이던 다른 파드들도 같은 에러로
+// 죽는 연쇄가 유력한 원인입니다(재시도 없이 바로 log.Fatalf였음, main.go 참고).
+// 무한 재시도는 하지 않습니다 — livenessProbe(/metrics)가 Kafka 컨슘 루프와
+// 무관한 별도 HTTP 서버라 이 루프가 진짜로 영구 고착돼도 재시작 안전망이
+// 작동하지 않으므로, 연속 실패가 임계치를 넘으면 기존처럼 에러를 반환해
+// K8s가 재시작하게 둡니다.
+const (
+	maxConsecutiveNextFailures = 10
+	nextRetryBaseDelay         = 200 * time.Millisecond
+	nextRetryMaxDelay          = 5 * time.Second
 )
 
 // orderMessage는 orderapi/kafkaclient.go의 orderEvent와 같은 모양입니다. 이 규격은
@@ -118,16 +135,37 @@ func (c *GroupConsumer) Lag() int64 {
 }
 
 // Run은 제너레이션이 바뀔 때마다(=리밸런스) 이번 제너레이션에서 배정받은 파티션마다
-// 소비 고루틴을 하나씩 gen.Start로 띄웁니다. ctx가 취소되면 반환합니다.
+// 소비 고루틴을 하나씩 gen.Start로 띄웁니다. ctx가 취소되면 반환합니다. cg.Next()가
+// 실패하면(리밸런스 도중 일시적 에러 등, maxConsecutiveNextFailures 주석 참고)
+// 곧바로 에러를 반환하지 않고 백오프 후 재시도합니다 — 제너레이션을 한 번이라도
+// 성공적으로 얻으면 연속 실패 카운트를 초기화하므로, 드물게 한 번 실패하는 것은
+// 문제가 되지 않습니다.
 func (c *GroupConsumer) Run(ctx context.Context) error {
+	consecutiveFailures := 0
 	for {
 		gen, err := c.cg.Next(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("다음 제너레이션 획득 실패: %w", err)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveNextFailures {
+				return fmt.Errorf("다음 제너레이션 획득 실패 (%d회 연속): %w", consecutiveFailures, err)
+			}
+			delay := nextRetryBaseDelay * time.Duration(consecutiveFailures)
+			if delay > nextRetryMaxDelay {
+				delay = nextRetryMaxDelay
+			}
+			log.Printf("[rebalance] 다음 제너레이션 획득 실패 (%d/%d회 연속, %v 후 재시도): %v",
+				consecutiveFailures, maxConsecutiveNextFailures, delay, err)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
 		}
+		consecutiveFailures = 0
 
 		assignments := gen.Assignments[c.topic]
 		log.Printf("[rebalance] 새 제너레이션(id=%d) 시작, 이 인스턴스 배정 파티션 %d개", gen.ID, len(assignments))

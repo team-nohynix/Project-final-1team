@@ -226,6 +226,19 @@ const overallState = computed(() => {
       <hr />
     </header>
 
+    <div class="trace-card">
+      <h4 class="card-title">리플레이별 결과 조회</h4>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px">
+        <select v-model="selectedRunId" @change="selectRun(selectedRunId)" style="flex:1; height:40px; background:#071826; border:1px solid #172a3e; color:#e6eef8; padding:0 10px; border-radius:8px">
+          <option v-for="run in runHistory" :key="run.runId" :value="run.runId">
+            {{ toKST(run.startedAt) }} · {{ run.status === 'IN_PROGRESS' ? '진행중' : run.status === 'COMPLETED' ? '완료' : run.status }}
+          </option>
+        </select>
+        <button class="btn-primary" type="button" @click="loadRunHistory">조회</button>
+      </div>
+      <div style="color:#9fb0c2; font-size:13px">선택한 실행의 집계를 오른쪽 상단 요약과 목표 비교 카드에서 확인합니다.</div>
+    </div>
+
     <div class="experiment-card">
       <div class="exp-left">
         <div class="exp-id">최근 실행</div>
@@ -310,34 +323,14 @@ const overallState = computed(() => {
           </div>
         </div>
       </div>
-
-      <div class="right">
-        <h4 class="card-title">요약</h4>
-        <div style="color:#9fb0c2">실측값과 목표값을 비교합니다. 실행 정보가 없거나 집계가 이루어지지 않으면 "데이터 없음"으로 표시됩니다.</div>
-      </div>
     </div>
 
-    <div class="trace-card">
-      <h4 class="card-title">시뮬레이션별 결과 조회</h4>
-      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px">
-        <select v-model="selectedRunId" @change="selectRun(selectedRunId)" style="flex:1; height:40px; background:#071826; border:1px solid #172a3e; color:#e6eef8; padding:0 10px; border-radius:8px">
-          <option v-for="run in runHistory" :key="run.runId" :value="run.runId">
-            {{ toKST(run.startedAt) }} · {{ run.status === 'IN_PROGRESS' ? '진행중' : run.status === 'COMPLETED' ? '완료' : run.status }}
-          </option>
-        </select>
-        <button class="btn-primary" type="button" @click="loadRunHistory">새로고침</button>
-      </div>
-      <div style="color:#9fb0c2; font-size:13px">선택한 실행의 집계를 오른쪽 상단 요약과 목표 비교 카드에서 확인합니다.</div>
-    </div>
+    
   </div>
 </template>
 
 <style scoped>
 .overall-badge.pass { background: #2ed39a; color: #052018 }
-.overall-badge.fail { background: #ff6b6b; color: #3a0d0d }
-.overall-badge.no-data { background: #223244; color: #9fb0c2 }
-.trace-hint { color: #9fb0c2; font-size: 13px; margin-top: 10px; }
-
 /* progress bar visuals */
 .progress-bar-track {
   background: #0b1e2f;
@@ -431,13 +424,12 @@ const overallState = computed(() => {
 
 .mid-cards {
   display: grid;
-  grid-template-columns: 65% 35%;
+  grid-template-columns: 1fr;
   gap: 16px;
-  /* stretch children to same height so left/right visually match */
+  /* stretch child to full width */
   align-items: stretch;
 }
-.mid-cards .left,
-.mid-cards .right {
+.mid-cards .left {
   background: #0d1b2a;
   border: 1px solid #172a3e;
   border-radius: 12px;

@@ -26,15 +26,25 @@ import (
 // 주문이 그대로 남습니다(2026-08-21 새벽 실측: DB는 거의 비었는데 이 값만
 // 186만 건). DB 정리 버튼은 이 상태를 못 건드립니다.
 //
-// 기본 동작(force 없음) — 두 단계:
-//  1. Redis의 전체 스냅샷(orderbook:<market>) 키만 지웁니다 — 워터마크
-//     (orderbook:<market>:watermark, matching/engine의 SaveWatermark/
-//     LoadWatermark)는 반드시 남겨둡니다. 전체 스냅샷이 없어도 워터마크가
-//     있으면 Engine.Recover()가 거기서부터 이어 읽어서, offset 0 전체 재생
-//     사고를 안 냅니다 — 다만 그 시점 호가창 상태 자체는(스냅샷이 없으니)
-//     빈 채로 다시 시작합니다.
-//  2. matching-engine Deployment에 rollout restart를 걸어서, 지금 각 파드가
-//     메모리에 들고 있는 잔량도 실제로 비웁니다.
+// 기본 동작(force 없음) — 세 단계, 반드시 이 순서로:
+//  1. matching-engine Deployment에 rollout restart를 걸고, 완전히 끝날 때까지
+//     기다립니다(waitForRolloutComplete) — 지금 각 파드가 메모리에 들고 있는
+//     잔량을 실제로 비우려면 파드 자체가 새로 떠야 합니다.
+//  2. 롤아웃이 끝난 뒤에야 Redis의 전체 스냅샷(orderbook:<market>) 키를
+//     지웁니다 — 워터마크(orderbook:<market>:watermark, matching/engine의
+//     SaveWatermark/LoadWatermark)는 반드시 남겨둡니다. 전체 스냅샷이 없어도
+//     워터마크가 있으면 Engine.Recover()가 거기서부터 이어 읽어서, offset 0
+//     전체 재생 사고를 안 냅니다 — 다만 그 시점 호가창 상태 자체는(스냅샷이
+//     없으니) 빈 채로 다시 시작합니다.
+//
+// **삭제를 반드시 롤아웃 완료 뒤로 미루는 이유(2026-08-25, 실측)** — 원래는
+// 삭제를 먼저 하고 그다음 재시작을 걸었는데, 종료 중인 기존 파드가
+// consumePartition의 정상 종료 경로(Release→Engine.Handoff)에서 자기가 들고
+// 있던(리셋 전) 잔량을 그대로 Redis에 마지막으로 한 번 더 저장해버려서, 방금
+// 지운 스냅샷이 옛 데이터로 되살아났습니다 — 시연 직전 데이터 초기화 중
+// 라이브로 재현. 삭제를 롤아웃이 완전히 끝난 뒤(옛 세대 파드가 전부
+// 종료돼 더 이상 아무도 쓰지 않는 시점)로 미루면 이 되살아남이 구조적으로
+// 불가능해집니다.
 //
 // **?force=true — 워터마크가 없는 마켓도(오늘 밤 KRW-WLD/AI/ONDO처럼) 즉시
 // 비우고 싶을 때** 씁니다(2026-08-21, "왜 한번에 다 안지워져?" 질문 대응).
@@ -66,20 +76,35 @@ func resetMatchingEngineBookHandler(redisClient *redis.Client, deployments appsv
 			watermarksForced = n
 		}
 
-		deleted, err := deleteOrderbookSnapshots(r.Context(), redisClient)
-		if err != nil {
-			log.Printf("매칭엔진 호가창 잔량 초기화 실패 — 스냅샷 삭제 실패: %v", err)
-			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "스냅샷 삭제에 실패했습니다.")
-			return
-		}
-
 		if err := triggerRolloutRestart(r.Context(), deployments, deploymentName); err != nil {
-			log.Printf("매칭엔진 호가창 잔량 초기화 — 스냅샷 %d개 삭제는 성공, 재시작 트리거 실패: %v", deleted, err)
-			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "스냅샷은 지웠지만 매칭엔진 재시작에 실패했습니다 — 다음 자연 재시작 전까지 이미 떠 있는 파드의 메모리 상태는 그대로입니다.")
+			log.Printf("매칭엔진 호가창 잔량 초기화 실패 — 재시작 트리거 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "매칭엔진 재시작에 실패했습니다.")
 			return
 		}
 
-		log.Printf("매칭엔진 호가창 잔량 초기화 완료 — 스냅샷 %d개 삭제, force=%v(워터마크 %d개 강제 설정), 매칭엔진 rollout restart 트리거함", deleted, force, watermarksForced)
+		// 아래 두 단계(롤아웃 완료 대기 + 스냅샷 삭제)는 r.Context()가 아니라
+		// context.Background()로 돌립니다 — r.Context()를 그대로 쓰면 ALB/클라이언트
+		// 쪽 타임아웃이 rolloutWaitTimeout(90s)보다 먼저 끊길 때 대기가 "context
+		// canceled"로 조기 실패해 스냅샷 삭제를 건너뜁니다(2026-08-25, 실측 — 롤아웃
+		// 자체는 정상적으로 끝났는데도 핸들러가 먼저 포기해서 삭제가 안 됨). Release의
+		// Handoff가 genCtx 대신 context.Background()를 쓰는 것과 같은 이유입니다 —
+		// 클라이언트 연결이 끊겨도 서버 쪽 정리 작업 자체는 끝까지 마쳐야 합니다.
+		// 응답을 못 받은 클라이언트는 재시도하면 되지만, 응답은 받았는데 실제로는
+		// 안 지워진 상태보다는 이 쪽이 훨씬 안전합니다.
+		if err := waitForRolloutComplete(context.Background(), deployments, deploymentName, rolloutWaitTimeout); err != nil {
+			log.Printf("매칭엔진 호가창 잔량 초기화 — 재시작은 트리거됨, 완료 대기 실패(스냅샷 삭제 건너뜀): %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "매칭엔진 재시작 완료를 기다리다 실패했습니다 — 스냅샷은 아직 안 지웠습니다. 파드 상태를 확인한 뒤 다시 시도하세요.")
+			return
+		}
+
+		deleted, err := deleteOrderbookSnapshots(context.Background(), redisClient)
+		if err != nil {
+			log.Printf("매칭엔진 호가창 잔량 초기화 실패 — 롤아웃은 끝났지만 스냅샷 삭제 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "매칭엔진은 재시작됐지만 스냅샷 삭제에 실패했습니다 — 다시 시도하세요.")
+			return
+		}
+
+		log.Printf("매칭엔진 호가창 잔량 초기화 완료 — 매칭엔진 rollout restart 완료 후 스냅샷 %d개 삭제, force=%v(워터마크 %d개 강제 설정)", deleted, force, watermarksForced)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"deletedSnapshots": deleted,
 			"forced":           force,
@@ -162,4 +187,54 @@ func triggerRolloutRestart(ctx context.Context, deployments appsv1.DeploymentInt
 	patch := []byte(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"` + time.Now().UTC().Format(time.RFC3339) + `"}}}}}`)
 	_, err := deployments.Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
+}
+
+// rolloutWaitTimeout/rolloutPollInterval — waitForRolloutComplete가 롤아웃
+// 완료를 기다리는 상한과 폴링 주기입니다. 매칭엔진은 최대 10개까지
+// 스케일아웃되므로(matching-engine-scaledobject.yaml maxReplicaCount) 여유
+// 있게 잡습니다 — 이 대기 자체가 실패해도(타임아웃) 핸들러는 스냅샷을
+// 지우지 않고 에러로 반환하므로(안전한 실패), 값을 넉넉히 둬서 정상
+// 케이스에서 조기 타임아웃으로 헛되이 실패하지 않게 합니다.
+const (
+	rolloutWaitTimeout  = 90 * time.Second
+	rolloutPollInterval = 2 * time.Second
+)
+
+// waitForRolloutComplete는 `kubectl rollout status`와 같은 조건(신규 세대
+// 파드가 전부 뜨고 구세대 파드가 전부 종료됨)을 만족할 때까지 폴링합니다.
+// resetMatchingEngineBookHandler가 스냅샷 삭제를 이 완료 시점 뒤로 미루는 데
+// 씁니다 — adminreset.go 주석의 "삭제를 반드시 롤아웃 완료 뒤로 미루는 이유"
+// 참고. Deployment.Status가 원하는 조건(UpdatedReplicas/Replicas/
+// AvailableReplicas가 스펙의 replicas와 모두 같고, ObservedGeneration이
+// 최신 Generation을 따라잡음)을 kubectl과 동일하게 확인합니다.
+func waitForRolloutComplete(ctx context.Context, deployments appsv1.DeploymentInterface, name string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(rolloutPollInterval)
+	defer ticker.Stop()
+
+	for {
+		dep, err := deployments.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("Deployment 조회 실패: %w", err)
+		}
+		wanted := int32(1)
+		if dep.Spec.Replicas != nil {
+			wanted = *dep.Spec.Replicas
+		}
+		st := dep.Status
+		if st.ObservedGeneration >= dep.Generation &&
+			st.UpdatedReplicas == wanted &&
+			st.Replicas == wanted &&
+			st.AvailableReplicas == wanted {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("롤아웃 완료 대기 시간 초과(%v): %w", timeout, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }

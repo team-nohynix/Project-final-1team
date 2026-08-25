@@ -20,12 +20,18 @@ spec:
         app: recorder
     spec:
       serviceAccountName: sa-recorder
+      # 2026-08-25: team1-backend NodePool(c6i.large 고정)은 매칭엔진 성능 측정
+      # 대상이라 인스턴스 타입을 못 바꾼다(nodepool-backend.yaml 주석 참고) —
+      # recorder는 measured 대상이 아니고, 60/80배속 종료 시점 몰아치는 배치를
+      # 버티려면 c6i.large 한 대(allocatable ~3.1Gi)로는 recorder 혼자 거의 다
+      # 써버린다. team1-recorder라는 별도 NodePool(c6i.xlarge, ~7.6Gi)로 분리해
+      # 매칭엔진/접수API가 도는 노드 풀에는 전혀 영향 없이 여유를 확보한다.
       tolerations:
         - key: workload
-          value: backend
+          value: recorder
           effect: NoSchedule
       nodeSelector:
-        team1.io/workload: backend
+        team1.io/workload: recorder
       containers:
         - name: recorder
           image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:recorder-latest
@@ -61,13 +67,20 @@ spec:
             # RDS 저장 경로는 이 버그와 무관 — 원본 아카이빙(S3)만 계속 실패해온 것.
             - name: ARCHIVE_BUCKET
               value: "team1-truss-trade-results"
+          # 2026-08-25 실측: 60배속 데모 세션이 끝나는 순간(매칭엔진이 부하 내내
+          # 10/10 최대치였음) recorder가 한꺼번에 몰린 체결 배치를 처리하다
+          # 512Mi에서 OOMKilled, 1Gi로 올려도 재발, 2.5Gi로 겨우 안정화됐다 —
+          # 그마저도 c6i.large 노드 allocatable(~3.1Gi)을 recorder 혼자 거의
+          # 다 쓰는 빠듯한 상태였다. team1-recorder NodePool(c6i.xlarge,
+          # ~7.6Gi)로 옮기면서 80배속처럼 더 빠른 속도의 종료 버스트도 여유
+          # 있게 버티도록 5Gi로 올린다.
           resources:
             requests:
-              cpu: 200m
-              memory: 256Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 2Gi
+            limits:
+              cpu: 2000m
+              memory: 5Gi
           # orderapi에서 재현된 것과 같은 이유(readinessProbe 없이 재시작 직후 트래픽을
           # 받아 502)로 추가(2026-08-19). recorder는 RDS 접속 실패 시 크래시루프에 빠지는
           # 걸 이미 겪어서(DB 비밀번호 로테이션 사건), /metrics(HTTP 서버만 뜨면 응답,
