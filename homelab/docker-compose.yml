@@ -178,6 +178,8 @@ services:
       REDIS_ADDR: "redis:6379"
       REDIS_TLS_ENABLED: "false"
       DATABASE_URL: "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/team1_truss?parseTime=true&loc=UTC"
+    volumes:
+      - recorder-archive-data:/app/records
     ports:
       - "8082:8082"
 
@@ -257,3 +259,4 @@ volumes:
   grafana-data:
   backend-data:
   orderapi-data:
+  recorder-archive-data:

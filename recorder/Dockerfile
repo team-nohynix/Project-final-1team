@@ -8,6 +8,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/recorder .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 appuser
+WORKDIR /app
+# orderapi/Dockerfile과 같은 이유(2026-08-26, 감사 중 발견) — WORKDIR 없으면
+# archive.NewLocalStore("records")가 /records를 만들려다 permission denied로
+# 계속 실패한다. ARCHIVE_BUCKET을 안 채운 홈서버에서는 항상 이 경로를 타는데,
+# 치명적이지 않은(로그만 남기고 계속 진행) 실패라 recorder 자체는 안 죽어서
+# 이번 감사 전까지 들키지 않았다 — 그동안의 모든 배치가 계속 실패했었다는 뜻.
+RUN mkdir -p /app/records && chown -R appuser:appuser /app/records
 COPY --from=build /out/recorder /app/recorder
 # schema.sql은 recorder가 런타임에 읽지 않습니다(자동 마이그레이션 없음 —
 # CLAUDE.md 참고, RDS에 최초 1회 손으로 적용해야 함) — 그래도 이미지에 같이
