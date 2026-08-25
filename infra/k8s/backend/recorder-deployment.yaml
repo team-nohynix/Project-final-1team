@@ -61,13 +61,19 @@ spec:
             # RDS 저장 경로는 이 버그와 무관 — 원본 아카이빙(S3)만 계속 실패해온 것.
             - name: ARCHIVE_BUCKET
               value: "team1-truss-trade-results"
+          # 2026-08-25 실측: 60배속 데모 세션이 끝나는 순간(매칭엔진이 부하 내내
+          # 10/10 최대치였음) recorder가 한꺼번에 몰린 체결 배치를 처리하다
+          # 512Mi에서 OOMKilled, 임시로 1Gi로 올려도 다시 OOMKilled(크래시루프)
+          # 됐다. 2.5Gi로 올려서 실제로 안정화된 걸 라이브로 확인 — 최소한 이
+          # 이상은 있어야 60배속 종료 시점의 몰아치는 배치를 버틴다(80배속처럼
+          # 더 빠른 속도는 여유를 더 둬야 할 수 있음).
           resources:
             requests:
-              cpu: 200m
-              memory: 256Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1536Mi
+            limits:
+              cpu: 1500m
+              memory: 2560Mi
           # orderapi에서 재현된 것과 같은 이유(readinessProbe 없이 재시작 직후 트래픽을
           # 받아 502)로 추가(2026-08-19). recorder는 RDS 접속 실패 시 크래시루프에 빠지는
           # 걸 이미 겪어서(DB 비밀번호 로테이션 사건), /metrics(HTTP 서버만 뜨면 응답,
