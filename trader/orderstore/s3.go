@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"trader/order"
 )
@@ -44,7 +47,12 @@ func NewS3Storage(bucket string) Storage {
 func (s *S3Storage) Save(market string, start, end time.Time, orders []order.RecordedOrder) (string, error) {
 	key := objectKey(market, start, end)
 
-	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: orders}, "", "  ")
+	combined, err := s.mergeWithExisting(key, orders)
+	if err != nil {
+		return "", err
+	}
+
+	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: combined}, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("JSON 직렬화 실패: %w", err)
 	}
@@ -60,4 +68,32 @@ func (s *S3Storage) Save(market string, start, end time.Time, orders []order.Rec
 	}
 
 	return fmt.Sprintf("s3://%s/%s", s.bucket, key), nil
+}
+
+// mergeWithExisting은 key에 이미 저장된 주문 기록이 있으면 그 뒤에 orders를
+// 이어붙입니다(Storage.Save의 병합 계약 참고). 객체가 아직 없으면(첫 플러시) orders를
+// 그대로 돌려줍니다.
+func (s *S3Storage) mergeWithExisting(key string, orders []order.RecordedOrder) ([]order.RecordedOrder, error) {
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			return orders, nil
+		}
+		return nil, fmt.Errorf("기존 객체 조회 실패: %w", err)
+	}
+	defer resp.Body.Close()
+
+	existingBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("기존 객체 읽기 실패: %w", err)
+	}
+	var existing orderRecordFile
+	if err := json.Unmarshal(existingBody, &existing); err != nil {
+		return nil, fmt.Errorf("기존 객체 파싱 실패: %w", err)
+	}
+	return append(existing.Orders, orders...), nil
 }

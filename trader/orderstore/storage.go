@@ -8,6 +8,13 @@ import (
 
 // Storage는 한 마켓에서 기록된 주문들(FR-17)을 어딘가에 저장하는 방법을 추상화합니다.
 // 주문 기록용 S3 버킷이 준비되기 전에는 LocalFileStorage, 준비된 뒤에는 S3Storage를 씁니다.
+//
+// Save는 덮어쓰기가 아니라 병합입니다(2026-08-25) — 같은 market+start+end 키에 이미
+// 저장된 게 있으면 그 뒤에 orders를 이어붙여 다시 씁니다. main.go가 실행 도중 주기적으로
+// (order.InMemoryRecorder.Drain으로 비운 만큼씩) Save를 여러 번 호출해 메모리 누적을
+// 막기 위한 변경입니다 — 파일/오브젝트 레이아웃(마켓당 파일 하나)은 그대로라
+// replayengine의 읽기 쪽은 손댈 필요가 없습니다. 매 호출은 자신이 넘긴 orders만 새로
+// 반영하면 되고, 이전에 무엇이 저장돼 있었는지는 신경 쓰지 않아도 됩니다.
 type Storage interface {
 	Save(market string, start, end time.Time, orders []order.RecordedOrder) (string, error)
 }
