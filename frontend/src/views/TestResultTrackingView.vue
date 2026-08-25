@@ -1,39 +1,27 @@
 <script setup lang="ts">
 import { ref, onBeforeUnmount, onMounted, computed } from 'vue'
 
-// input
-const traceId = ref('')
-
-// run / summary state (replaces earlier placeholders)
+// run / summary state
 const runInfo = ref<any | null>(null)
 const runLoading = ref(false)
-// flag when a last-run exists but is not from replayengine
 const lastRunNotReplay = ref(false)
 const summary = ref<any>({ accepted: null, filled: null, unfilled: null })
 
-// constants and labels
+// labels
 const OWNER_LABEL: Record<string, string> = {
   trader: '페이퍼 트레이딩',
   replayengine: '주문 재생',
 }
 
-// UI states: 'idle' | 'loading' | 'success' | 'error'
-const uiState = ref<'idle' | 'loading' | 'success' | 'error'>('idle')
-const searchMessage = ref('')
-
-// response holder
-const traceData = ref<any | null>(null)
+// run history for selector
+const runHistory = ref<Array<any>>([])
+const selectedRunId = ref<string>('')
 
 // polling handle for last-run
 let pollInterval: number | null = null
 
-// Abort and latest-response guard
-let currentController: AbortController | null = null
-let latestRequestSeq = 0
-
 function formatNumberString(s: string) {
   if (s == null) return '--'
-  // keep original precision; add thousands separators to integer part
   const parts = String(s).split('.')
   const intPart = parts[0]
   const decPart = parts[1]
@@ -45,10 +33,9 @@ function toKST(iso?: string) {
   if (!iso) return '--'
   try {
     const d = new Date(iso)
-    // KST = UTC+9
     const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
     const pad = (n: number) => String(n).padStart(2, '0')
-    return `${kst.getFullYear()}-${pad(kst.getMonth() + 1)}-${pad(kst.getDate())} ${pad(kst.getHours())}:${pad(kst.getMinutes())}:${pad(kst.getSeconds())} KST`
+    return `${kst.getFullYear()}-${pad(kst.getMonth() + 1)}-${pad(kst.getDate())} ${pad(kst.getHours())}:${pad(kst.getMinutes())}:${pad(kst.getSeconds())}`
   } catch (e) {
     return iso
   }
@@ -66,87 +53,32 @@ const MODE_LABEL: Record<string, string> = {
   REPLAY: '주문 재생',
 }
 
-async function doSearch() {
-  searchMessage.value = ''
-  traceData.value = null
-  if (!traceId.value || !traceId.value.trim()) {
-    uiState.value = 'error'
-    searchMessage.value = '주문 ID를 입력하세요.'
-    return
-  }
-
-  // cancel previous
-  if (currentController) {
-    try { currentController.abort() } catch (_) {}
-    currentController = null
-  }
-  const controller = new AbortController()
-  currentController = controller
-  const requestSeq = ++latestRequestSeq
-
-  uiState.value = 'loading'
-  searchMessage.value = ''
-
-  const url = `/recorder-api/v1/trace/${encodeURIComponent(traceId.value.trim())}`
+async function loadRunHistory() {
   try {
-    const res = await fetch(url, { signal: controller.signal })
-
-    // ignore if a newer request started
-    if (requestSeq !== latestRequestSeq) return
-
-    if (res.status === 404) {
-      // try to parse body for error code
-      let body: any = null
-      try { body = await res.json() } catch (_) { body = null }
-      if (body && body.errorCode === 'ORDER_NOT_FOUND') {
-        uiState.value = 'error'
-        searchMessage.value = '해당 주문을 찾을 수 없습니다.'
-        traceData.value = null
-        return
-      }
-      uiState.value = 'error'
-      searchMessage.value = '해당 주문을 찾을 수 없습니다.'
-      traceData.value = null
-      return
-    }
-
-    if (!res.ok) {
-      let body: any = null
-      try { body = await res.json() } catch (_) { body = null }
-      uiState.value = 'error'
-      if (body && body.message) searchMessage.value = String(body.message)
-      else searchMessage.value = `주문 추적 조회에 실패했습니다. (HTTP ${res.status})`
-      traceData.value = null
-      return
-    }
-
+    const res = await fetch('/order-api/v1/sessions/runs')
+    if (!res.ok) return
     const data = await res.json()
-
-    if (requestSeq !== latestRequestSeq) return
-
-    // success — assign and format nothing destructive (keep strings)
-    traceData.value = data
-    uiState.value = 'success'
-    searchMessage.value = ''
-  } catch (err: any) {
-    if (err && err.name === 'AbortError') {
-      // aborted — swallow silently
-      return
+    runHistory.value = Array.isArray(data) ? data : []
+    // default selection: prefer current runInfo.runId then first
+    if (runInfo.value && runInfo.value.runId) {
+      const found = runHistory.value.find((r: any) => r.runId === runInfo.value.runId)
+      if (found) selectedRunId.value = found.runId
     }
-    uiState.value = 'error'
-    traceData.value = null
-    searchMessage.value = err?.message || '주문 추적 조회에 실패했습니다.'
-  } finally {
-    // clear controller if it's the same
-    if (currentController === controller) currentController = null
+    if (!selectedRunId.value && runHistory.value.length) selectedRunId.value = runHistory.value[0].runId
+  } catch (e) {
+    // ignore
+  }
+}
+
+function selectRun(runId: string) {
+  const found = runHistory.value.find(r => r.runId === runId)
+  if (found) {
+    runInfo.value = found
+    fetchSummary()
   }
 }
 
 onBeforeUnmount(() => {
-  if (currentController) {
-    try { currentController.abort() } catch (_) {}
-    currentController = null
-  }
   if (pollInterval) {
     try { clearInterval(pollInterval) } catch (_) {}
     pollInterval = null
@@ -154,8 +86,8 @@ onBeforeUnmount(() => {
 })
 
 onMounted(() => {
-  // fetch most recent run once on mount
   fetchLastRun()
+  loadRunHistory()
 })
 
 function prettyDuration(seconds: number) {
@@ -163,7 +95,7 @@ function prettyDuration(seconds: number) {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   const s = Math.floor(seconds % 60)
-  const parts = []
+  const parts: string[] = []
   if (h) parts.push(`${h}h`)
   if (m) parts.push(`${m}m`)
   parts.push(`${s}s`)
@@ -367,7 +299,6 @@ const overallState = computed(() => {
             <div class="progress-bar-track" style="margin-top:8px">
               <div class="progress-bar-fill" :style="{ width: summary.accepted && runInfo && runInfo.startedAt ? Math.min(100, ((summary.accepted||0) / Math.max(1, ((runInfo.endedAt ? new Date(runInfo.endedAt).getTime() : Date.now()) - new Date(runInfo.startedAt).getTime())/1000)) / 10000 * 100) + '%' : '0%' }"></div>
             </div>
-            <div style="color:#9fb0c2; margin-top:6px">목표: 10,000건/초</div>
           </div>
 
           <div style="flex:1">
@@ -376,7 +307,6 @@ const overallState = computed(() => {
             <div class="progress-bar-track" style="margin-top:8px">
               <div class="progress-bar-fill" :style="{ width: summary.accepted ? Math.min(100, ((summary.filled||0) / (summary.accepted||1) * 100) / 90 * 100) + '%' : '0%' }"></div>
             </div>
-            <div style="color:#9fb0c2; margin-top:6px">목표: 90% <!-- 임시 목표치, 팀이 확정 전까지 주석으로 남김 --></div>
           </div>
         </div>
       </div>
@@ -388,73 +318,16 @@ const overallState = computed(() => {
     </div>
 
     <div class="trace-card">
-      <h4 class="card-title">주문 처리 구간 추적</h4>
-      <div class="trace-controls">
-        <input v-model="traceId" type="text" class="trace-input" placeholder="Order ID를 입력하세요" />
-        <button type="button" class="btn-primary" :disabled="uiState === 'loading'" @click="doSearch">검색</button>
+      <h4 class="card-title">시뮬레이션별 결과 조회</h4>
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px">
+        <select v-model="selectedRunId" @change="selectRun(selectedRunId)" style="flex:1; height:40px; background:#071826; border:1px solid #172a3e; color:#e6eef8; padding:0 10px; border-radius:8px">
+          <option v-for="run in runHistory" :key="run.runId" :value="run.runId">
+            {{ toKST(run.startedAt) }} · {{ run.status === 'IN_PROGRESS' ? '진행중' : run.status === 'COMPLETED' ? '완료' : run.status }}
+          </option>
+        </select>
+        <button class="btn-primary" type="button" @click="loadRunHistory">새로고침</button>
       </div>
-      <div class="trace-hint">디버깅용 기능입니다 — 주문 접수 응답, S3 주문 기록, 서버 로그에서 확인한 주문 ID를 입력하세요.</div>
-
-      <div class="trace-result">
-        <div v-if="uiState === 'loading'" class="center-msg">조회 중입니다...</div>
-        <div v-else-if="uiState === 'error'">
-          <div class="search-msg">{{ searchMessage }}</div>
-        </div>
-        <div v-else-if="uiState === 'idle'">
-          <div class="center-msg">주문 ID를 입력하고 검색하세요.</div>
-        </div>
-        <div v-else-if="uiState === 'success'">
-          <div v-if="!traceData" class="center-msg">데이터 없음</div>
-          <div v-else class="order-detail panel">
-            <!-- 3-step timeline: Submitted -> Filled -> Canceled -->
-            <div class="timeline">
-              <div class="tl-step">
-                <div class="circle" :style="{ background: '#3478f6' }">1</div>
-                <div class="tl-name">접수</div>
-                <div class="tl-time">{{ toKST(traceData.submittedAt) }}</div>
-              </div>
-
-              <div class="tl-step">
-                <div class="circle" :style="{ background: (traceData.executions && traceData.executions.length ? '#2ed39a' : '#2c3a4a') }">2</div>
-                <div class="tl-name">체결</div>
-                <div class="tl-time">
-                  <template v-if="traceData.executions && traceData.executions.length">{{ toKST(traceData.executions[traceData.executions.length - 1].executedAt) }}</template>
-                  <template v-else>해당 없음</template>
-                </div>
-              </div>
-
-              <div class="tl-step">
-                <div class="circle" :style="{ background: (traceData.canceledAt ? '#ff6b6b' : '#2c3a4a') }">3</div>
-                <div class="tl-name">취소</div>
-                <div class="tl-time">{{ traceData.canceledAt ? toKST(traceData.canceledAt) : '해당 없음' }}</div>
-              </div>
-            </div>
-            <div class="order-row"><strong>Order ID:</strong> {{ traceData.orderId }}</div>
-            <div class="order-row"><strong>Market:</strong> {{ traceData.market || '--' }}</div>
-            <div class="order-row"><strong>Side:</strong> {{ STATUS_LABEL[traceData.side] ? traceData.side : traceData.side }}</div>
-            <div class="order-row"><strong>Price:</strong> {{ formatNumberString(traceData.price) }}</div>
-            <div class="order-row"><strong>Quantity:</strong> {{ formatNumberString(traceData.quantity) }}</div>
-            <div class="order-row"><strong>Remaining:</strong> {{ traceData.remainingQuantity != null ? formatNumberString(traceData.remainingQuantity) : '--' }}</div>
-            <div class="order-row"><strong>Submitted At:</strong> {{ toKST(traceData.submittedAt) }}</div>
-            <div class="order-row"><strong>Status:</strong> {{ STATUS_LABEL[traceData.status] || traceData.status }}</div>
-            <div class="order-row"><strong>Mode:</strong> {{ MODE_LABEL[traceData.mode] || traceData.mode || '--' }}</div>
-            <h5 style="margin-top:12px">Executions</h5>
-            <div v-if="!traceData.executions || traceData.executions.length === 0">체결 내역이 없습니다.</div>
-            <div v-else>
-              <div v-for="(ex, idx) in traceData.executions" :key="idx" class="exec-row">
-                <div><strong>Execution ID:</strong> {{ ex.executionId || ex.id || '--' }}</div>
-                <div><strong>Executed At:</strong> {{ toKST(ex.executedAt) }}</div>
-                <div><strong>Price:</strong> {{ formatNumberString(ex.price) }}</div>
-                <div><strong>Quantity:</strong> {{ formatNumberString(ex.quantity) }}</div>
-                <div><strong>Mode:</strong> {{ MODE_LABEL[ex.mode] || ex.mode || '--' }}</div>
-                <div><strong>Buy Order:</strong> {{ ex.buyOrderId || '--' }}</div>
-                <div><strong>Sell Order:</strong> {{ ex.sellOrderId || '--' }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div v-if="searchMessage && uiState !== 'error'" class="search-msg">{{ searchMessage }}</div>
-      </div>
+      <div style="color:#9fb0c2; font-size:13px">선택한 실행의 집계를 오른쪽 상단 요약과 목표 비교 카드에서 확인합니다.</div>
     </div>
   </div>
 </template>
@@ -541,8 +414,9 @@ const overallState = computed(() => {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  /* distribute content so cards with extra controls keep balanced layout */
-  justify-content: space-between;
+  /* distribute content starting from top; use gap for spacing between items */
+  justify-content: flex-start;
+  gap: 16px;
 }
 .summary-card .dot {
   position: absolute;
@@ -568,12 +442,13 @@ const overallState = computed(() => {
   border: 1px solid #172a3e;
   border-radius: 12px;
   padding: 20px;
-  min-height: 210px;
+  min-height: 140px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  /* distribute content evenly so both boxes look consistent */
-  justify-content: space-between;
+  /* distribute content starting from top; use gap for spacing between items */
+  justify-content: flex-start;
+  gap: 16px;
   line-height: 1.45;
 }
 .card-title { margin: 0 0 12px; font-weight: 700; font-size: 15px }
