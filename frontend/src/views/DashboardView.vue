@@ -1341,6 +1341,7 @@ onBeforeUnmount(() => {
 }
 
 .run-status-row.run-active {
+  background: rgba(46, 211, 154, 0.14);
   border-color: rgba(46, 211, 154, 0.5);
 }
 
