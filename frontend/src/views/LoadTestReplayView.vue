@@ -503,7 +503,6 @@ function goToResults() {
           </div>
 
           <div v-else class="empty-center">
-            <strong>시나리오 미리보기: 데이터 연동 예정</strong>
             <div class="empty-sub">날짜를 선택하면 자동으로 프리뷰를 조회합니다.</div>
           </div>
         </div>

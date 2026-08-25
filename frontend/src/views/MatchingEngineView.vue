@@ -143,8 +143,9 @@ const formatAssignedAt = (ts) => {
 .engine-card { border:1px solid #173141; padding:12px; border-radius:8px; background:#08151a }
 .engine-header { display:flex; justify-content:space-between; align-items:center }
 .engine-id { font-weight:700 }
-.markets-table { width:100%; border-collapse:collapse; margin-top:8px }
+.markets-table { width:100%; border-collapse:collapse; margin-top:8px; table-layout: fixed }
 .markets-table th, .markets-table td { text-align:left; padding:6px 8px; border-bottom:1px solid #0f2a33 }
+.markets-table th:first-child, .markets-table td:first-child { width: 140px }
 .no-data, .no-markets { color:#9fb0c1 }
 
 @media (max-width: 900px) {
