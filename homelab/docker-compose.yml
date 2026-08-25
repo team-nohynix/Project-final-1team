@@ -207,7 +207,7 @@ services:
   # job-trigger는 형제 컨테이너(trader/replayengine)를 띄워야 하므로 호스트
   # Docker 소켓이 필요하다 — Docker-outside-of-Docker, job-trigger/main.go 주석 참고.
   job-trigger:
-    build: ../job-trigger
+    build: ./job-trigger
     image: truss-job-trigger:latest
     restart: unless-stopped
     volumes:
