@@ -898,7 +898,13 @@ function drawFlowFrame() {
     const nx = nd.x * w
     const ny = cy + (flowLaneCenterFrac(nd.x, nd.lane) - 0.5) * 2 * laneSpan
     const bw = flowNodeBoxWidth(ctx, nd.label, nd.sub)
-    const bh = 34
+    // 통로 두께가 레플리카 수만큼 넓어지면(scale.matching/recorder) 고정
+    // 34px 박스가 그 안에서 상대적으로 작아 보이는 문제(2026-08-25 사용자
+    // 지적) — 박스 높이를 그 지점 통로 반두께에 비례해서 같이 키운다.
+    // 30~48px로 clamp — 통로가 가장 얇을 때도 라벨이 읽히고, 가장 두꺼울
+    // 때도 박스가 통로를 넘어설 만큼 과하게 커지지 않게.
+    const bandHalfPx = flowBandHalfFrac(nd.x, nd.lane, scale) * h
+    const bh = Math.min(Math.max(bandHalfPx * 1.1, 30), 48)
     const drawCx = Math.min(Math.max(nx, bw / 2 + 4), w - bw / 2 - 4)
     const bx = drawCx - bw / 2
     const by = ny - bh / 2
