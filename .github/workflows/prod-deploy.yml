@@ -491,6 +491,7 @@ jobs:
           kubectl apply -f infra/k8s/job-trigger-rbac.yaml
           kubectl apply -f infra/k8s/ci-deploy-rbac.yaml
           kubectl apply -f infra/k8s/karpenter/nodepool-backend.yaml
+          kubectl apply -f infra/k8s/karpenter/nodepool-recorder.yaml
       - name: Kafka 토픽 생성 완료 대기
         run: kubectl wait --for=condition=complete job/kafka-topic-bootstrap -n backend --timeout=180s
 
