@@ -27,6 +27,15 @@ const (
 	seriesBucket    = time.Minute
 	seriesBucketFmt = "2006-01-02T15:04:00Z" // 분 단위로 잘라 표시(초는 항상 00)
 
+	// mergeMaxExecutedAt이 한 번의 IN(...) 쿼리에 담는 최대 주문 ID 개수.
+	// MySQL의 플레이스홀더 개수 제한(65,535)을 밑돌면서도 여유를 크게 남긴
+	// 값 — p99Window(5분) 동안 FILLED된 주문 수가 이 한도를 넘으면 예전엔
+	// 그대로 65,535개 한도를 넘겨 "Error 1390: Prepared statement contains
+	// too many placeholders"로 대시보드 지표 조회 전체가 실패했다(2026-08-25,
+	// 초당 240건 넘는 부하테스트 도중 실제로 5분 창에 6만 건 넘게 쌓여서
+	// 재현). 청크로 나눠 여러 번 조회하면 이 한도와 무관해진다.
+	maxExecutedAtChunkSize = 5000
+
 	// ordersByStatusWindow은 OrdersByStatus 전용 창입니다(seriesWindow과
 	// 별개). 2026-08-21에 "세션 전체 누적처럼 보이게" 24시간으로 늘렸다가
 	// 몇 분 만에 RDS CPU가 트래픽 0인 상태에서 13%→57%로 튀는 걸 실측하고
@@ -503,6 +512,16 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 // column은 이 파일 안에서 "buy_order_id"/"sell_order_id" 리터럴로만 호출되므로
 // SQL 인젝션 경로가 아닙니다.
 func (q *MySQLQuerier) mergeMaxExecutedAt(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
+	for start := 0; start < len(orderIDs); start += maxExecutedAtChunkSize {
+		end := min(start+maxExecutedAtChunkSize, len(orderIDs))
+		if err := q.mergeMaxExecutedAtChunk(ctx, column, orderIDs[start:end], out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (q *MySQLQuerier) mergeMaxExecutedAtChunk(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
 	placeholders := strings.Repeat("?,", len(orderIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, len(orderIDs))

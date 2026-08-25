@@ -48,7 +48,16 @@ spec:
               sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
               EOF
               export CLASSPATH=/jars/aws-msk-iam-auth-all.jar
-              for topic in orders executions; do
+              # assignments: FR-11 배정/반납 감사 로그(matching/main.go의
+              # AssignmentProducer.PublishAssigned/Released, recorder가 소비해
+              # matching_engine_assignment 테이블을 채움 — 프론트 대시보드의
+              # "실행 중인 Pod(매칭 엔진)" 지표가 이 테이블 기준). 이 목록에
+              # 빠져있어서 토픽이 생성된 적 없었고, 매칭 엔진이 매번 "Unknown
+              # Topic Or Partition"으로 조용히 발행 실패하면서 그 지표가 항상
+              # 0으로 나오는 걸 실측(2026-08-25, 부하테스트 중 프론트 "핵심
+              # 지표" 확인하다 발견) — 매칭/체결 자체는 orders/executions
+              # 토픽만 쓰므로 이 버그가 실거래 처리엔 영향 없었다.
+              for topic in orders executions assignments; do
                 /opt/kafka/bin/kafka-topics.sh \
                   --bootstrap-server "$BOOTSTRAP_BROKERS" \
                   --command-config /tmp/client.properties \
