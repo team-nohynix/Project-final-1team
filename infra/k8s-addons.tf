@@ -5,6 +5,8 @@
 # 하나 갖고 있어야 한다 — CI의 kubectl apply 순서에 기대지 않고 terraform apply
 # 하나만으로 시크릿까지 자기완결적으로 만들어지게 하려는 목적(2026-08-24).
 resource "kubernetes_namespace" "backend" {
+  depends_on = [time_sleep.wait_for_eks_auth]
+
   metadata {
     name   = "backend"
     labels = { team = "team1" }
@@ -47,7 +49,7 @@ resource "helm_release" "keda" {
   version          = "2.20.2" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }
 
 resource "helm_release" "kube_state_metrics" {
@@ -58,7 +60,7 @@ resource "helm_release" "kube_state_metrics" {
   version          = "8.4.0" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }
 
 resource "helm_release" "node_exporter" {
@@ -69,5 +71,5 @@ resource "helm_release" "node_exporter" {
   version          = "4.56.1" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }

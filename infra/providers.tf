@@ -18,6 +18,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
     external = {
       source  = "hashicorp/external"
       version = "~> 2.3"
@@ -79,6 +83,20 @@ provider "helm" {
       args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.team1.name, "--region", "ap-northeast-2"]
     }
   }
+}
+
+# access_config.bootstrap_cluster_creator_admin_permissions(eks-cluster.tf)가
+# 클러스터 생성자(CI의 TF_APPLY_ROLE)에게 K8s cluster-admin을 자동으로 준다고
+# 문서화돼있지만, 클러스터가 ACTIVE 상태가 된 직후 바로 kubernetes/helm 리소스를
+# 만들면 이 권한이 EKS 컨트롤 플레인 인증 레이어에 아직 전파되지 않아 전부
+# 403 forbidden으로 실패하는 걸 실측했다(2026-08-25, EKS 전체 destroy→apply
+# 리허설 중 — IAM 전파 지연으로 Karpenter/Lambda/모니터링 EC2가 겪은 것과 같은
+# 종류의 AWS eventual-consistency 문제). 모든 kubernetes_*/helm_release
+# 리소스가 이 리소스에 depends_on을 걸어 클러스터가 ACTIVE된 뒤 60초를 더
+# 기다리게 한다.
+resource "time_sleep" "wait_for_eks_auth" {
+  depends_on      = [aws_eks_cluster.team1]
+  create_duration = "60s"
 }
 
 data "aws_caller_identity" "current" {}

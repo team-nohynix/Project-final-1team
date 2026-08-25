@@ -107,5 +107,5 @@ resource "helm_release" "aws_load_balancer_controller" {
 
   # system 노드그룹(taint 없음, 고정 2대)이 실제로 스케줄 가능한 상태여야
   # 컨트롤러 파드가 뜬다 — eks-nodegroup-system.tf 참고.
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }

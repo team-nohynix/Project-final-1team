@@ -323,5 +323,5 @@ resource "helm_release" "karpenter" {
     }
   })]
 
-  depends_on = [aws_eks_node_group.system]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }

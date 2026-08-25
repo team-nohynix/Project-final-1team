@@ -220,6 +220,8 @@ resource "aws_eks_access_entry" "github_actions_terraform_apply" {
 # apply 안에서 access entry → 이 바인딩 → helm_release/secret/namespace 순서로
 # depends_on이 걸려 자기완결적으로 풀린다.
 resource "kubernetes_cluster_role" "tf_plan_readonly" {
+  depends_on = [time_sleep.wait_for_eks_auth]
+
   metadata {
     name = "team1-tf-plan-readonly"
   }
@@ -249,6 +251,8 @@ resource "kubernetes_cluster_role_binding" "tf_plan_readonly" {
 # cluster-admin은 모든 K8s 클러스터에 기본 내장된 ClusterRole이라 따로 정의할
 # 필요가 없다 — 바인딩만 있으면 된다.
 resource "kubernetes_cluster_role_binding" "tf_apply_admin" {
+  depends_on = [time_sleep.wait_for_eks_auth]
+
   metadata {
     name = "team1-tf-apply-admin"
   }
