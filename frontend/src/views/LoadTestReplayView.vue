@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
@@ -394,6 +395,12 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopPolling()
 })
+
+const router = useRouter()
+
+function goToResults() {
+  router.push({ name: 'test-results' })
+}
 </script>
 
 <template>
@@ -403,7 +410,7 @@ onBeforeUnmount(() => {
       <p class="subtitle">AI 트레이더 주문 기록과 동일 패턴 재생 설정</p>
       <hr />
     </header>
-    
+
 
     <div class="content-grid">
       <section class="panel left-panel">
@@ -433,7 +440,7 @@ onBeforeUnmount(() => {
         <div class="form-field">
           <label>샤드 수 (shardCount)</label>
           <input v-model.number="shardCount" type="number" min="1" max="20" />
-          <p class="date-hint">샤드 수는 1~20 사이의 정수입니다. 백엔드 연동 시 shardCount로 전달됩니다.</p>
+          <p class="date-hint">리플레이 엔진에 병목이 없는 경우 샤드 수가 성능에 영향을 미치지 않습니다.</p>
         </div>
 
         <div class="actions">
@@ -495,51 +502,24 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-          <div class="status-box">
-          <div class="status-left">
-            <span class="status-dot" :class="{ 'status-stopped': runInfo?.status === 'STOPPED', 'status-failed': runInfo?.status === 'FAILED', 'status-completed': runInfo?.status === 'COMPLETED' }"></span>
-            <span :class="{ 'status-stopped': runInfo?.status === 'STOPPED' }">{{ runInfo ? runInfo.status : '상태 확인 전' }}</span>
+        <div class="status-summary-card">
+          <div class="card-left">
+            <span class="status-dot" :class="{ 'status-stopped': runInfo?.status === 'STOPPED', 'status-failed': runInfo?.status === 'FAILED', 'status-completed': runInfo?.status === 'COMPLETED', 'status-inprogress': runInfo?.status === 'IN_PROGRESS' }"></span>
+            <span class="status-text">{{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}</span>
           </div>
-          <div class="status-right">
-            <div v-if="runInfo">
-              <div>{{ runInfo.owner }} • {{ runInfo.runId }}</div>
-              <div v-if="runInfo.startedAt">시작: {{ toKST(runInfo.startedAt) }}</div>
-              <div v-if="runInfo.endedAt">종료: {{ toKST(runInfo.endedAt) }} (소요: {{ computeDuration(runInfo.startedAt, runInfo.endedAt) }})</div>
-            </div>
-            <div v-else>데이터 연동 전</div>
+          <div class="card-right">
+            <span class="summary-inline">
+              <template v-if="summary">
+                접수 {{ summary.accepted }}건 · {{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}
+              </template>
+              <template v-else>데이터 없음</template>
+            </span>
           </div>
         </div>
-          <!-- Recorder summary: 접수/체결/미체결 -->
-          <div class="summary-box">
-            <div v-if="!summary">데이터 없음</div>
-            <div v-else class="ratios">
-              <div class="section-title">요약</div>
 
-              <div class="ratio-row">
-                <div class="ratio-label">접수</div>
-                <div class="ratio-bar">
-                  <div class="ratio-fill" :style="{ width: '100%', background: '#163247' }"></div>
-                </div>
-                <div class="ratio-value">{{ summary.accepted }}</div>
-              </div>
-
-              <div class="ratio-row">
-                <div class="ratio-label">체결</div>
-                <div class="ratio-bar">
-                  <div class="ratio-fill" :style="{ width: filledPercent + '%', background: '#3f86ff' }"></div>
-                </div>
-                <div class="ratio-value">{{ summary.filled }} ({{ filledPercent }}%)</div>
-              </div>
-
-              <div class="ratio-row">
-                <div class="ratio-label">미체결</div>
-                <div class="ratio-bar">
-                  <div class="ratio-fill" :style="{ width: unfilledPercent + '%', background: '#ff6b6b' }"></div>
-                </div>
-                <div class="ratio-value">{{ summary.unfilled }} ({{ unfilledPercent }}%)</div>
-              </div>
-            </div>
-          </div>
+        <div style="margin-top:12px">
+          <button class="btn-detail" @click="goToResults">결과 자세히 보기 →</button>
+        </div>
       </aside>
     </div>
   </div>
@@ -770,6 +750,42 @@ onBeforeUnmount(() => {
 }
 .summary-box {
   margin-top: 18px;
+}
+.status-summary-card {
+  margin-top: 18px;
+  background: #081826;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #bcd8e9;
+}
+.status-summary-card .card-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.status-summary-card .status-text {
+  font-weight: 700;
+  color: #e6f4ff;
+}
+.status-summary-card .card-right .summary-inline {
+  color: #9fb0c2;
+  font-size: 13px;
+}
+.btn-detail {
+  width: 100%;
+  background: #3f86ff;
+  color: white;
+  border: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.status-dot.status-inprogress {
+  background: #2ed39a;
 }
 .status-dot {
   width: 10px;
