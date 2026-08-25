@@ -2,6 +2,7 @@ package orderstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,7 +28,12 @@ func (s *LocalFileStorage) Save(market string, start, end time.Time, orders []or
 		return "", fmt.Errorf("디렉터리 생성 실패: %w", err)
 	}
 
-	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: orders}, "", "  ")
+	combined, err := mergeWithExistingLocal(path, orders)
+	if err != nil {
+		return "", err
+	}
+
+	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: combined}, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("JSON 직렬화 실패: %w", err)
 	}
@@ -36,4 +42,22 @@ func (s *LocalFileStorage) Save(market string, start, end time.Time, orders []or
 		return "", fmt.Errorf("파일 쓰기 실패: %w", err)
 	}
 	return path, nil
+}
+
+// mergeWithExistingLocal은 path에 이미 저장된 주문 기록이 있으면 그 뒤에 orders를
+// 이어붙입니다(Storage.Save의 병합 계약 참고). 파일이 아직 없으면(첫 플러시) orders를
+// 그대로 돌려줍니다.
+func mergeWithExistingLocal(path string, orders []order.RecordedOrder) ([]order.RecordedOrder, error) {
+	existingBody, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return orders, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("기존 파일 읽기 실패: %w", err)
+	}
+	var existing orderRecordFile
+	if err := json.Unmarshal(existingBody, &existing); err != nil {
+		return nil, fmt.Errorf("기존 파일 파싱 실패: %w", err)
+	}
+	return append(existing.Orders, orders...), nil
 }

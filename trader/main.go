@@ -210,6 +210,53 @@ func run() (err error) {
 	var mu sync.Mutex
 	var failed []string
 
+	// 실행 내내 접수된 주문을 recorder(InMemoryRecorder)가 전부 메모리에 붙들고
+	// 있다가 끝에 한 번에 저장하던 것이 실전에서 OOMKill을 냈습니다(2026-08-25).
+	// 이 고루틴이 주기적으로 각 마켓의 버퍼를 Drain(스냅샷 + 비우기)해서 그때그때
+	// storage에 흘려보내므로, 프로세스가 붙들고 있는 양은 "마지막 플러시 이후 쌓인
+	// 만큼"으로만 유지됩니다. orderstore.Storage.Save가 덮어쓰기가 아니라 병합이라
+	// 파일/오브젝트는 여전히 마켓당 하나 그대로입니다(replayengine 읽기 쪽 변경 불필요).
+	// ctx가 아니라 별도 stopFlush로 멈추는 이유: ctx는 wg.Wait() 직후 취소되는데,
+	// 그 시점에 남아있는 마지막 몫을 이 고루틴이 아니라 아래 finalFlush가 한 번 더
+	// 확실히 처리하게 하려면, 이 고루틴이 완전히 멈춘 뒤에 finalFlush를 불러야
+	// 합니다(같은 마켓에 대해 두 곳이 동시에 Drain하는 걸 피하기 위함).
+	//
+	// 간격을 너무 짧게 잡으면 안 되는 이유: orderstore.Storage.Save는 매번 기존
+	// 파일 전체를 읽어와 합치고 다시 쓰는 방식이라(위 Storage 주석 참고), 플러시
+	// 횟수가 늘어날수록 그때마다 다시 쓰는 파일 크기도 커져 총 I/O량이 플러시
+	// 횟수에 거의 비례해 불어납니다. 3분은 "메모리 상한을 실행 총량이 아니라
+	// 최대 몇 분치로 확실히 묶으면서" I/O 비용은 크게 늘리지 않는 절충값입니다.
+	flushInterval := 3 * time.Minute
+	stopFlush := make(chan struct{})
+	flushDone := make(chan struct{})
+	flushOnce := func() {
+		for _, entry := range manifest.Markets {
+			orders := recorder.Drain(entry.Market)
+			if len(orders) == 0 {
+				continue
+			}
+			path, err := orderStorage.Save(entry.Market, start, end, orders)
+			if err != nil {
+				log.Printf("[%s] 주문 기록 저장 실패: %v", entry.Market, err)
+				continue
+			}
+			log.Printf("[%s] 주문 기록 저장 완료 (%d건) -> %s", entry.Market, len(orders), path)
+		}
+	}
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(flushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				flushOnce()
+			case <-stopFlush:
+				return
+			}
+		}
+	}()
+
 	// 마켓당 고루틴 1개, 전부 NewHTTPClient가 만든 단일 클라이언트를 공유합니다.
 	// 한 마켓의 실패가 다른 마켓 재생을 막지 않도록 에러는 로그로만 남기고 계속 진행합니다.
 	// ctx가 취소된 채로(context.Canceled) 끝난 것은 정지 요청에 의한 정상적인
@@ -229,21 +276,13 @@ func run() (err error) {
 	cancel()
 	globalWG.Wait()
 
-	// 마켓 재생 + 전체 조망형 봇이 전부 끝난 뒤 한 번에 기록을 저장합니다 — 전체 조망형
-	// 봇은 마켓 재생 순서와 무관하게 끝까지 돌기 때문에, 마켓 하나가 끝나자마자 저장하면
-	// 그 이후 전체 조망형 봇이 그 마켓에 낸 주문을 놓칠 수 있습니다.
-	for _, entry := range manifest.Markets {
-		orders := recorder.Snapshot(entry.Market)
-		if len(orders) == 0 {
-			continue
-		}
-		path, err := orderStorage.Save(entry.Market, start, end, orders)
-		if err != nil {
-			log.Printf("[%s] 주문 기록 저장 실패: %v", entry.Market, err)
-			continue
-		}
-		log.Printf("[%s] 주문 기록 저장 완료 (%d건) -> %s", entry.Market, len(orders), path)
-	}
+	// 주기적 플러시 고루틴을 완전히 멈춘 뒤(같은 마켓을 동시에 Drain하는 경합을
+	// 피하기 위해) 마지막으로 남은 만큼을 한 번 더 저장합니다 — 전체 조망형 봇은
+	// 마켓 재생 순서와 무관하게 끝까지 돌기 때문에, 이 마지막 플러시가 없으면 봇이
+	// 마지막 주기 이후 낸 주문을 놓칠 수 있습니다.
+	close(stopFlush)
+	<-flushDone
+	flushOnce()
 
 	if len(failed) > 0 {
 		resultMessage = fmt.Sprintf("실패한 마켓 %d개: %v", len(failed), failed)
