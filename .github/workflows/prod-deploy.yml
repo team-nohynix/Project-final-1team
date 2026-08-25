@@ -146,7 +146,7 @@ jobs:
     needs: [detect-changes, bootstrap-k8s]
     if: |
       needs.detect-changes.outputs.backend == 'true' &&
-      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
+      (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -185,7 +185,7 @@ jobs:
     needs: [detect-changes, bootstrap-k8s]
     if: |
       needs.detect-changes.outputs.orderapi == 'true' &&
-      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
+      (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -224,7 +224,7 @@ jobs:
     needs: [detect-changes, bootstrap-k8s]
     if: |
       needs.detect-changes.outputs.matching == 'true' &&
-      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
+      (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -263,7 +263,7 @@ jobs:
     needs: [detect-changes, bootstrap-k8s]
     if: |
       needs.detect-changes.outputs.recorder == 'true' &&
-      (needs.bootstrap-k8s.result == 'success' || needs.bootstrap-k8s.result == 'skipped')
+      (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -412,6 +412,22 @@ jobs:
           TF_VAR_monitoring_grafana_admin_password: ${{ secrets.MONITORING_GRAFANA_ADMIN_PASSWORD }}
         run: |
           terraform init -input=false
+          # EKS를 완전히 처음부터(access entry도 ALB도 ElastiCache도 전혀 없는
+          # 상태) 복구할 때 예전엔 두 가지가 plan 자체를 통째로 막았었다
+          # (2026-08-24 EKS 전체 destroy→apply 리허설 중 실제로 겪음):
+          #  1) edge.tf의 data.aws_lb.orderapi/collector(ALB를 태그로 찾음)가
+          #     아직 존재하지 않는 ALB를 찾다가 "Search returned 0 results"로 실패
+          #  2) monitoring.tf의 redis_cpu 알람이 member_clusters(apply 전엔
+          #     모르는 값)로 for_each를 돌아서 실패
+          # 둘 다 2026-08-25에 코드 레벨에서 근본 수정했다 — edge.tf는
+          # data.aws_lb 대신 절대 에러 없이 found=false를 반환하는
+          # data.external(+ count 조건부 리소스)로, monitoring.tf의 redis_cpu는
+          # member_clusters 대신 replication_group_id/num_cache_clusters(둘 다
+          # apply 전에도 이미 아는 설정값)로 계산한 결정적 for_each로 바꿨다.
+          # 그 결과 from-scratch 상태에서도 이 apply 한 번으로 끝난다(-target
+          # 재시도 불필요, 로컬 terraform plan으로 실측 검증 완료). ALB 의존
+          # 리소스(Route53/CloudFront/alb_5xx, count=0 또는 placeholder로 생성됨)는
+          # 실제 ALB가 생긴 뒤 terraform-reconcile-alb job이 값을 채운다.
           terraform apply -auto-approve -input=false
 
   # --- 수동 "전체 복구" 전용 — 평소 push엔 절대 안 낀다 ---------------------
@@ -473,3 +489,27 @@ jobs:
           kubectl apply -f infra/k8s/karpenter/nodepool-backend.yaml
       - name: Kafka 토픽 생성 완료 대기
         run: kubectl wait --for=condition=complete job/kafka-topic-bootstrap -n backend --timeout=180s
+
+  # --- terraform-apply 시점엔 ALB가 아직 없어 count=0/placeholder로 넘어갔던
+  # Route53/CloudFront/alb_5xx 마무리(2026-08-24) — bootstrap-k8s가 방금
+  # Ingress를 적용해서 이제 ALB가 실제로 존재하므로, edge.tf의
+  # data.external.orderapi_alb/collector_alb가 이번엔 found=true로 찾아내고
+  # 해당 리소스들이 실제 값으로 채워진다. 평소(ALB가 이미 있던 날)엔 이 job도
+  # 그냥 "변경 없음"으로 조용히 끝난다 — 매번 돌아도 무해.
+  terraform-reconcile-alb:
+    needs: [bootstrap-k8s]
+    if: github.event_name == 'workflow_dispatch' && needs.bootstrap-k8s.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.TF_APPLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - working-directory: infra
+        env:
+          TF_VAR_monitoring_grafana_admin_password: ${{ secrets.MONITORING_GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false

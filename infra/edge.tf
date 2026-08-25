@@ -151,7 +151,11 @@ resource "aws_cloudfront_distribution" "frontend" {
   # 와일드카드 인증서(*.jhyang.click)로 TLS 검증이 통과한다(ALB의 원 도메인인
   # *.elb.amazonaws.com으로 잡으면 인증서 불일치로 오리진 커넥션이 실패한다).
   origin {
-    domain_name = aws_route53_record.api.fqdn
+    # aws_route53_record.api는 이제 count 기반이라(ALB가 아직 없으면 0개, 위
+    # data.external.orderapi_alb 주석 참고) [0] 인덱스가 없을 수 있다 — 그 경우
+    # CloudFront 오리진 도메인은 임시 플레이스홀더로 두고(그 오리진으로 가는
+    # 요청만 그동안 502), ALB가 생긴 뒤 다음 apply에서 정정된다.
+    domain_name = try(aws_route53_record.api[0].fqdn, "orderapi-alb-not-yet-created.invalid")
     origin_id   = "team1-orderapi-alb"
 
     custom_origin_config {
@@ -165,7 +169,8 @@ resource "aws_cloudfront_distribution" "frontend" {
   # 시세 수집기 ALB — truss-collector.jhyang.click로 오리진 도메인을 잡는 이유는
   # 접수 API 오리진과 동일(와일드카드 인증서 검증).
   origin {
-    domain_name = aws_route53_record.collector.fqdn
+    # aws_route53_record.collector와 같은 이유(위 orderapi 오리진 주석 참고).
+    domain_name = try(aws_route53_record.collector[0].fqdn, "collector-alb-not-yet-created.invalid")
     origin_id   = "team1-collector-alb"
 
     custom_origin_config {
@@ -310,24 +315,48 @@ resource "aws_s3_bucket_policy" "frontend" {
 # 2026-08-20 재확인) CloudFront가 그 경로를 이 ALB로 프록시해야 한다 — CloudFront
 # Function으로 /order-api 접두사를 벗겨서 넘긴다.
 
-data "aws_lb" "orderapi" {
-  tags = {
-    Name = "team1-alb-orderapi"
-  }
+# data "aws_lb"는 태그로 찾다가 하나도 없으면(EKS를 통째로 지웠다 올린 직후,
+# ALB Controller가 아직 Ingress를 못 받아 ALB를 안 만든 시점) "Search returned
+# 0 results"로 에러가 나고, data source 에러는 -target으로 다른 리소스를
+# 골라도 못 피한다 — Terraform이 target과 무관하게 조건 없는 data 블록은
+# 항상 refresh하기 때문(2026-08-24, EKS 전체 destroy→apply 리허설 중 실측 —
+# route53_record만 -target에서 뺐는데도 plan 자체가 이 데이터소스에서 계속
+# 막혔음). data "external"은 스크립트가 뭘 내보내든(빈 값 포함) 그대로
+# 성공 처리라 이 문제를 원천적으로 피한다 — ALB가 없으면 found=false만 주고
+# 넘어가고, 그걸 소비하는 aws_route53_record.api를 count로 조건부 생성한다.
+data "external" "orderapi_alb" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+    FOUND="false"; DNS=""; ZONE=""; ARN_SUFFIX=""
+    for CANDIDATE_ARN in $(aws elbv2 describe-load-balancers --region ap-northeast-2 --query "LoadBalancers[?Type=='application'].LoadBalancerArn" --output text 2>/dev/null || true); do
+      NAME_TAG=$(aws elbv2 describe-tags --region ap-northeast-2 --resource-arns "$CANDIDATE_ARN" --query "TagDescriptions[0].Tags[?Key=='Name'].Value | [0]" --output text 2>/dev/null || echo "")
+      if [ "$NAME_TAG" = "team1-alb-orderapi" ]; then
+        FOUND="true"
+        DNS=$(aws elbv2 describe-load-balancers --region ap-northeast-2 --load-balancer-arns "$CANDIDATE_ARN" --query "LoadBalancers[0].DNSName" --output text)
+        ZONE=$(aws elbv2 describe-load-balancers --region ap-northeast-2 --load-balancer-arns "$CANDIDATE_ARN" --query "LoadBalancers[0].CanonicalHostedZoneId" --output text)
+        ARN_SUFFIX=$(echo "$CANDIDATE_ARN" | sed -E 's#.*:loadbalancer/##')
+        break
+      fi
+    done
+    printf '{"found":"%s","dns_name":"%s","zone_id":"%s","arn_suffix":"%s"}' "$FOUND" "$DNS" "$ZONE" "$ARN_SUFFIX"
+  EOT
+  ]
 }
 
 locals {
-  api_domain = "truss-api.${var.domain_name}"
+  api_domain         = "truss-api.${var.domain_name}"
+  orderapi_alb_found = data.external.orderapi_alb.result.found == "true"
 }
 
 resource "aws_route53_record" "api" {
+  count   = local.orderapi_alb_found ? 1 : 0
   zone_id = data.aws_route53_zone.team1.zone_id
   name    = local.api_domain
   type    = "A"
 
   alias {
-    name                   = data.aws_lb.orderapi.dns_name
-    zone_id                = data.aws_lb.orderapi.zone_id
+    name                   = data.external.orderapi_alb.result.dns_name
+    zone_id                = data.external.orderapi_alb.result.zone_id
     evaluate_target_health = true
   }
 }
@@ -337,24 +366,40 @@ resource "aws_route53_record" "api" {
 # MarketStreamView.vue)로 확인해서 별도 ALB+도메인으로 노출한다. orderapi와
 # 다른 ALB인 이유: 이미 정상 동작 중인 orderapi Ingress를 IngressGroup으로
 # 합치면서 건드리는 리스크를 피하려는 것.
-data "aws_lb" "collector" {
-  tags = {
-    Name = "team1-alb-collector"
-  }
+# orderapi_alb와 같은 이유(위 주석 참고)로 data "external" 사용.
+data "external" "collector_alb" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+    FOUND="false"; DNS=""; ZONE=""; ARN_SUFFIX=""
+    for CANDIDATE_ARN in $(aws elbv2 describe-load-balancers --region ap-northeast-2 --query "LoadBalancers[?Type=='application'].LoadBalancerArn" --output text 2>/dev/null || true); do
+      NAME_TAG=$(aws elbv2 describe-tags --region ap-northeast-2 --resource-arns "$CANDIDATE_ARN" --query "TagDescriptions[0].Tags[?Key=='Name'].Value | [0]" --output text 2>/dev/null || echo "")
+      if [ "$NAME_TAG" = "team1-alb-collector" ]; then
+        FOUND="true"
+        DNS=$(aws elbv2 describe-load-balancers --region ap-northeast-2 --load-balancer-arns "$CANDIDATE_ARN" --query "LoadBalancers[0].DNSName" --output text)
+        ZONE=$(aws elbv2 describe-load-balancers --region ap-northeast-2 --load-balancer-arns "$CANDIDATE_ARN" --query "LoadBalancers[0].CanonicalHostedZoneId" --output text)
+        ARN_SUFFIX=$(echo "$CANDIDATE_ARN" | sed -E 's#.*:loadbalancer/##')
+        break
+      fi
+    done
+    printf '{"found":"%s","dns_name":"%s","zone_id":"%s","arn_suffix":"%s"}' "$FOUND" "$DNS" "$ZONE" "$ARN_SUFFIX"
+  EOT
+  ]
 }
 
 locals {
-  collector_domain = "truss-collector.${var.domain_name}"
+  collector_domain    = "truss-collector.${var.domain_name}"
+  collector_alb_found = data.external.collector_alb.result.found == "true"
 }
 
 resource "aws_route53_record" "collector" {
+  count   = local.collector_alb_found ? 1 : 0
   zone_id = data.aws_route53_zone.team1.zone_id
   name    = local.collector_domain
   type    = "A"
 
   alias {
-    name                   = data.aws_lb.collector.dns_name
-    zone_id                = data.aws_lb.collector.zone_id
+    name                   = data.external.collector_alb.result.dns_name
+    zone_id                = data.external.collector_alb.result.zone_id
     evaluate_target_health = true
   }
 }
