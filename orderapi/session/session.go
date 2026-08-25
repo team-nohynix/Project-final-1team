@@ -513,6 +513,18 @@ func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome 
 
 // LastRun은 가장 최근 실행 기록을 반환합니다. 한 번도 실행된 적이 없으면
 // found=false입니다.
+//
+// IN_PROGRESS로 저장돼 있어도 그대로 믿지 않습니다 — 그 실행의 활성 락
+// (activeKey)이 하트비트 없이 이미 TTL로 자연 만료돼 있으면, Release를 못
+// 타고 죽은(크래시했거나 멈춘) 실행으로 보고 여기서 즉시 FAILED로 정리합니다
+// (2026-08-25 추가). 이게 없으면 프로세스는 이미 죽어 활성 락도 사라졌는데
+// lastRunKey만 영원히 IN_PROGRESS로 남아, 화면은 계속 "실행 중"으로 보이고
+// 정작 "중지" 버튼을 누르면 백엔드가 (정확하게) "활성 세션 아님"이라 답하는
+// 불일치가 생깁니다 — 실제로 관측된 "중지가 안 먹힌다" 신고의 근본 원인이
+// 이것이었습니다. 활성 락이 TTL로 자연 만료된다는 것 자체가 이미 이 패키지의
+// 기존 자기치유 원칙("다음 Claim이 그 자리를 자유롭게 가져가도 됨")이므로,
+// 그 판단을 LastRun 응답에도 반영하는 건 새 위험이 아니라 이미 성립한 판단을
+// 뒤늦게 노출하는 것뿐입니다.
 func (s *RedisStore) LastRun(ctx context.Context) (RunRecord, bool, error) {
 	body, err := s.client.Get(ctx, lastRunKey).Bytes()
 	if err == redis.Nil {
@@ -525,7 +537,57 @@ func (s *RedisStore) LastRun(ctx context.Context) (RunRecord, bool, error) {
 	if err := json.Unmarshal(body, &record); err != nil {
 		return RunRecord{}, false, fmt.Errorf("마지막 실행 기록 파싱 실패: %w", err)
 	}
+	if record.Status == RunStatusInProgress {
+		if reconciled, ok := s.reconcileStaleRun(ctx, record); ok {
+			return reconciled, true, nil
+		}
+	}
 	return record, true, nil
+}
+
+// reconcileStaleRun은 IN_PROGRESS인 record의 활성 락이 이미 사라졌는지
+// 확인합니다. 아직 살아있으면(activeKey == record.RunID) ok=false를 돌려줘
+// 호출부가 원래 record를 그대로 쓰게 합니다. Redis 조회 자체가 실패하면
+// 판단을 유보합니다(fail-open — 다른 백프레셔 신호들과 같은 원칙).
+//
+// 죽은 것으로 판단되면 finalizeLastRun과 달리 GET+SET을 한 번 더 확인하고
+// 씁니다 — AppendLastRunNote와 같은 이유로, 그 사이 새 실행이 이미
+// lastRunKey를 넘겨받았을 수 있기 때문입니다(예: 이 runID의 락이 만료된 뒤
+// 새 Claim이 성공해 lastRunKey를 새 실행 기록으로 이미 덮어쓴 경우). 그럴 때
+// existing.RunID가 record.RunID와 달라지므로, 그 새 실행의 기록을 실수로
+// 되돌려쓰지 않도록 아무것도 하지 않고 포기합니다.
+func (s *RedisStore) reconcileStaleRun(ctx context.Context, record RunRecord) (RunRecord, bool) {
+	current, err := s.client.Get(ctx, activeKey).Result()
+	if err == nil && current == record.RunID {
+		return RunRecord{}, false // 아직 살아있음 — 손대지 않음
+	}
+	if err != nil && err != redis.Nil {
+		return RunRecord{}, false // Redis 조회 실패 — 판단 유보
+	}
+
+	body, err := s.client.Get(ctx, lastRunKey).Bytes()
+	if err != nil {
+		return RunRecord{}, false
+	}
+	var existing RunRecord
+	if err := json.Unmarshal(body, &existing); err != nil {
+		return RunRecord{}, false
+	}
+	if existing.RunID != record.RunID || existing.Status != RunStatusInProgress {
+		// 그 사이 새 실행이 슬롯을 넘겨받았거나, 정상적으로 이미 종료 처리됨 —
+		// 손대지 않음.
+		return RunRecord{}, false
+	}
+
+	finalized := existing
+	finalized.Status = RunStatusFailed
+	finalized.EndedAt = time.Now().UTC()
+	finalized.Message = "세션이 하트비트 없이 만료되어 자동으로 종료 처리되었습니다 (프로세스 응답 없음으로 추정)"
+	if newBody, err := json.Marshal(finalized); err == nil {
+		s.client.Set(ctx, lastRunKey, newBody, 0)
+	}
+	sessionActiveGauge.Set(0)
+	return finalized, true
 }
 
 // AppendLastRunNote는 Store 인터페이스 설명 참고. lastRunKey를 원자적
