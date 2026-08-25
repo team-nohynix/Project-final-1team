@@ -231,6 +231,22 @@ services:
       BEDROCK_AWS_ACCESS_KEY_ID: "${BEDROCK_AWS_ACCESS_KEY_ID}"
       BEDROCK_AWS_SECRET_ACCESS_KEY: "${BEDROCK_AWS_SECRET_ACCESS_KEY}"
 
+  # AWS의 S3(정적 파일)+CloudFront(라우팅) 역할을 겸함 — nginx/Dockerfile,
+  # nginx/nginx.conf 주석 참고. context가 repo 루트인 이유: frontend/ 전체가
+  # 빌드에 필요해서.
+  nginx:
+    build:
+      context: ..
+      dockerfile: homelab/nginx/Dockerfile
+    image: truss-nginx:latest
+    restart: unless-stopped
+    depends_on:
+      - orderapi
+      - recorder
+      - backend
+    ports:
+      - "80:80"
+
 volumes:
   mysql-data:
   prometheus-data:
