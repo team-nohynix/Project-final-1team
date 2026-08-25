@@ -34,6 +34,13 @@ type jobRequest struct {
 
 func main() {
 	dockerNetwork := getenv("DOCKER_NETWORK", "homelab_default")
+	// trader/replayengine이 로컬로 기록하는 주문 기록(orderstore.NewLocalFileStorage
+	// ("orders"))을 orderapi의 GET /v1/jobs/replay-preview가 읽는 것과 같은
+	// 위치에 쓰게 하려면 orderapi의 orderapi-data 볼륨을 여기도 마운트해야 한다
+	// (2026-08-26) — AWS에서는 trader/orderapi가 같은 S3 버킷을 썼던 것의
+	// 대체. 이걸 안 붙이면 trader가 --rm으로 종료되는 순간 기록이 통째로
+	// 사라져서 재생 미리보기가 항상 "기록된 주문이 없음"으로 나온다.
+	orderRecordsVolume := getenv("ORDER_RECORDS_VOLUME", "homelab_orderapi-data")
 	backendURL := getenv("BACKEND_URL", "http://backend:8080")
 	orderapiURL := getenv("ORDERAPI_URL", "http://orderapi:8081")
 	bedrockRegion := getenv("BEDROCK_REGION", "ap-northeast-2")
@@ -55,9 +62,9 @@ func main() {
 		var err error
 		switch req.JobType {
 		case "ai-trader":
-			err = runAITrader(req, dockerNetwork, backendURL, orderapiURL, bedrockRegion, bedrockModelID, awsAccessKeyID, awsSecretAccessKey)
+			err = runAITrader(req, dockerNetwork, orderRecordsVolume, backendURL, orderapiURL, bedrockRegion, bedrockModelID, awsAccessKeyID, awsSecretAccessKey)
 		case "replay":
-			err = runReplay(req, dockerNetwork, orderapiURL)
+			err = runReplay(req, dockerNetwork, orderRecordsVolume, orderapiURL)
 		default:
 			http.Error(w, `{"errorCode":"INVALID_JOB_TYPE","message":"jobType은 ai-trader 또는 replay만 가능합니다."}`, http.StatusBadRequest)
 			return
@@ -97,13 +104,14 @@ func baseArgs(req jobRequest) []string {
 
 // runAITrader는 job-trigger Lambda의 _build_ai_trader_job과 같은 리소스
 // 한도(1Gi 요청/2Gi 한도, 2026-08-25 OOM 사고 대응)를 docker run으로 재현합니다.
-func runAITrader(req jobRequest, network, backendURL, orderapiURL, bedrockRegion, bedrockModelID, accessKeyID, secretAccessKey string) error {
+func runAITrader(req jobRequest, network, orderRecordsVolume, backendURL, orderapiURL, bedrockRegion, bedrockModelID, accessKeyID, secretAccessKey string) error {
 	name := "ai-trader-" + time.Now().Format("20060102-150405")
 	args := []string{
 		"run", "-d", "--rm",
 		"--name", name,
 		"--network", network,
 		"--memory=2g", "--cpus=1",
+		"-v", orderRecordsVolume + ":/app/orders",
 		"-e", "BACKEND_URL=" + backendURL,
 		"-e", "ORDERAPI_URL=" + orderapiURL,
 		"-e", "BEDROCK_REGION=" + bedrockRegion,
@@ -120,7 +128,7 @@ func runAITrader(req jobRequest, network, backendURL, orderapiURL, bedrockRegion
 // runReplay는 K8s Indexed Job(completions=shardCount, JOB_COMPLETION_INDEX
 // 자동 주입)을 shardCount번의 개별 docker run으로 재현합니다 — 각 컨테이너에
 // -shard-index를 직접 넘겨서 K8s가 자동으로 채워주던 것을 대신합니다.
-func runReplay(req jobRequest, network, orderapiURL string) error {
+func runReplay(req jobRequest, network, orderRecordsVolume, orderapiURL string) error {
 	shardCount := 1
 	if req.ShardCount != nil && *req.ShardCount > 0 {
 		shardCount = *req.ShardCount
@@ -134,6 +142,7 @@ func runReplay(req jobRequest, network, orderapiURL string) error {
 			"--name", name,
 			"--network", network,
 			"--memory=2g", "--cpus=1",
+			"-v", orderRecordsVolume + ":/app/orders",
 			"-e", "ORDERAPI_URL=" + orderapiURL,
 			"truss-replayengine:latest",
 		}

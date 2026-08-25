@@ -224,6 +224,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DOCKER_NETWORK: "homelab_default"
+      # orderapi 서비스의 orderapi-data 볼륨(위 orderapi.volumes 참고) — trader/
+      # replayengine이 여기 마운트해야 orderapi의 GET /v1/jobs/replay-preview가
+      # 그 기록을 읽을 수 있다(job-trigger/main.go 주석 참고).
+      ORDER_RECORDS_VOLUME: "homelab_orderapi-data"
       BACKEND_URL: "http://backend:8080"
       ORDERAPI_URL: "http://orderapi:8081"
       BEDROCK_REGION: "ap-northeast-2"
