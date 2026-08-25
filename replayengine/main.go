@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"replayengine/orderstore"
@@ -19,7 +22,10 @@ func main() {
 	}
 }
 
-func run() error {
+// run의 반환값 err는 named return입니다 — trader/main.go의 run()과 같은 이유로
+// (2026-08-12 추가) 아래 defer가 최종 성공/실패를 orderapi에 보고합니다.
+func run() (err error) {
+	var resultMessage string
 	date := flag.String("date", "", "리플레이할 기록의 날짜 (YYYY-MM-DD, 필수 — trader가 그 -date로 기록한 세션)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 읽어올 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에서 읽음)")
@@ -64,28 +70,91 @@ func run() error {
 	// 별도 함수로 뽑아낸 이유도 같다: log.Fatal이 defer(세션 반납)를 건너뛰지
 	// 않도록, 에러를 반환해 main()에서 마지막에 한 번만 처리한다.
 	sessionClient := session.Client{HTTPClient: httpClient, BaseURL: cfg.OrderAPIURL}
-	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "replayengine", *runID)
+	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "replayengine", *runID, *date, *speed)
 	if err != nil {
 		return fmt.Errorf("세션 클레임 실패 — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있고, 이미 다른 실행 그룹이 활성 상태입니다: %w", err)
 	}
 	log.Printf("세션 클레임 완료 (sessionId=%s, runId=%q)", sessionID, *runID)
 
+	// 전체 리플레이의 수명 주기를 취소 가능하게 만듭니다(2026-08-20, "중지"
+	// 버튼 지원 전에는 context.Background()로 취소 불가능했습니다) — 하트비트
+	// 고루틴이 정지 요청을 받으면 이 cancel을 불러 모든 마켓 재생 고루틴을
+	// 정상 종료시킵니다(각 replayMarket은 이미 ctx.Done()을 보고 있음). 하트비트를
+	// 시작하기 전에 만들어둬야 cancel을 넘겨줄 수 있습니다.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stopped bool
+
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	var heartbeatWG sync.WaitGroup
 	heartbeatWG.Go(func() {
-		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds)
+		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds, func() {
+			stopped = true
+			cancel()
+		})
+	})
+
+	// SIGTERM 핸들러가 없으면 Kubernetes가 파드를 지울 때(Job 정리, Karpenter
+	// 노드 축출 등) kubelet이 보내는 SIGTERM에 Go 런타임 기본 동작(즉시 종료)이
+	// 그대로 발동해 아래 defer(세션 반납)가 전혀 실행되지 않는다 —
+	// orderapi:session:lastrun이 IN_PROGRESS로 영영 고아가 남는다(trader에서
+	// 2026-08-20에 실측, replayengine도 구조가 같아 동일 취약점). SIGTERM/
+	// SIGINT를 "중지 기능"과 같은 정상 종료 경로로 흘려보낸다.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	var sigWG sync.WaitGroup
+	sigWG.Go(func() {
+		select {
+		case sig := <-sigCh:
+			log.Printf("종료 시그널 수신(%v) — 세션을 정상 반납하며 종료합니다", sig)
+			stopped = true
+			cancel()
+		case <-ctx.Done():
+		}
 	})
 	defer func() {
+		// **실제 데드락 버그, 2026-08-23 발견·수정**: defer는 LIFO라 이 defer가
+		// 위쪽의 `defer cancel()`보다 먼저 실행된다. sigWG의 고루틴은
+		// "SIGTERM 수신" 또는 "ctx.Done()" 둘 중 하나로만 빠져나오는데, 정상
+		// 완료 시(SIGTERM도 안 오고, 정지 요청도 없었던 경우) `cancel()`을
+		// 호출하는 건 이 함수 맨 위에 있는 `defer cancel()` 하나뿐이고, 그건
+		// 이 defer가 다 끝나야(LIFO) 실행된다 — 즉 아래 `sigWG.Wait()`가
+		// `cancel()`이 불리기를 기다리는데, 그 `cancel()`은 `sigWG.Wait()`가
+		// 끝나기를 기다리는 순환 대기였다. 실제로 정상 종료된 리플레이 파드가
+		// 세션을 반납 못 하고 `Running`으로 영원히 남아, orderapi 세션이
+		// `IN_PROGRESS`에서 절대 안 풀리는 사고로 나타났다(프론트가 "새 실행을
+		// 시작 못 함"으로 관측). 여기서 명시적으로 한 번 더 호출해 고친다 —
+		// `cancel()`은 여러 번 불러도 안전(idempotent)하므로 위의
+		// `defer cancel()`은 안전망으로 그대로 둔다.
+		cancel()
+		signal.Stop(sigCh)
 		stopHeartbeat()
 		heartbeatWG.Wait()
-		if err := sessionClient.Release(context.Background(), sessionID); err != nil {
-			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, err)
+		sigWG.Wait()
+
+		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
+		// 문자열입니다 — 모듈 간 타입 비공유 원칙, trader/main.go와 동일.
+		// stopHeartbeat()+Wait()/sigWG.Wait() 이후에 읽으므로 stopped를 별도
+		// 동기화 없이 읽어도 안전합니다(WaitGroup이 happens-before를 보장).
+		status := "COMPLETED"
+		message := resultMessage
+		if stopped {
+			status = "STOPPED"
+			message = "사용자 요청으로 정지됨"
+			if resultMessage != "" {
+				message = resultMessage + " (사용자 요청으로 정지됨)"
+			}
+		} else if err != nil {
+			status = "FAILED"
+			message = err.Error()
+		}
+		if relErr := sessionClient.Release(context.Background(), sessionID, status, message); relErr != nil {
+			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, relErr)
 		} else {
-			log.Printf("세션 반납 완료 (sessionId=%s)", sessionID)
+			log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, status)
 		}
 	}()
 
-	ctx := context.Background()
 	var wg sync.WaitGroup
 	skipped, started := 0, 0
 
@@ -120,6 +189,7 @@ func run() error {
 		started, skipped, *shardIndex, *shardCount, cfg.OrderAPIURL)
 
 	wg.Wait()
+	resultMessage = fmt.Sprintf("%d개 마켓 재생, %d개 건너뜀 (shard %d/%d)", started, skipped, *shardIndex, *shardCount)
 	log.Print("전체 리플레이 완료")
 	return nil
 }

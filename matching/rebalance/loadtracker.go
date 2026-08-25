@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -48,34 +49,75 @@ func readingKey(market string) string {
 // Loads는 마켓별 최근 처리량 추정치를 반환합니다. 처음 측정하는 마켓(이전 기록이
 // 없음)은 0으로 보고합니다 — 콜드 스타트를 "가볍다"고 가정하는 게, 알지도 못하는
 // 값으로 잘못 추정해 배정을 왜곡하는 것보다 안전한 기본값입니다.
+//
+// 20개 마켓을 고루틴으로 병렬 측정합니다 — 예전엔 순차로 돌면서 마켓마다 매번
+// 새로 브로커에 다이얼했는데(readLastOffset), MSK(AWS_MSK_IAM)에서는 다이얼
+// 한 번마다 TLS 핸드셰이크+SigV4 서명 기반 SASL 인증까지 새로 거쳐야 해서
+// 다이얼당 100~150ms가 걸렸습니다. 20번 순차로 합치면 2~3초인데, 이게
+// balancer.go의 AssignGroups(리밸런스 리더가 동기로 기다리는 자리)를 그만큼
+// 지연시켜서 Kafka 그룹 리밸런스 프로토콜 자체의 타이밍과 충돌해 "리밸런스가
+// 멈췄다"는 판단→재리밸런스→그 안에서 다시 20번 순차 다이얼→재지연으로
+// 이어지는 자기유발 루프를 만들었습니다(실제 배포 환경에서 발견 — 로컬
+// dev-kafka는 인증 없는 초저지연 연결이라 이 지연 자체가 없어서 드러나지
+// 않았습니다). 결과는 인덱스 고정 슬라이스에 써서, 고루틴이 어떤 순서로
+// 끝나든 t.markets와 같은 순서가 유지됩니다.
 func (t *LoadTracker) Loads(ctx context.Context) ([]Load, error) {
 	now := time.Now()
-	loads := make([]Load, 0, len(t.markets))
+	loads := make([]Load, len(t.markets))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
 
 	for partition, market := range t.markets {
-		offset, err := t.readLastOffset(ctx, partition)
-		if err != nil {
-			return nil, fmt.Errorf("파티션 %d(마켓 %s) 오프셋 조회 실패: %w", partition, market, err)
-		}
+		wg.Add(1)
+		go func(partition int, market string) {
+			defer wg.Done()
 
-		load := 0.0
-		prev, ok, err := t.loadReading(ctx, market)
-		if err != nil {
-			return nil, fmt.Errorf("마켓 %s 이전 측정값 조회 실패: %w", market, err)
-		}
-		if ok {
-			elapsed := now.Sub(time.Unix(0, prev.AtUnix)).Seconds()
-			if elapsed > 0 && offset > prev.Offset {
-				load = float64(offset-prev.Offset) / elapsed
+			load, err := t.measureLoad(ctx, partition, market, now)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
 			}
-		}
-		loads = append(loads, Load{Market: market, Value: load})
+			loads[partition] = load
+		}(partition, market)
+	}
+	wg.Wait()
 
-		if err := t.saveReading(ctx, market, reading{Offset: offset, AtUnix: now.UnixNano()}); err != nil {
-			return nil, fmt.Errorf("마켓 %s 측정값 저장 실패: %w", market, err)
-		}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return loads, nil
+}
+
+// measureLoad는 마켓 하나의 오프셋 조회+이전 측정값 대비 처리량 계산+새 측정값
+// 저장을 순서대로 처리합니다 — Loads가 이걸 마켓마다 별도 고루틴으로 돌립니다.
+func (t *LoadTracker) measureLoad(ctx context.Context, partition int, market string, now time.Time) (Load, error) {
+	offset, err := t.readLastOffset(ctx, partition)
+	if err != nil {
+		return Load{}, fmt.Errorf("파티션 %d(마켓 %s) 오프셋 조회 실패: %w", partition, market, err)
+	}
+
+	load := 0.0
+	prev, ok, err := t.loadReading(ctx, market)
+	if err != nil {
+		return Load{}, fmt.Errorf("마켓 %s 이전 측정값 조회 실패: %w", market, err)
+	}
+	if ok {
+		elapsed := now.Sub(time.Unix(0, prev.AtUnix)).Seconds()
+		if elapsed > 0 && offset > prev.Offset {
+			load = float64(offset-prev.Offset) / elapsed
+		}
+	}
+
+	if err := t.saveReading(ctx, market, reading{Offset: offset, AtUnix: now.UnixNano()}); err != nil {
+		return Load{}, fmt.Errorf("마켓 %s 측정값 저장 실패: %w", market, err)
+	}
+	return Load{Market: market, Value: load}, nil
 }
 
 func (t *LoadTracker) readLastOffset(ctx context.Context, partition int) (int64, error) {

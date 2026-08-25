@@ -38,8 +38,15 @@ spec:
           # Always가 맞다.
           imagePullPolicy: Always
           env:
+            # 2026-08-24: MSK 재생성 때마다 바뀌는 값이라 리터럴 대신 terraform이
+            # 관리하는 ConfigMap(infra/k8s-addons.tf의 backend-cluster-config)을
+            # 참조한다 — EKS 전체 destroy→apply 리허설 중 하드코딩 탓에 재연결이
+            # 전부 실패했던 것을 보고 고침.
             - name: KAFKA_BROKER
-              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-cluster-config
+                  key: KAFKA_BROKER
             - name: KAFKA_USE_IAM_AUTH
               value: "true"
             - name: REDIS_ADDR
@@ -108,10 +115,26 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: matching-engine
+  # 이름이 "matching-engine"이 아니라 "matching-engine-metrics"인 이유 — orderapi의
+  # 헬스체크(systemstatus.go의 matchingEngineMetricsURL, "매칭 엔진" 상태)와 그라파나
+  # 대시보드 스크레이프 설정이 이 정확한 이름을 기대한다. 원래 이 YAML엔 "matching-engine"
+  # 으로 잘못 적혀 있었고, 실제 클러스터엔 이 이름의 서비스가 (아마 손으로) 따로
+  # 만들어져 있었던 것으로 보인다 — EKS를 통째로 지웠다 올리는 리허설(2026-08-24) 중
+  # 이 YAML만 적용해서는 "매칭 엔진" 상태가 계속 "down"으로 나오는 걸 보고 발견/수정.
+  name: matching-engine-metrics
   namespace: backend
   labels:
     app: matching-engine
+  annotations:
+    # 이 annotation 3개가 없으면 monitoring-ec2/prometheus.yml.tpl의 k8s-services
+    # job이 이 Service를 아예 발견하지 못한다(relabel_configs가 prometheus_io_scrape
+    # annotation을 keep 조건으로 씀) — 위 name 수정과 같은 이유로 예전엔 손으로만
+    # 붙어있었던 것으로 보인다. 이게 없어서 그라파나 "매칭 엔진 상태" 패널이
+    # up{service="matching-engine-metrics"}에 데이터가 아예 없어 "장애"로 나오는 걸
+    # 보고 발견(2026-08-25, EKS 전체 destroy→apply 리허설 후 그라파나에서 실측).
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: /metrics
 spec:
   selector:
     app: matching-engine

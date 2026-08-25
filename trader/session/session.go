@@ -26,7 +26,8 @@ import (
 var ErrAlreadyActive = errors.New("이미 활성 세션이 있습니다")
 
 type claimRequest struct {
-	Owner string `json:"owner"`
+	Owner string  `json:"owner"`
+	Speed float64 `json:"speed,omitempty"`
 }
 
 type claimResponse struct {
@@ -41,6 +42,13 @@ type errorResponse struct {
 	Message   string `json:"message"`
 }
 
+// releaseRequest는 orderapi/sessionhandlers.go의 releaseRequest와 같은 모양입니다
+// (모듈 간 타입 비공유 원칙에 따라 독립적으로 다시 선언).
+type releaseRequest struct {
+	Status  string `json:"status,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 // Client는 orderapi의 세션 API를 호출합니다.
 type Client struct {
 	HTTPClient *http.Client
@@ -49,9 +57,11 @@ type Client struct {
 
 // Claim은 owner 이름으로 세션을 하나 클레임합니다. 이미 활성 세션이 있으면
 // ErrAlreadyActive를 감싼 에러를 반환합니다 — 호출부는 이 경우 실행을 시작하지
-// 말고 종료해야 합니다.
-func (c Client) Claim(ctx context.Context, owner string) (sessionID string, ttlSeconds int, err error) {
-	body, err := json.Marshal(claimRequest{Owner: owner})
+// 말고 종료해야 합니다. speed는 2026-08-20 추가 — "실행 결과" 화면에 배속을
+// 같이 보여주기 위해 orderapi의 RunRecord에 기록됩니다(main.go의 -speed 플래그
+// 값을 그대로 전달).
+func (c Client) Claim(ctx context.Context, owner string, speed float64) (sessionID string, ttlSeconds int, err error) {
+	body, err := json.Marshal(claimRequest{Owner: owner, Speed: speed})
 	if err != nil {
 		return "", 0, err
 	}
@@ -85,32 +95,52 @@ func (c Client) Claim(ctx context.Context, owner string) (sessionID string, ttlS
 	return claimed.SessionID, claimed.TTLSeconds, nil
 }
 
-// Heartbeat는 세션 TTL을 갱신합니다.
-func (c Client) Heartbeat(ctx context.Context, sessionID string) error {
+// heartbeatResponse는 orderapi/sessionhandlers.go의 heartbeatResponse와 같은
+// 모양입니다(모듈 간 타입 비공유 원칙에 따라 독립적으로 다시 선언).
+type heartbeatResponse struct {
+	StopRequested bool `json:"stopRequested"`
+}
+
+// Heartbeat는 세션 TTL을 갱신하고, orderapi가 이 그룹에 정지 요청을 받아뒀는지
+// 같이 돌려받습니다(2026-08-20, "중지" 버튼 지원) — RunHeartbeat가 이미 이
+// 주기로 서버와 왕복하고 있으므로, 별도 폴링 없이 이 응답에 얹혀서 옵니다.
+func (c Client) Heartbeat(ctx context.Context, sessionID string) (stopRequested bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+"/v1/sessions/"+sessionID+"/heartbeat", nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
-	io.ReadAll(resp.Body) // 커넥션 재사용을 위해 끝까지 읽음(trader/order/http_submitter.go와 같은 이유)
+	body, _ := io.ReadAll(resp.Body) // 커넥션 재사용을 위해 끝까지 읽음(trader/order/http_submitter.go와 같은 이유)
 
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("세션 하트비트 실패 (status=%d)", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("세션 하트비트 실패 (status=%d)", resp.StatusCode)
 	}
-	return nil
+	var parsed heartbeatResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return false, fmt.Errorf("세션 하트비트 응답 파싱 실패: %w", err)
+	}
+	return parsed.StopRequested, nil
 }
 
 // Release는 세션을 명시적으로 반납합니다. 정상 종료 경로에서 호출합니다 —
-// 크래시로 못 부르면 TTL이 지나서 자동으로 풀립니다(자기치유).
-func (c Client) Release(ctx context.Context, sessionID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/v1/sessions/"+sessionID, nil)
+// 크래시로 못 부르면 TTL이 지나서 자동으로 풀립니다(자기치유). status/message는
+// 이번 실행이 어떻게 끝났는지를 orderapi의 LastRun에 남깁니다(2026-08-12,
+// 프론트 "실행 결과" 화면 지원 — orderapi/session.RunOutcome과 같은 뜻).
+// status가 비어있으면 orderapi가 COMPLETED로 기본 처리합니다.
+func (c Client) Release(ctx context.Context, sessionID, status, message string) error {
+	body, err := json.Marshal(releaseRequest{Status: status, Message: message})
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/v1/sessions/"+sessionID, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -129,7 +159,13 @@ func (c Client) Release(ctx context.Context, sessionID string) error {
 // RunHeartbeat는 ctx가 끝날 때까지 주기적으로 Heartbeat를 호출합니다. 간격을
 // ttlSeconds의 1/3로 잡는 이유는, 네트워크 지연이나 한두 번의 실패로 곧바로
 // 세션이 만료되지 않을 여유를 두기 위함입니다.
-func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds int) {
+//
+// onStopRequested는 orderapi가 정지 요청을 받아뒀다고 처음 알려온 순간 딱
+// 한 번 호출됩니다(2026-08-20, "중지" 버튼 지원) — main.go가 여기에 재생
+// 전체를 취소하는 cancel()을 넘겨줍니다. 그 뒤로도 하트비트 자체는 ctx가
+// 끝날 때까지(=재생이 실제로 정리되고 세션을 반납할 때까지) 계속 돕니다 —
+// 정지 도중에도 세션 TTL이 만료돼버리면 안 되기 때문입니다.
+func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds int, onStopRequested func()) {
 	interval := time.Duration(ttlSeconds) * time.Second / 3
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -137,13 +173,21 @@ func RunHeartbeat(ctx context.Context, c Client, sessionID string, ttlSeconds in
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var stopNotified bool
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := c.Heartbeat(ctx, sessionID); err != nil {
+			stopRequested, err := c.Heartbeat(ctx, sessionID)
+			if err != nil {
 				log.Printf("세션 하트비트 실패 (sessionId=%s): %v", sessionID, err)
+				continue
+			}
+			if stopRequested && !stopNotified {
+				stopNotified = true
+				log.Printf("정지 요청 수신 (sessionId=%s) — 재생을 정상 종료합니다", sessionID)
+				onStopRequested()
 			}
 		}
 	}

@@ -54,6 +54,17 @@ func (f *fakeStorage) LoadStream(market string, start, end time.Time) (dataset.S
 	return s, nil
 }
 
+func (f *fakeStorage) Exists(market string, start, end time.Time) (dataset.ExistsResult, error) {
+	_, batchOk := f.batches[fakeKey(market, start, end)]
+	_, streamOk := f.streams[fakeKey(market, start, end)]
+	return dataset.ExistsResult{
+		BatchExists:  batchOk,
+		BatchPath:    "fake://" + market + "/batch",
+		StreamExists: streamOk,
+		StreamPath:   "fake://" + market + "/stream",
+	}, nil
+}
+
 func TestManifestHandlerReturnsAllTargetMarkets(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/markets/data?date=2026-07-27", nil)
 	rec := httptest.NewRecorder()

@@ -14,7 +14,15 @@ import (
 // 배치 크기만큼 묶어서 왕복 횟수를 줄이는 게 목적입니다. evs가 1건이어도
 // 정확히 같은 결과를 내므로, 배치가 안 찬 상황(트래픽이 적을 때)에도 문제없이
 // 동작합니다.
-func ApplyOrderEvents(ctx context.Context, s Store, evs []events.OrderEvent) error {
+//
+// 반환하는 accepted는 이번 호출로 실제 새로 저장된 신규 주문 수입니다
+// (InsertOrdersBatch가 재전달 중복을 제외하고 돌려주는 값을 그대로 전달) —
+// 2026-08-21, recorder/metrics.go가 이 값으로 접수 TPS 카운터를 DB 재조회 없이
+// 늘립니다. 에러가 나면(둘 중 하나라도 실패) 0을 반환합니다 — 이 배치는
+// 오프셋이 커밋 안 돼 통째로 재시도되므로, 실패한 시도의 값을 카운터에
+// 반영하면 재시도 성공 시 중복 집계가 됩니다(호출부는 반드시 err==nil일
+// 때만 accepted를 카운터에 더해야 합니다).
+func ApplyOrderEvents(ctx context.Context, s Store, evs []events.OrderEvent) (accepted int64, err error) {
 	news := make([]NewOrder, 0, len(evs))
 	cancels := make([]CancelInput, 0, len(evs))
 	for _, ev := range evs {
@@ -34,28 +42,40 @@ func ApplyOrderEvents(ctx context.Context, s Store, evs []events.OrderEvent) err
 		case events.OrderCancel:
 			cancels = append(cancels, CancelInput{OrderID: ev.OrderID, CanceledAt: ev.CanceledAt})
 		default:
-			return fmt.Errorf("알 수 없는 이벤트 타입: %q", ev.Type)
+			return 0, fmt.Errorf("알 수 없는 이벤트 타입: %q", ev.Type)
 		}
 	}
 	if len(news) > 0 {
-		if err := s.InsertOrdersBatch(ctx, news); err != nil {
-			return fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(news), err)
+		n, err := s.InsertOrdersBatch(ctx, news)
+		if err != nil {
+			return 0, fmt.Errorf("주문 일괄 저장 실패 (%d건): %w", len(news), err)
 		}
+		accepted = n
 	}
 	if len(cancels) > 0 {
 		if err := s.CancelOrdersBatch(ctx, cancels); err != nil {
-			return fmt.Errorf("취소 일괄 반영 실패 (%d건): %w", len(cancels), err)
+			return 0, fmt.Errorf("취소 일괄 반영 실패 (%d건): %w", len(cancels), err)
 		}
 	}
-	return nil
+	return accepted, nil
 }
 
 // ApplyExecutionEvents는 executions 토픽에서 디코딩된 이벤트 배치를 Store에
 // 반영하고, Store가 보고한 결과(주문을 못 찾음/mode 불일치)를 항목별로 로그로
 // 남깁니다. ApplyOrderEvents와 같은 배칭 목적입니다.
-func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEvent) error {
+//
+// 반환하는 applied는 이번 호출로 "실제로 새로" 저장된 체결 건수입니다 —
+// 2026-08-24 전까지는 execution 행이 buy/sell 주문을 찾았는지와 무관하게
+// 항상 저장돼서 항상 len(evs)와 같았지만, 배치 재전달로 인한 중복 체결
+// 사고(CLAUDE.md 참고) 대응으로 execution에도 (buy_order_id, sell_order_id)
+// 유니크 인덱스 + INSERT IGNORE가 붙으면서 재전달된 배치는 실제로 저장되는
+// 행이 0건일 수 있습니다 — 그래서 결과의 Inserted 플래그를 그대로 합산합니다.
+// ApplyOrderEvents의 accepted와 같은 이유로 recorder/metrics.go가 체결 TPS
+// 카운터를 늘리는 데 씁니다(재전달로 중복 집계되지 않도록) — 에러 시 0을
+// 반환합니다.
+func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEvent) (applied int, err error) {
 	if len(evs) == 0 {
-		return nil
+		return 0, nil
 	}
 	inputs := make([]ExecutionInput, len(evs))
 	for i, ev := range evs {
@@ -70,7 +90,7 @@ func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEv
 
 	results, err := s.ApplyExecutionsBatch(ctx, inputs)
 	if err != nil {
-		return fmt.Errorf("체결 일괄 반영 실패 (%d건): %w", len(evs), err)
+		return 0, fmt.Errorf("체결 일괄 반영 실패 (%d건): %w", len(evs), err)
 	}
 
 	for i, result := range results {
@@ -85,8 +105,11 @@ func ApplyExecutionEvents(ctx context.Context, s Store, evs []events.ExecutionEv
 			log.Printf("체결 양쪽 주문의 mode가 다름 (buyOrderId=%s, sellOrderId=%s) — 매수측 mode(%s) 사용",
 				ev.BuyOrderID, ev.SellOrderID, result.Mode)
 		}
+		if result.Inserted {
+			applied++
+		}
 	}
-	return nil
+	return applied, nil
 }
 
 // ApplyAssignmentEvent는 assignments 토픽에서 디코딩된 이벤트 하나를 Store에

@@ -5,15 +5,18 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"log"
+	"net/http"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"recorder/archive"
 	"recorder/backpressure"
 	"recorder/events"
 	rkafka "recorder/kafka"
+	"recorder/query"
 	"recorder/store"
 )
 
@@ -108,13 +111,39 @@ func main() {
 	// 읽어 신규 주문을 429로 거절할지 결정합니다(기록기는 이 결정에 관여하지
 	// 않고 오직 관찰한 사실만 Redis에 남김).
 	watcher := &backpressure.Watcher{
-		Sources:       []backpressure.LagSource{orderReader.Lag, execReader.Lag},
-		Flag:          &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey},
+		Sources: []backpressure.LagSource{
+			instrumentedLagSource("orders", orderReader.Lag),
+			instrumentedLagSource("executions", execReader.Lag),
+		},
+		Flag:          instrumentedFlag{inner: &backpressure.RedisFlag{Client: redisClient, Key: backpressureRedisKey}},
 		HighWatermark: backpressureHighWatermark,
 		LowWatermark:  backpressureLowWatermark,
 		CheckInterval: backpressureCheckInterval,
 	}
 	go watcher.Run(ctx)
+
+	// 조회 전용 HTTP 서버(2026-08-12 추가, docs/frontend-backend-integration.md
+	// 참고) — 기록기가 이미 RDS에 쌓아둔 데이터를 읽기만 하고, Kafka 컨슈머
+	// 루프와는 완전히 독립적으로 별도 고루틴에서 돕니다.
+	querier := query.NewMySQLQuerier(db)
+	go pollDashboardMetrics(ctx, querier, redisClient)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/trace/{orderId}", traceHandler(querier))
+	mux.HandleFunc("GET /v1/matching/engines", enginesHandler(querier))
+	mux.HandleFunc("GET /v1/metrics/dashboard", dashboardMetricsHandler(querier, redisClient))
+	mux.HandleFunc("GET /v1/metrics/throughput", throughputHandler(querier))
+	mux.HandleFunc("GET /v1/health", healthHandler(db))
+	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
+	mux.HandleFunc("GET /v1/orders/unresolved", unresolvedOrdersHandler(querier))
+	mux.HandleFunc("GET /v1/orders/unresolved/all", allUnresolvedOrdersHandler(querier))
+	mux.HandleFunc("GET /v1/orders/integrity", integrityCheckHandler(querier))
+
+	mux.Handle("GET /metrics", promhttp.Handler())
+	go func() {
+		addr := ":" + cfg.Port
+		log.Printf("기록기 조회 API 시작: %s", addr)
+		log.Fatal(http.ListenAndServe(addr, mux))
+	}()
 
 	archiveDest := cfg.ArchiveBucket
 	if archiveDest == "" {
@@ -133,7 +162,16 @@ func main() {
 			for _, ev := range evs {
 				execBatcher.Add(ev)
 			}
-			return store.ApplyExecutionEvents(ctx, dbStore, evs)
+			applied, err := store.ApplyExecutionEvents(ctx, dbStore, evs)
+			if err != nil {
+				return err
+			}
+			// DB 커밋이 실제로 성공했을 때만(err == nil) 카운터를 늘립니다 —
+			// 실패했으면 이 배치는 오프셋 미커밋으로 통째로 재시도되므로,
+			// 여기서 먼저 늘리면 재시도 성공 시 중복 집계가 됩니다
+			// (recorder/metrics.go, store/apply.go의 ApplyExecutionEvents 참고).
+			recorderExecutionTotal.Add(float64(applied))
+			return nil
 		})
 		log.Fatalf("executions 리더 종료: %v", err)
 	}()
@@ -149,7 +187,13 @@ func main() {
 		for _, ev := range evs {
 			orderBatcher.Add(ev)
 		}
-		return store.ApplyOrderEvents(ctx, dbStore, evs)
+		accepted, err := store.ApplyOrderEvents(ctx, dbStore, evs)
+		if err != nil {
+			return err
+		}
+		// execReader 콜백과 같은 이유로 성공했을 때만 늘립니다.
+		recorderOrderAcceptTotal.Add(float64(accepted))
+		return nil
 	})
 	log.Fatalf("orders 리더 종료: %v", err)
 }

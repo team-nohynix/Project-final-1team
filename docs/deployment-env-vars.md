@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-12 | `recorder`에 조회 전용 HTTP API(`GET /v1/trace/{orderId}`, `GET /v1/matching/engines`) 신설 — 새 `PORT` 환경변수(선택, 기본 8082) 추가. 프론트 `TestResultTrackingView`/`MatchingEngineView`가 이걸로 연결 가능(`docs/frontend-backend-integration.md` 참고) |
 | 2026-08-11 (5차) | `recorder/schema.sql` 최초 적용 방법을 별도 문서([`recorder-schema-bootstrap.md`](recorder-schema-bootstrap.md))로 분리 — 처음엔 K8s Job/ConfigMap으로 만들었다가, 1회성 작업에 과한 구조라 삭제하고 ad hoc `kubectl run` 명령 두 줄로 대체 |
 | 2026-08-11 (4차) | `orderapi`에 `POST /v1/jobs`(trader/replayengine 실행 요청을 SQS로 발행) 신설, `JOB_TRIGGER_QUEUE_URL`(선택) 환경변수 추가 — 2번 표 참고. `infra/lambda/job-trigger/index.py`의 실제 로직(K8s Job 생성) 구현, `infra/k8s/{ai-trader,replay}/configmap.yaml` 신설(CLAUDE.md "Trader/simulator launch via K8s Job" 참고) |
 | 2026-08-11 (3차) | 실제 AWS 상태를 `terraform state list`/`aws` CLI로 다시 확인(읽기 전용, 변경 없음) — 이 문서가 "아직 없음"이라고 적어둔 것 상당수가 이미 실제로 존재했다: RDS는 이미 MySQL 8.4로 적용 완료, `team1-truss-order-records`/`team1-truss-trade-results` 버킷 둘 다 생성+Terraform state 반영 완료, MSK/ElastiCache/EKS/IRSA 전부 적용 완료. 아래 표들의 "아직 미생성"/"드리프트" 표기를 실제 상태에 맞게 정정. 6개 모듈 전부 Dockerfile 작성 완료 + `team1-truss` ECR에 `{모듈}-latest` 태그로 푸시 완료 — 새 "컨테이너 이미지" 섹션 추가. `recorder`가 필요로 하는 `secretsmanager:GetSecretValue` IAM 권한이 이미 붙어 있는데(RDS가 `manage_master_user_password=true`, 즉 AWS가 관리하는 Secrets Manager 시크릿) `recorder` 코드는 아직 이 시크릿을 직접 읽어오는 로직이 없다는 것도 새로 발견 — "미해결" 섹션에 기록 |
@@ -125,6 +126,7 @@ CLI 플래그:
 
 | 이름 | 필수 여부 | 로컬 기본값 | AWS에서 채울 값 |
 |---|---|---|---|
+| `PORT` | 선택 (2026-08-12 추가) | `8082` | 조회 전용 HTTP API(`GET /v1/trace/{orderId}`, `GET /v1/matching/engines`)가 리슨할 포트 — `docs/frontend-backend-integration.md` 참고 |
 | `KAFKA_BROKER` | **필수** | — | orderapi/matching과 동일 브로커 |
 | `DATABASE_URL` | **필수** | — | `go-sql-driver/mysql` DSN 형식(**URL 아님**): `user:pass@tcp(host:port)/dbname?parseTime=true&loc=UTC` — 자체 호스팅 MySQL EC2(`team1-mysql`, `10.10.10.178:3306`) 엔드포인트로 채움. `parseTime=true`/`loc=UTC` 빠지면 타임스탬프 바인딩이 깨짐. 값 자체는 `recorder-db-secret` K8s Secret으로 주입(아래 "미해결" 참고 — 지금은 해소됨) |
 | `REDIS_ADDR` | **필수** | — | orderapi/matching과 동일 Redis |

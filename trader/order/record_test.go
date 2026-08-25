@@ -77,6 +77,34 @@ func TestInMemoryRecorderConcurrentRecord(t *testing.T) {
 	}
 }
 
+func TestInMemoryRecorderDrainClearsBuffer(t *testing.T) {
+	r := NewInMemoryRecorder()
+	r.Record(Order{Market: "KRW-BTC", TS: 200, Side: "SELL"}, "ord_2")
+	r.Record(Order{Market: "KRW-BTC", TS: 100, Side: "BUY"}, "ord_1")
+
+	drained := r.Drain("KRW-BTC")
+	if len(drained) != 2 || drained[0].TS != 100 || drained[1].TS != 200 {
+		t.Fatalf("Drain() = %+v, ts 오름차순 2건 기대", drained)
+	}
+
+	if got := r.Snapshot("KRW-BTC"); len(got) != 0 {
+		t.Errorf("Drain 이후 버퍼가 비어있어야 하는데 %+v", got)
+	}
+
+	// Drain 이후 새로 기록한 건 다음 Drain 몫으로 온전히 남아야 한다.
+	r.Record(Order{Market: "KRW-BTC", TS: 300, Side: "BUY"}, "ord_3")
+	if got := r.Drain("KRW-BTC"); len(got) != 1 || got[0].TS != 300 {
+		t.Errorf("두 번째 Drain() = %+v, want 1건(ts=300)", got)
+	}
+}
+
+func TestInMemoryRecorderDrainEmptyMarketReturnsNil(t *testing.T) {
+	r := NewInMemoryRecorder()
+	if got := r.Drain("KRW-XRP"); got != nil {
+		t.Errorf("기록한 적 없는 마켓의 Drain() = %v, want nil", got)
+	}
+}
+
 type stubSubmitter struct {
 	orderID string
 	err     error

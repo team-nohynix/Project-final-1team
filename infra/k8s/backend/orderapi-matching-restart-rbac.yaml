@@ -21,6 +21,16 @@ rules:
     resources: ["deployments"]
     resourceNames: ["matching-engine"]
     verbs: ["get", "patch"]
+  # 2026-08-24, GET /v1/system-status(orderapi/systemstatus.go) "실시간 처리
+  # 흐름" 패널의 파드 레플리카 수 표시용 — orderapi/recorder Deployment 상태를
+  # 읽기만 하면 되므로(재시작 등 쓰기 권한 불필요) 위 규칙과 분리된 별도
+  # 규칙으로 get만 부여한다. 매칭엔진 규칙에 이름만 추가하면 patch 권한까지
+  # 같이 넓어지므로(한 rule 안의 verbs는 모든 resourceNames에 동일 적용)
+  # 일부러 규칙을 나눴다 — 최소 권한 원칙은 이 파일 도입 취지와 같다.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["orderapi", "recorder"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

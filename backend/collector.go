@@ -37,7 +37,11 @@ type CollectResult struct {
 
 // collectAllMarkets는 upbit.TargetMarkets 전체에 대해 [start, end) 구간 데이터를 수집합니다.
 // 한 마켓에서 에러가 나도 나머지 마켓 수집은 계속 진행하고, 결과에 에러 상태로 기록합니다.
-func collectAllMarkets(storage dataset.Storage, start, end time.Time) []CollectResult {
+// onProgress는 마켓 하나가 끝날 때마다(성공/실패 무관) 호출됩니다 — 프론트
+// 진행률 표시용(2026-08-12 추가, collectHandler가 collectJobStore.progress를
+// 넘겨줌). nil이면 호출하지 않습니다 — 테스트 등 진행률이 필요 없는 호출부를
+// 위한 것입니다.
+func collectAllMarkets(storage dataset.Storage, start, end time.Time, onProgress func()) []CollectResult {
 	results := make([]CollectResult, 0, len(upbit.TargetMarkets))
 
 	for _, market := range upbit.TargetMarkets {
@@ -49,23 +53,40 @@ func collectAllMarkets(storage dataset.Storage, start, end time.Time) []CollectR
 				Status: "error",
 				Error:  err.Error(),
 			})
-			continue
+		} else {
+			results = append(results, CollectResult{
+				Market:     market,
+				Status:     "ok",
+				BatchPath:  batchPath,
+				StreamPath: streamPath,
+			})
 		}
 
-		results = append(results, CollectResult{
-			Market:     market,
-			Status:     "ok",
-			BatchPath:  batchPath,
-			StreamPath: streamPath,
-		})
+		if onProgress != nil {
+			onProgress()
+		}
 	}
 
 	return results
 }
 
 // collectMarket은 한 마켓에 대해 업비트 데이터를 전부 수집하여
-// batch/stream JSON 파일로 저장합니다.
+// batch/stream JSON 파일로 저장합니다. batch/stream이 이미 둘 다 저장돼
+// 있으면(같은 market+기간을 재요청한 경우) 업비트를 아예 호출하지 않고
+// 기존 경로를 그대로 돌려줍니다 — 2026-08-19 추가: 이전엔 이 확인이
+// storage.SaveBatch/SaveStream 저장 직전(putIfAbsent)에만 있어서, 이미
+// 수집된 기간을 다시 요청해도 업비트 API는 항상 다시 호출되고(rate limit
+// 소모, 실측 193초) 마지막 업로드 단계만 건너뛰는 문제가 있었습니다.
 func collectMarket(storage dataset.Storage, market string, start, end time.Time) (batchPath, streamPath string, err error) {
+	existing, err := storage.Exists(market, start, end)
+	if err != nil {
+		return "", "", fmt.Errorf("기존 데이터 확인 실패: %w", err)
+	}
+	if existing.AllExist() {
+		fmt.Printf("[%s] 이미 수집된 데이터가 있어 건너뜀 -> %s, %s\n", market, existing.BatchPath, existing.StreamPath)
+		return existing.BatchPath, existing.StreamPath, nil
+	}
+
 	fmt.Printf("=== %s 수집 시작 ===\n", market)
 
 	ticks, err := upbit.FetchTradeTicksForDate(market, start)

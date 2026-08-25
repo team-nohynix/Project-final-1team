@@ -3,6 +3,8 @@
 package order
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -42,9 +44,8 @@ type Order struct {
 // kafkaclient.ExecutionConsumer로부터 체결을 받아 ACCEPTED/PARTIALLY_FILLED/
 // FILLED 사이 전이를 반영합니다.
 type Store struct {
-	mu      sync.Mutex
-	orders  map[string]*Order
-	nextSeq int
+	mu     sync.Mutex
+	orders map[string]*Order
 }
 
 // NewStore는 빈 Store를 만듭니다.
@@ -52,14 +53,21 @@ func NewStore() *Store {
 	return &Store{orders: make(map[string]*Order)}
 }
 
-// NewOrderID는 "ord_{YYYYMMDD}_{7자리 순번}" 형태의 주문 번호를 발급합니다
-// (docs/api-specification.md 2.1 예시와 동일한 모양). 순번은 프로세스 재시작 시
-// 리셋되는 인메모리 카운터입니다 — 영속 저장소가 아직 없어서 생기는 한계입니다.
+// NewOrderID는 "ord_{YYYYMMDD}_{16자리 hex}" 형태의 주문 번호를 발급합니다.
+// 2026-08-21 이전엔 순번 부분이 프로세스 재시작 시 리셋되는 인메모리 카운터였는데,
+// 같은 날 orderapi가 재배포/재시작되면(트래픽이 많은 정상적인 하루에도 흔함)
+// trade_order에 이미 남아있는 이전 실행의 order_id와 그대로 겹쳐서 INSERT IGNORE에
+// 조용히 씹히는 사고(체결이 엉뚱한 옛 주문 행에 merge됨)가 실제로 발생했습니다.
+// recorder/idgen.NewExecutionID와 같은 이유로 crypto/rand 8바이트를 씁니다 —
+// 재시작/여러 인스턴스에 걸쳐 충돌하지 않아야 하는 영속 ID는 인메모리 순번이
+// 아니라 무작위 값이어야 합니다. 날짜 접두사는 로그/DB에서 날짜별로 훑어보기
+// 위해 그대로 남겨둡니다.
 func (s *Store) NewOrderID(now time.Time) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nextSeq++
-	return fmt.Sprintf("ord_%s_%07d", now.UTC().Format("20060102"), s.nextSeq)
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("ord_%s_%016x", now.UTC().Format("20060102"), now.UnixNano())
+	}
+	return fmt.Sprintf("ord_%s_%s", now.UTC().Format("20060102"), hex.EncodeToString(buf))
 }
 
 // Save는 주문을 저장합니다(신규 접수 시). RemainingQuantity를 아직 안 채웠으면

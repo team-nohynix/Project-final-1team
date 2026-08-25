@@ -163,6 +163,16 @@ func (ob *OrderBook) Restore(o *Order) {
 	ob.insertResting(o)
 }
 
+// Size는 이 호가창에 지금 남아있는 미체결 주문 총 개수(매수+매도)입니다 — elements는
+// 주문이 체결(matchIncoming)되거나 명시적으로 Cancel될 때만 줄어들고 그 외에는 무기한
+// 쌓이므로, 이 값 자체가 "체결 상대가 없어 쌓이기만 하는 메모리 압박"을 직접 재는
+// 지표가 됩니다(engine.BookSize 경유, matching_engine_book_size 메트릭용 —
+// 2026-08-21, 컨슈머 랙이 못 보는 종류의 누적임을 발견하고 추가). AllOrders처럼 슬라이스를
+// 새로 만들지 않고 맵 길이만 읽어 스크레이프 주기마다 불러도 저렴합니다.
+func (ob *OrderBook) Size() int {
+	return len(ob.elements)
+}
+
 // AllOrders는 side의 모든 미체결 주문을 레벨 순서 그대로(레벨 안에서는 FIFO 순서 그대로)
 // 반환합니다 — 스냅샷 저장(FR-08/FR-12)을 위한 것으로, 이 순서 그대로 Restore를 반복
 // 호출하면 동일한 상태가 재구성됩니다.

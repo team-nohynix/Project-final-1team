@@ -18,6 +18,22 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.31"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.15"
+    }
   }
 
   backend "s3" {
@@ -36,6 +52,51 @@ provider "aws" {
 provider "aws" {
   alias  = "us_east_1"
   region = "us-east-1"
+}
+
+# kubernetes/helm 프로바이더 인증 (2026-08-24, "EKS 통째로 지웠다 올려도 복구되게"
+# 작업의 일부) — recorder-db-secret(kubernetes_secret)과 karpenter/aws-load-balancer-
+# controller/keda/kube-state-metrics/node-exporter(helm_release, helm-releases.tf)가
+# 이 둘을 씁니다. static token이 아니라 exec 플러그인으로 매 실행 시 `aws eks
+# get-token`을 새로 호출합니다 — EKS 토큰은 15분 만료라 terraform apply 시점에 늘 새로
+# 받아야 하고, CI(terraform-apply job)도 이미 같은 IAM 역할(TF_APPLY_ROLE)로 AWS
+# 자격증명을 갖고 있으니 별도 설정 없이 그 자격증명을 그대로 씁니다.
+provider "kubernetes" {
+  host                   = aws_eks_cluster.team1.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.team1.certificate_authority[0].data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.team1.name, "--region", "ap-northeast-2"]
+  }
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.team1.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.team1.certificate_authority[0].data)
+
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.team1.name, "--region", "ap-northeast-2"]
+    }
+  }
+}
+
+# access_config.bootstrap_cluster_creator_admin_permissions(eks-cluster.tf)가
+# 클러스터 생성자(CI의 TF_APPLY_ROLE)에게 K8s cluster-admin을 자동으로 준다고
+# 문서화돼있지만, 클러스터가 ACTIVE 상태가 된 직후 바로 kubernetes/helm 리소스를
+# 만들면 이 권한이 EKS 컨트롤 플레인 인증 레이어에 아직 전파되지 않아 전부
+# 403 forbidden으로 실패하는 걸 실측했다(2026-08-25, EKS 전체 destroy→apply
+# 리허설 중 — IAM 전파 지연으로 Karpenter/Lambda/모니터링 EC2가 겪은 것과 같은
+# 종류의 AWS eventual-consistency 문제). 모든 kubernetes_*/helm_release
+# 리소스가 이 리소스에 depends_on을 걸어 클러스터가 ACTIVE된 뒤 60초를 더
+# 기다리게 한다.
+resource "time_sleep" "wait_for_eks_auth" {
+  depends_on      = [aws_eks_cluster.team1]
+  create_duration = "60s"
 }
 
 data "aws_caller_identity" "current" {}

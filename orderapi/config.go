@@ -18,6 +18,9 @@ type Config struct {
 	RedisPassword      string
 	RedisTLSEnabled    bool
 	JobTriggerQueueURL string
+	OrderRecordsBucket string
+	RecorderURL        string
+	PrometheusURL      string
 }
 
 // LoadConfig는 로컬의 .env 파일(있으면)을 읽어들인 뒤, 환경변수 기반 설정을 반환합니다.
@@ -94,6 +97,32 @@ func LoadConfig() Config {
 	// 안 쓰는 로컬 개발 환경에 억지로 값을 채우게 하지 않습니다.
 	jobTriggerQueueURL := os.Getenv("JOB_TRIGGER_QUEUE_URL")
 
+	// ORDER_RECORDS_BUCKET도 선택입니다 — trader/replayengine의 -order-bucket
+	// 플래그와 같은 기본값 규칙(비어있으면 로컬 ./orders 디렉터리)입니다.
+	// GET /v1/jobs/replay-preview(2026-08-19 추가, "부하 시나리오 미리보기"
+	// 지원)가 이 값으로 trader가 기록해둔 주문 파일을 읽습니다 — orderapi의
+	// 핵심 기능(주문 접수/취소)과는 무관하므로 필수로 요구하지 않습니다.
+	orderRecordsBucket := os.Getenv("ORDER_RECORDS_BUCKET")
+
+	// RECORDER_URL도 선택입니다 — 값이 있으면 세션이 완전히 끝나는(그룹의
+	// 마지막 멤버가 반납하는) 시점에 recorder의 GET /v1/orders/unresolved로
+	// 그 세션이 남긴 미종결 주문을 물어봐서 취소합니다(2026-08-19, 부하테스트
+	// 반복으로 매칭 엔진 인메모리 오더북에 미체결 주문이 계속 쌓여 OOMKilled까지
+	// 간 사고 대응). 비어있으면 이 정리 로직을 건너뜁니다 — orderapi의 핵심
+	// 기능과는 무관해서, 로컬 개발 환경에 recorder가 안 떠 있어도 orderapi는
+	// 정상 동작해야 합니다.
+	recorderURL := os.Getenv("RECORDER_URL")
+
+	// PROMETHEUS_URL도 선택입니다 — 값이 있으면 GET /v1/cluster-metrics가
+	// 활성 노드 수/백엔드 전체 파드 수/파드 재시작 누적/매칭엔진 호가창
+	// 잔량/오토스케일링 현황을 그라파나 team1-overview 대시보드가 이미
+	// 쓰고 있는 PromQL 그대로 모니터링 EC2의 Prometheus(infra/monitoring-ec2.tf,
+	// 포트 9090)에 물어봅니다(2026-08-24, 사용자 제안 — 이 지표들을 orderapi가
+	// 다시 만들 필요 없이 그라파나가 이미 검증해 쓰고 있는 값을 그대로
+	// 재사용). RECORDER_URL과 같은 이유로 선택값 — 없으면 이 라우트를
+	// 등록하지 않고, orderapi의 핵심 기능(주문 접수/취소)과는 무관합니다.
+	prometheusURL := os.Getenv("PROMETHEUS_URL")
+
 	return Config{
 		Port:               port,
 		KafkaBroker:        broker,
@@ -104,5 +133,8 @@ func LoadConfig() Config {
 		RedisPassword:      redisPassword,
 		RedisTLSEnabled:    redisTLSEnabled,
 		JobTriggerQueueURL: jobTriggerQueueURL,
+		RecorderURL:        recorderURL,
+		PrometheusURL:      prometheusURL,
+		OrderRecordsBucket: orderRecordsBucket,
 	}
 }

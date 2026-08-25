@@ -34,8 +34,15 @@ spec:
           # 발견해서 여기도 같이 맞춘다.
           imagePullPolicy: Always
           env:
+            # 2026-08-24: MSK 재생성 때마다 바뀌는 값이라 리터럴 대신 terraform이
+            # 관리하는 ConfigMap(infra/k8s-addons.tf의 backend-cluster-config)을
+            # 참조한다 — EKS 전체 destroy→apply 리허설 중 하드코딩 탓에 재연결이
+            # 전부 실패했던 것을 보고 고침.
             - name: KAFKA_BROKER
-              value: "boot-naw3iax2.c1.kafka-serverless.ap-northeast-2.amazonaws.com:9098"
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-cluster-config
+                  key: KAFKA_BROKER
             - name: KAFKA_USE_IAM_AUTH
               value: "true"
             - name: REDIS_ADDR
@@ -107,4 +114,26 @@ spec:
     app: recorder
   ports:
     - port: 8082
+      targetPort: 8082
+---
+# orderapi-metrics와 같은 이유(위 주석 참고) — 그라파나가 up{service="recorder-metrics"}로
+# 물어서 스크레이프 전용 Service를 따로 둔다. 위 "recorder" Service(ALB 헬스체크 경로
+# 오버라이드가 걸려있음)는 그대로 둔다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: recorder-metrics
+  namespace: backend
+  labels:
+    app: recorder
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: recorder
+  ports:
+    - name: metrics
+      port: 8082
       targetPort: 8082

@@ -55,6 +55,13 @@ type ExecutionResult struct {
 	BuyFound       bool
 	SellFound      bool
 	ModeMismatched bool
+	// Inserted는 2026-08-24 추가 — 이 체결이 실제로 새로 저장됐는지(true) 아니면
+	// (buy_order_id, sell_order_id) 자연 키가 이미 있어서 INSERT IGNORE로
+	// 걸러진 재전달 중복이었는지(false)입니다. ApplyExecutionEvents가 이 값을
+	// 합산해 recorder_execution_total 카운터를 늘리므로, 배치가 재전달돼
+	// 재처리되더라도 카운터가 두 번 안 늘어납니다(InsertOrdersBatch의 inserted
+	// 반환값과 같은 이유).
+	Inserted bool
 }
 
 // Store는 TRADE_ORDER/EXECUTION에 대한 쓰기를 추상화합니다. InsertOrdersBatch/
@@ -67,15 +74,20 @@ type Store interface {
 	// InsertOrdersBatch는 신규 주문 여러 건을 한 번의 다중 행 INSERT로
 	// 저장합니다. 같은 order_id가 이미 있으면(재시작 후 컨슈머 그룹의
 	// at-least-once 재전달 등) 그 행만 조용히 무시합니다(INSERT IGNORE).
-	InsertOrdersBatch(ctx context.Context, orders []NewOrder) error
+	// 반환하는 inserted는 실제로 새로 들어간 행 수입니다(재전달로 스킵된
+	// 중복은 제외) — 2026-08-21, DB를 다시 안 읽고도 정확한 접수 TPS
+	// 카운터를 늘리기 위해 추가(recorder/metrics.go 참고).
+	InsertOrdersBatch(ctx context.Context, orders []NewOrder) (inserted int64, err error)
 	// CancelOrdersBatch는 취소 여러 건을 한 트랜잭션(한 번의 커밋) 안에서
 	// 처리합니다. 대상 주문이 없는 항목(NEW를 못 본 CANCEL)은 그 항목만
 	// 조용히 건너뜁니다 — 에러가 아닙니다.
 	CancelOrdersBatch(ctx context.Context, cancels []CancelInput) error
 	// ApplyExecutionsBatch는 체결 여러 건을 한 트랜잭션(한 번의 커밋) 안에서:
 	// 각 체결의 매수/매도 양쪽 주문 remaining_quantity/status를 갱신하고
-	// (존재하는 쪽만), execution 행들을 한 번의 다중 행 INSERT로 저장합니다.
-	// 반환되는 []ExecutionResult는 입력 execs와 같은 순서·같은 길이입니다.
+	// (존재하는 쪽만), execution 행들을 저장합니다. (buy_order_id,
+	// sell_order_id)가 이미 저장돼 있는 체결은(배치 재전달로 인한 중복,
+	// 2026-08-24 실측) 잔량 반영도 저장도 건너뜁니다 — ExecutionResult.Inserted
+	// 참고. 반환되는 []ExecutionResult는 입력 execs와 같은 순서·같은 길이입니다.
 	ApplyExecutionsBatch(ctx context.Context, execs []ExecutionInput) ([]ExecutionResult, error)
 	// AssignMarket은 FR-11 배정 이벤트를 기록합니다(released_at=NULL인 새 행 추가).
 	// assignments 토픽은 물량이 적어(리밸런스 시에만 발생) 배칭하지 않습니다.

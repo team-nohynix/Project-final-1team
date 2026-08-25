@@ -13,6 +13,54 @@
 -- 명시적으로 다루므로(orderapi의 nowISO() 등), MySQL TIMESTAMP의 세션 타임존 기반
 -- 자동 변환이나 2038년 한계가 오히려 불필요한 변수라 DATETIME이 더 안전하다.
 
+-- 2026-08-20: create_index_if_absent 헬퍼 — 일반 CREATE INDEX는 MySQL에 IF NOT
+-- EXISTS 문법이 없어서(PostgreSQL과 다름), 이미 적용된 DB에 이 파일을 재실행하면
+-- "이미 있음" 에러로 멈춘다. trade_order.mode+submitted_at 인덱스를 추가하면서
+-- (아래 참고) 재실행 테스트를 해보고서야 기존 인덱스들도 재실행에 안전하지
+-- 않았다는 걸 발견해서(docs/recorder-schema-bootstrap.md의 "재실행해도 안전함"
+-- 설명이 실제로는 안 맞았던 부분), 이 파일의 모든 CREATE INDEX를 이 헬퍼를 거치는
+-- 방식으로 통일했다. DELIMITER 전환이 필요한 이유: 이 프로시저 본문 안에 세미콜론이
+-- 여러 개 있는데, mysql CLI는 기본적으로 세미콜론마다 문장을 끊어 보내므로
+-- DELIMITER를 바꿔두지 않으면 CREATE PROCEDURE 자체가 중간에 잘려서 문법 에러가
+-- 난다(실제로 겪고 고침). 이 스크립트는 항상 mysql CLI로만 적용하므로(위 안내,
+-- Go 마이그레이션 도구를 거치지 않음) DELIMITER를 써도 안전하다.
+DROP PROCEDURE IF EXISTS create_index_if_absent;
+DELIMITER //
+CREATE PROCEDURE create_index_if_absent(IN tbl VARCHAR(64), IN idx VARCHAR(64), IN idx_def VARCHAR(512))
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE table_schema = DATABASE() AND table_name = tbl AND index_name = idx
+    ) THEN
+        SET @sql = CONCAT('CREATE INDEX ', idx, ' ON ', tbl, ' (', idx_def, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END //
+DELIMITER ;
+
+-- 2026-08-24: create_index_if_absent과 완전히 같은 재실행 안전성 목적이지만
+-- UNIQUE INDEX 전용입니다 — 별도 프로시저로 둔 이유는 기존 9개 CALL 자리를
+-- 전부 안 건드리고(인자 늘리면 다 고쳐야 함) 최소 변경으로 추가하기 위함.
+-- execution/matching_engine_assignment의 배치 재전달 중복 저장 사고(CLAUDE.md
+-- 참고) 대응으로 추가.
+DROP PROCEDURE IF EXISTS create_unique_index_if_absent;
+DELIMITER //
+CREATE PROCEDURE create_unique_index_if_absent(IN tbl VARCHAR(64), IN idx VARCHAR(64), IN idx_def VARCHAR(512))
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE table_schema = DATABASE() AND table_name = tbl AND index_name = idx
+    ) THEN
+        SET @sql = CONCAT('CREATE UNIQUE INDEX ', idx, ' ON ', tbl, ' (', idx_def, ')');
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END //
+DELIMITER ;
+
 CREATE TABLE IF NOT EXISTS market (
     market_code   VARCHAR(20) PRIMARY KEY,
     korean_name   VARCHAR(50) NOT NULL,
@@ -43,8 +91,52 @@ CREATE TABLE IF NOT EXISTS trade_order (
     source_order_id     VARCHAR(64) NULL,
     CONSTRAINT fk_trade_order_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
-CREATE INDEX idx_trade_order_market_status ON trade_order (market_code, status);
-CREATE INDEX idx_trade_order_source_order ON trade_order (source_order_id);
+CALL create_index_if_absent('trade_order', 'idx_trade_order_market_status', 'market_code, status');
+CALL create_index_if_absent('trade_order', 'idx_trade_order_source_order', 'source_order_id');
+-- 2026-08-20: query.OrderSummary/UnresolvedOrders(mode+submitted_at 구간 조회 —
+-- CLAUDE.md의 "Session-end unresolved-order cleanup" 참고)가 이 인덱스 없이
+-- trade_order 전체를 풀스캔하고 있었다. 세션 정리가 세션 종료마다 자동으로
+-- 도는 기능이 되면서(2026-08-20 RECORDER_URL 배선 완료) 이 풀스캔이 반복
+-- 트리거돼 RDS 인스턴스 CPU가 99%에 붙는 실제 장애로 이어졌다(CloudWatch
+-- CPUUtilization으로 확인). status도 같이 넣은 이유는 UnresolvedOrders의
+-- status IN (...) 조건까지 이 인덱스 하나로 커버하기 위함 — OrderSummary는
+-- status를 집계(SUM CASE)에만 쓰고 조건절엔 안 쓰지만, 인덱스에 있어도 손해가 없다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_mode_submitted', 'mode, submitted_at, status');
+-- 2026-08-20 (Jaden Yang): recorder_pending_orders 게이지가 주기적으로 돌리는
+-- `WHERE status IN (...)`가 market_code 없이 status만 걸러서
+-- idx_trade_order_market_status(선행 컬럼 market_code)를 못 쓰고 전체
+-- 인덱스(200만+ 행)를 훑고 있었다 — trade_order가 그날 부하 테스트로
+-- 200만 행까지 불어나면서 MySQL CPU 포화의 한 원인이 됨(EXPLAIN으로 확인,
+-- rows 1,973,617 -> 64,783로 감소). 라이브 DB에 먼저 적용(ALGORITHM=INPLACE
+-- LOCK=NONE, 46초, 무중단) 후 스키마에 반영. 원래 커밋(d69e4e0, dev 브랜치)이
+-- 같은 날 진행된 schema.sql 재작성 작업과 머지되며 충돌로 유실됐던 것을 복구.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_status', 'status');
+-- 2026-08-20: recorder/metrics.go의 pollDashboardMetrics(GET /v1/metrics/dashboard와
+-- 같은 쿼리, Grafana 게이지 갱신용으로 10초마다 영원히 실행됨)가 날리는
+-- `WHERE submitted_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`(TPS)와
+-- bucketCounts의 `WHERE submitted_at >= ... GROUP BY ...`(10분 시계열)가 둘 다
+-- submitted_at 단독으로 필터링한다. idx_trade_order_mode_submitted(선행 컬럼
+-- mode)도 idx_trade_order_status(status만)도 이 조건엔 못 쓰여서, 2백만행+
+-- 테이블을 10초마다 통째로 훑고 있었다 — DB CPU가 부하테스트 후 30분 넘게 안
+-- 내려가던 진짜 원인(WriteIOPS가 거의 0인데도 CPU만 계속 높았던 것으로 확인,
+-- recorder가 쓰기 백로그를 처리 중이던 게 아니었음). 이 인덱스가 붙으면 이
+-- 폴링 비용이 테이블 전체 크기가 아니라 실제 조회 윈도우(60초/10분) 안의
+-- 행 수에만 비례하게 되어, 테이블이 계속 커져도 폴링 자체는 계속 저렴하게
+-- 유지된다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_submitted_at', 'submitted_at');
+-- 2026-08-20: pollDashboardMetrics의 E2E p99 지연시간 쿼리가 원래
+-- `trade_order JOIN execution ON (buy_order_id=o.order_id OR sell_order_id=o.order_id)`
+-- 형태였다 — JOIN 조건이 execution의 두 컬럼에 OR로 걸쳐 있어 옵티마이저가
+-- idx_execution_buy_order/idx_execution_sell_order 어느 쪽도 못 타고 execution
+-- 전체(500만행+)를 매 폴링(10초)마다 훑었다(EXPLAIN으로 rows:5,063,699 확인).
+-- recorder/query/query.go의 DashboardMetrics를 "① status='FILLED' AND
+-- submitted_at 최근 창인 주문만 먼저 골라내기 → ② execution을 buy_order_id/
+-- sell_order_id 각각 따로 조회해서 합치기"로 재작성해 OR-JOIN 자체를 없앴다.
+-- 이 인덱스는 ①단계가 status만 걸러 전체 FILLED 이력(테이블이 커질수록 계속
+-- 늘어남)을 스캔하지 않고, 그 안에서도 최근 submitted_at 구간만 바로 짚도록
+-- 한다 — idx_trade_order_status(선행 컬럼 status뿐)만으로는 이 range 조건까지
+-- 커버가 안 된다.
+CALL create_index_if_absent('trade_order', 'idx_trade_order_status_submitted', 'status, submitted_at');
 
 CREATE TABLE IF NOT EXISTS execution (
     execution_id   VARCHAR(64) PRIMARY KEY,
@@ -69,9 +161,30 @@ CREATE TABLE IF NOT EXISTS execution (
     CONSTRAINT fk_execution_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
 -- FR-13 "최근 순으로 거래 내역을 조회" 페이지네이션용.
-CREATE INDEX idx_execution_market_executed_at ON execution (market_code, executed_at DESC);
-CREATE INDEX idx_execution_buy_order  ON execution (buy_order_id);
-CREATE INDEX idx_execution_sell_order ON execution (sell_order_id);
+CALL create_index_if_absent('execution', 'idx_execution_market_executed_at', 'market_code, executed_at DESC');
+CALL create_index_if_absent('execution', 'idx_execution_buy_order', 'buy_order_id');
+CALL create_index_if_absent('execution', 'idx_execution_sell_order', 'sell_order_id');
+-- 2026-08-20: idx_trade_order_submitted_at과 같은 이유 — pollDashboardMetrics의
+-- `WHERE executed_at >= ... SECOND`(체결 TPS)와 bucketCounts의 executed_at
+-- 단독 필터가 idx_execution_market_executed_at(선행 컬럼 market_code)을 못 쓰고
+-- execution 테이블을 통째로 훑고 있었다.
+CALL create_index_if_absent('execution', 'idx_execution_executed_at', 'executed_at');
+-- 2026-08-24: 실제 사고 대응 — recorder가 DB 커밋 후 그 배치의 Kafka 오프셋
+-- 커밋 전에 죽으면(재배포/스케일아웃 중 다수 파드가 동시에 MySQL/Kafka에
+-- 붙으려다 연결 실패 → main()이 즉시 log.Fatal → 크래시 루프, 실제로 발생)
+-- 재시작 후 그 배치가 통째로 재처리된다. execution은 매번 새 랜덤 ID로
+-- INSERT해서(trade_order의 order_id 같은 자연 키 보호가 없었음) 완전히
+-- 똑같은 체결이 새 ID로 중복 저장됐다(대시보드 "중복 체결" 지표로 실측
+-- 발견). 매수 하나-매도 하나 조합은 가격-시간 우선순위 매칭 특성상 논리적
+-- 으로 한 번만 매칭될 수 있으므로 이 조합을 자연 키로 써서 막는다 —
+-- recorder/store/mysql.go의 ApplyExecutionsBatch가 이 인덱스를 이용해
+-- INSERT IGNORE + 잔량 이중 차감 방지를 같이 처리한다.
+--
+-- **주의(운영 적용 시)**: 이 사고로 이미 쌓인 중복 execution 행이 있는 DB에
+-- 이 인덱스를 그대로 적용하면 "Duplicate entry" 에러로 실패한다 — 먼저
+-- 중복 행을 정리해야 한다(docs 또는 별도 정리 스크립트 참고, 이 커밋에는
+-- 포함하지 않음 — 운영 DB 데이터 삭제는 별도 검토·승인이 필요한 작업).
+CALL create_unique_index_if_absent('execution', 'uq_execution_order_pair', 'buy_order_id, sell_order_id');
 
 -- FR-11 마켓 재분배 이력. matching이 assignments 토픽에 배정/반납 이벤트를
 -- 발행하고(matching/kafkaclient/assignment_producer.go), 기록기가 그걸 구독해
@@ -87,7 +200,18 @@ CREATE TABLE IF NOT EXISTS matching_engine_assignment (
     released_at         DATETIME(3) NULL,
     CONSTRAINT fk_assignment_market FOREIGN KEY (market_code) REFERENCES market(market_code)
 );
-CREATE INDEX idx_assignment_market_open ON matching_engine_assignment (market_code, released_at);
+CALL create_index_if_absent('matching_engine_assignment', 'idx_assignment_market_open', 'market_code, released_at');
+-- 2026-08-24: execution과 같은 배치 재전달 문제의 저위험 버전 — AssignMarket이
+-- 재호출되면 감사 이력에 새 assignment_id로 중복 행이 하나 더 쌓인다(서비스
+-- 상태 자체는 released_at IS NULL 판정이 자기 회복해서 안 깨짐). 같은 엔진이
+-- 같은 마켓을 밀리초 단위로 완전히 같은 시각에 "새로" 배정받는 건 재전달이
+-- 아니고서야 있을 수 없는 조합이라 자연 키로 안전하다.
+CALL create_unique_index_if_absent('matching_engine_assignment', 'uq_assignment_market_engine_assigned', 'market_code, engine_instance_id, assigned_at');
+
+-- 인덱스 생성이 전부 끝났으니 헬퍼 프로시저는 정리합니다 — schema.sql은 테이블/
+-- 인덱스/시드 데이터의 모음이라는 의미를 유지하려는 것뿐, 남겨둬도 해는 없습니다.
+DROP PROCEDURE IF EXISTS create_index_if_absent;
+DROP PROCEDURE IF EXISTS create_unique_index_if_absent;
 
 -- 20개 마켓 마스터 데이터 시드 (backend/upbit.TargetMarkets, orderapi/validate.TargetMarkets와
 -- 같은 20개 목록 — 모듈 독립 원칙에 따라 이 파일에도 값을 그대로 적어둔다).

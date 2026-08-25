@@ -65,6 +65,29 @@ func (r *InMemoryRecorder) Snapshot(market string) []RecordedOrder {
 	return out
 }
 
+// Drain은 Snapshot과 같은 정렬된 복사본을 반환하면서, 반환한 만큼을 내부 버퍼에서
+// 즉시 비웁니다 — 2026-08-25 추가, 실행 내내 모든 접수 주문을 메모리에 계속 쌓아두다
+// OOMKill로 죽은 실전 사고 대응. main.go가 이걸 주기적으로 불러서 쌓인 만큼만
+// storage에 흘려보내고 버퍼를 비우면, 트레이더 프로세스가 실행 전체 기간 동안 붙들고
+// 있는 메모리가 "마지막 플러시 이후 쌓인 양"으로만 유지됩니다(실행 총량에 비례해
+// 무한정 커지지 않음). Record가 동시에 호출돼도 같은 락으로 보호되므로, 드레인 도중
+// 들어온 Record는 다음 드레인 몫으로 안전하게 남습니다.
+func (r *InMemoryRecorder) Drain(market string) []RecordedOrder {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	src := r.byMarket[market]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]RecordedOrder, len(src))
+	copy(out, src)
+	sort.Slice(out, func(i, j int) bool { return out[i].TS < out[j].TS })
+
+	r.byMarket[market] = nil
+	return out
+}
+
 // RecordingSubmitter는 다른 OrderSubmitter를 감싸서, 제출이 성공한 주문만 Recorder에
 // 기록합니다 — FR-17 검증 기준("기록 건수와 접수 건수 일치")에 맞춰 제출 실패한 주문은
 // 기록하지 않습니다. replay 패키지는 이 타입도 그냥 OrderSubmitter로만 다루므로 바뀔 게 없습니다.

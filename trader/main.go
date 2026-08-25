@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"trader/bot"
@@ -22,7 +26,13 @@ func main() {
 	}
 }
 
-func run() error {
+// run의 반환값 err는 named return입니다 — 아래 defer가 "run이 최종적으로
+// 에러를 반환했는지"를 보고 orderapi에 실행 결과(완료/실패)를 보고합니다
+// (2026-08-12, 프론트 "실행 결과" 화면 지원). resultMessage는 err가 nil이어도
+// (마켓 일부만 실패해도 전체 실행 자체는 실패로 안 치는 기존 정책, 아래
+// "실패한 마켓" 로그와 동일) 남길 만한 요약이 있으면 채웁니다.
+func run() (err error) {
+	var resultMessage string
 	date := flag.String("date", "", "재생할 날짜 (YYYY-MM-DD, 필수)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 저장할 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에 저장)")
@@ -51,24 +61,95 @@ func run() error {
 	// 종료해 defer(세션 반납)를 건너뛰므로, 세션 반납이 항상 실행되도록 에러를
 	// 반환하는 형태로 바꾸고 main()에서 마지막에 한 번만 log.Fatal한다.
 	sessionClient := session.Client{HTTPClient: httpClient, BaseURL: cfg.OrderAPIURL}
-	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "trader")
+	sessionID, ttlSeconds, err := sessionClient.Claim(context.Background(), "trader", *speed)
 	if err != nil {
 		return fmt.Errorf("세션 클레임 실패 — 트레이더/시뮬레이터는 동시에 하나만 실행할 수 있습니다: %w", err)
 	}
 	log.Printf("세션 클레임 완료 (sessionId=%s)", sessionID)
 
+	// 전체 재생의 수명 주기를 취소 가능하게 만듭니다 — 정상 종료(모든 마켓
+	// 재생 완료, 아래 wg.Wait() 직후) 시점과 사용자 정지 요청(2026-08-20,
+	// "중지" 버튼 지원) 시점 둘 다 이 cancel() 하나로 처리합니다. 하트비트
+	// 고루틴이 이 cancel을 호출할 수 있어야 하므로, 하트비트를 시작하기 전에
+	// 만들어둡니다.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stopped bool
+
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	var heartbeatWG sync.WaitGroup
 	heartbeatWG.Go(func() {
-		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds)
+		session.RunHeartbeat(heartbeatCtx, sessionClient, sessionID, ttlSeconds, func() {
+			stopped = true
+			cancel()
+		})
+	})
+
+	// SIGTERM 핸들러가 없으면 Kubernetes가 파드를 지울 때(Job 정리, Karpenter
+	// 노드 축출, kubectl delete 등) kubelet이 보내는 SIGTERM에 대해 Go 런타임
+	// 기본 동작(즉시 종료)이 그대로 발동해 아래 defer(세션 반납)가 전혀
+	// 실행되지 않는다 — orderapi:session:lastrun이 IN_PROGRESS로 영영 고아가
+	// 남는 문제를 2026-08-20에 실측으로 겪었다(트레이더 파드/Job이 흔적도 없이
+	// 사라졌는데 세션은 계속 IN_PROGRESS). SIGTERM/SIGINT를 받으면 "정지 기능"과
+	// 동일한 정상 종료 경로(cancel → 각 마켓 재생이 ctx.Canceled로 빠르게
+	// 리턴 → defer가 STOPPED로 세션 반납)를 타게 만든다 — Dockerfile의
+	// ENTRYPOINT가 exec-form이라 이 프로세스가 PID 1로 시그널을 직접 받는다.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	var sigWG sync.WaitGroup
+	sigWG.Go(func() {
+		select {
+		case sig := <-sigCh:
+			log.Printf("종료 시그널 수신(%v) — 세션을 정상 반납하며 종료합니다", sig)
+			stopped = true
+			cancel()
+		case <-ctx.Done():
+		}
 	})
 	defer func() {
+		// **실제 데드락 버그, 2026-08-23 발견·수정(replayengine/main.go와 완전히
+		// 같은 구조·같은 버그)**: defer는 LIFO라 이 defer가 위쪽의
+		// `defer cancel()`보다 먼저 실행된다. sigWG의 고루틴은 "SIGTERM 수신"
+		// 또는 "ctx.Done()" 둘 중 하나로만 빠져나오는데, 정상 완료 시(SIGTERM도
+		// 안 오고, 정지 요청도 없었던 경우) `cancel()`을 호출하는 건 이 함수
+		// 맨 위에 있는 `defer cancel()` 하나뿐이고, 그건 이 defer가 다
+		// 끝나야(LIFO) 실행된다 — 즉 아래 `sigWG.Wait()`가 `cancel()`이 불리기를
+		// 기다리는데, 그 `cancel()`은 `sigWG.Wait()`가 끝나기를 기다리는 순환
+		// 대기였다. 실제로 정상 종료된 파드가 세션을 반납 못 하고 `Running`으로
+		// 영원히 남아, orderapi 세션이 `IN_PROGRESS`에서 절대 안 풀리는 사고로
+		// 나타났다(프론트가 "새 실행을 시작 못 함"으로 관측). 여기서 명시적으로
+		// 한 번 더 호출해 고친다 — `cancel()`은 여러 번 불러도 안전(idempotent)
+		// 하므로 위의 `defer cancel()`은 안전망으로 그대로 둔다.
+		cancel()
+		signal.Stop(sigCh)
 		stopHeartbeat()
 		heartbeatWG.Wait()
-		if err := sessionClient.Release(context.Background(), sessionID); err != nil {
-			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, err)
+		sigWG.Wait()
+
+		// "COMPLETED"/"FAILED"/"STOPPED"는 orderapi/session.RunStatus*와 같은
+		// 문자열입니다 — 모듈 간 타입 비공유 원칙에 따라 문자열 그대로
+		// 다시 씁니다(orderapi가 실제로 검사하는 값은 releaseRequest.Status
+		// 필드뿐이라 상수 공유가 필요 없습니다). stopHeartbeat()+Wait()/
+		// sigWG.Wait()가 끝난 뒤에 읽으므로 stopped를 별도 동기화 없이 읽어도
+		// 안전합니다 — 하트비트/시그널 고루틴이 stopped를 쓰는 것도 각자의
+		// Wait() 이전에만 일어나고, WaitGroup이 그 이후의 happens-before를
+		// 보장합니다.
+		status := "COMPLETED"
+		message := resultMessage
+		if stopped {
+			status = "STOPPED"
+			message = "사용자 요청으로 정지됨"
+			if resultMessage != "" {
+				message = resultMessage + " (사용자 요청으로 정지됨)"
+			}
+		} else if err != nil {
+			status = "FAILED"
+			message = err.Error()
+		}
+		if relErr := sessionClient.Release(context.Background(), sessionID, status, message); relErr != nil {
+			log.Printf("세션 반납 실패 (sessionId=%s): %v", sessionID, relErr)
 		} else {
-			log.Printf("세션 반납 완료 (sessionId=%s)", sessionID)
+			log.Printf("세션 반납 완료 (sessionId=%s, status=%s)", sessionID, status)
 		}
 	}()
 
@@ -117,9 +198,9 @@ func run() error {
 		return fmt.Errorf("Bedrock 클라이언트 생성 실패: %w", err)
 	}
 
-	// 전체 마켓 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
-	ctx, cancel := context.WithCancel(context.Background())
-
+	// ctx/cancel은 위에서 이미 만들어뒀습니다(하트비트가 정지 요청 시 이
+	// cancel을 부를 수 있어야 해서 세션 클레임 직후로 옮김) — 전체 마켓
+	// 재생이 다 끝나면(아래 wg.Wait()) 전체 조망형 봇도 같이 멈춥니다.
 	var globalWG sync.WaitGroup
 	globalWG.Go(func() {
 		replay.RunGlobalBots(ctx, states, submitter, bedrockClient)
@@ -129,11 +210,60 @@ func run() error {
 	var mu sync.Mutex
 	var failed []string
 
+	// 실행 내내 접수된 주문을 recorder(InMemoryRecorder)가 전부 메모리에 붙들고
+	// 있다가 끝에 한 번에 저장하던 것이 실전에서 OOMKill을 냈습니다(2026-08-25).
+	// 이 고루틴이 주기적으로 각 마켓의 버퍼를 Drain(스냅샷 + 비우기)해서 그때그때
+	// storage에 흘려보내므로, 프로세스가 붙들고 있는 양은 "마지막 플러시 이후 쌓인
+	// 만큼"으로만 유지됩니다. orderstore.Storage.Save가 덮어쓰기가 아니라 병합이라
+	// 파일/오브젝트는 여전히 마켓당 하나 그대로입니다(replayengine 읽기 쪽 변경 불필요).
+	// ctx가 아니라 별도 stopFlush로 멈추는 이유: ctx는 wg.Wait() 직후 취소되는데,
+	// 그 시점에 남아있는 마지막 몫을 이 고루틴이 아니라 아래 finalFlush가 한 번 더
+	// 확실히 처리하게 하려면, 이 고루틴이 완전히 멈춘 뒤에 finalFlush를 불러야
+	// 합니다(같은 마켓에 대해 두 곳이 동시에 Drain하는 걸 피하기 위함).
+	//
+	// 간격을 너무 짧게 잡으면 안 되는 이유: orderstore.Storage.Save는 매번 기존
+	// 파일 전체를 읽어와 합치고 다시 쓰는 방식이라(위 Storage 주석 참고), 플러시
+	// 횟수가 늘어날수록 그때마다 다시 쓰는 파일 크기도 커져 총 I/O량이 플러시
+	// 횟수에 거의 비례해 불어납니다. 3분은 "메모리 상한을 실행 총량이 아니라
+	// 최대 몇 분치로 확실히 묶으면서" I/O 비용은 크게 늘리지 않는 절충값입니다.
+	flushInterval := 3 * time.Minute
+	stopFlush := make(chan struct{})
+	flushDone := make(chan struct{})
+	flushOnce := func() {
+		for _, entry := range manifest.Markets {
+			orders := recorder.Drain(entry.Market)
+			if len(orders) == 0 {
+				continue
+			}
+			path, err := orderStorage.Save(entry.Market, start, end, orders)
+			if err != nil {
+				log.Printf("[%s] 주문 기록 저장 실패: %v", entry.Market, err)
+				continue
+			}
+			log.Printf("[%s] 주문 기록 저장 완료 (%d건) -> %s", entry.Market, len(orders), path)
+		}
+	}
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(flushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				flushOnce()
+			case <-stopFlush:
+				return
+			}
+		}
+	}()
+
 	// 마켓당 고루틴 1개, 전부 NewHTTPClient가 만든 단일 클라이언트를 공유합니다.
 	// 한 마켓의 실패가 다른 마켓 재생을 막지 않도록 에러는 로그로만 남기고 계속 진행합니다.
+	// ctx가 취소된 채로(context.Canceled) 끝난 것은 정지 요청에 의한 정상적인
+	// 조기 종료이지 실패가 아니므로 failed에 넣지 않습니다.
 	for _, entry := range manifest.Markets {
 		wg.Go(func() {
-			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market]); err != nil {
+			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market]); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[%s] 재생 실패: %v", entry.Market, err)
 				mu.Lock()
 				failed = append(failed, entry.Market)
@@ -146,24 +276,17 @@ func run() error {
 	cancel()
 	globalWG.Wait()
 
-	// 마켓 재생 + 전체 조망형 봇이 전부 끝난 뒤 한 번에 기록을 저장합니다 — 전체 조망형
-	// 봇은 마켓 재생 순서와 무관하게 끝까지 돌기 때문에, 마켓 하나가 끝나자마자 저장하면
-	// 그 이후 전체 조망형 봇이 그 마켓에 낸 주문을 놓칠 수 있습니다.
-	for _, entry := range manifest.Markets {
-		orders := recorder.Snapshot(entry.Market)
-		if len(orders) == 0 {
-			continue
-		}
-		path, err := orderStorage.Save(entry.Market, start, end, orders)
-		if err != nil {
-			log.Printf("[%s] 주문 기록 저장 실패: %v", entry.Market, err)
-			continue
-		}
-		log.Printf("[%s] 주문 기록 저장 완료 (%d건) -> %s", entry.Market, len(orders), path)
-	}
+	// 주기적 플러시 고루틴을 완전히 멈춘 뒤(같은 마켓을 동시에 Drain하는 경합을
+	// 피하기 위해) 마지막으로 남은 만큼을 한 번 더 저장합니다 — 전체 조망형 봇은
+	// 마켓 재생 순서와 무관하게 끝까지 돌기 때문에, 이 마지막 플러시가 없으면 봇이
+	// 마지막 주기 이후 낸 주문을 놓칠 수 있습니다.
+	close(stopFlush)
+	<-flushDone
+	flushOnce()
 
 	if len(failed) > 0 {
-		log.Printf("전체 재생 완료 — 실패한 마켓(%d개): %v", len(failed), failed)
+		resultMessage = fmt.Sprintf("실패한 마켓 %d개: %v", len(failed), failed)
+		log.Printf("전체 재생 완료 — %s", resultMessage)
 		return nil
 	}
 	log.Printf("전체 재생 완료 — %d개 마켓 전부 성공", len(manifest.Markets))

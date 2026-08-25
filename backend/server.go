@@ -25,16 +25,21 @@ func parseDate(s string) (time.Time, error) {
 	return time.ParseInLocation("2006-01-02", s, upbit.KST)
 }
 
-// collectResponse는 POST /v1/collect의 정상 응답 본문입니다.
-type collectResponse struct {
-	Date    string          `json:"date"`
-	Range   dataset.Range   `json:"range"`
-	Results []CollectResult `json:"results"`
-}
-
-// collectHandler는 요청받은 날짜(UTC 00:00~다음날 00:00) 구간의 데이터를
-// upbit.TargetMarkets 전체에 대해 수집해 storage에 저장합니다.
-func collectHandler(storage dataset.Storage) http.HandlerFunc {
+// collectHandler는 POST /v1/collect를 처리합니다. 20개 마켓 전체를 실제로
+// 수집하면(하루치, 업비트 rate limit 때문에) 몇 분씩 걸릴 수 있어서(실측
+// 193초) 요청을 그 자리에서 기다리지 않습니다 — 202로 collectJob(진행 상태)을
+// 즉시 돌려주고, 실제 수집은 백그라운드 고루틴에서 진행합니다. 완료 여부는
+// GET /v1/collect/{jobId}로 조회합니다(2026-08-12, CloudFront의 오리진 응답
+// 대기 한계 180초를 넘겨 504가 나던 문제 — 이 한계는 CloudFront 쪽에서 늘릴
+// 수 없어 응답 패턴 자체를 바꿔야 했습니다. 프론트는 아직 이 변경에 맞춰
+// 수정되지 않았습니다 — docs/frontend-backend-integration.md 참고).
+//
+// collect는 실제로 20개 마켓을 수집하는 함수입니다(운영 중엔 collectAllMarkets,
+// main.go가 그대로 넘겨줌) — 실제 업비트 API를 부르는 함수를 주입 가능하게
+// 만들어서, 테스트에서는 네트워크 없이 즉시 끝나는 가짜 함수를 넣을 수
+// 있습니다(collectAllMarkets/collectMarket 자체는 여전히 주입 불가능한
+// 상태지만, 이 핸들러가 그걸 직접 부르지 않게 한 단계 분리했습니다).
+func collectHandler(storage dataset.Storage, jobs *collectJobStore, collect func(dataset.Storage, time.Time, time.Time, func()) []CollectResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req collectRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -49,16 +54,34 @@ func collectHandler(storage dataset.Storage) http.HandlerFunc {
 		}
 		end := start.Add(24 * time.Hour)
 
-		results := collectAllMarkets(storage, start, end)
+		job := jobs.create(req.Date, dataset.Range{
+			Start: start.Format(time.RFC3339),
+			End:   end.Format(time.RFC3339),
+		}, len(upbit.TargetMarkets))
 
-		writeJSON(w, http.StatusOK, collectResponse{
-			Date: req.Date,
-			Range: dataset.Range{
-				Start: start.Format(time.RFC3339),
-				End:   end.Format(time.RFC3339),
-			},
-			Results: results,
-		})
+		go func() {
+			results := collect(storage, start, end, func() { jobs.progress(job.JobID) })
+			jobs.complete(job.JobID, results)
+			log.Printf("수집 완료 (jobId=%s, date=%s)", job.JobID, req.Date)
+		}()
+
+		log.Printf("수집 요청 접수 (jobId=%s, date=%s)", job.JobID, req.Date)
+		writeJSON(w, http.StatusAccepted, job)
+	}
+}
+
+// collectStatusHandler는 GET /v1/collect/{jobId}를 처리합니다 — collectHandler가
+// 접수 즉시 돌려준 job의 지금 상태를 조회합니다. COMPLETED가 되면 완료 전의
+// POST /v1/collect가 동기 응답으로 주던 것과 같은 results가 같이 옵니다.
+func collectStatusHandler(jobs *collectJobStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		jobID := r.PathValue("jobId")
+		job, ok := jobs.get(jobID)
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "해당 수집 작업을 찾을 수 없습니다")
+			return
+		}
+		writeJSON(w, http.StatusOK, job)
 	}
 }
 
