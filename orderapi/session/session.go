@@ -122,6 +122,21 @@ const (
 	// prevRunKey와 완전히 같은 방식으로 밀려납니다 — 다만 한 칸 더 뒤에서.
 	prevRun2Key = "orderapi:session:prevrun2"
 
+	// runHistoryKey는 리플레이 실행만 최근 것부터 최대 runHistoryMaxLen건 쌓아두는
+	// Redis List입니다(2026-08-25, 프론트 "테스트 결과·추적" 화면의 "시뮬레이션
+	// ID로 과거 실행 찾기" 지원). lastRun/prevRun/prevRun2는 owner와 무관하게
+	// "최근 것부터 정확히 3개"만 보여주는 고정 체인이라 이 용도엔 안 맞습니다 —
+	// 여긴 리플레이만 골라 담고, 개수도 별도(5)로 관리해야 합니다. 페이퍼
+	// 트레이딩(trader)은 여기 안 쌓입니다 — 이 화면 자체가 리플레이 결과 분석
+	// 전용이라는 팀 결정 때문입니다(재현 가능한 리플레이와 달리 트레이더는 실행마다
+	// 판단이 달라져 과거 실행을 다시 찾아볼 실익이 적음). MySQL에 별도 테이블을
+	// 만들지 않고 Redis List로 두는 이유는 REPLAY_SESSION 테이블을 만들지 않기로 한
+	// 기존 팀 결정(2026-08-07)과 같습니다 — 이 프로젝트 규모에서 "최근 N개"면
+	// 사실상 전체 이력을 커버하고, Redis가 재시작되면 이력이 날아갈 수 있다는
+	// 리스크도 lastRunKey가 이미 감수하고 있는 것과 같은 수준입니다.
+	runHistoryKey    = "orderapi:session:runhistory"
+	runHistoryMaxLen = 5
+
 	// stopKeyPrefix+runID는 "이 그룹은 정지 요청됨" 플래그입니다(2026-08-20,
 	// 프론트 "중지" 버튼 지원). 활성 그룹의 exclusivity를 보장하는
 	// activeKey/membersKey와 달리 원자적 스크립트로 묶여있지 않습니다 —
@@ -272,6 +287,11 @@ type Store interface {
 	// PreviousRun2는 PreviousRun보다 한 번 더 이전 실행의 기록을 반환합니다
 	// ("최근 3개 실행" 지원). 실행이 3번 미만이었으면 found=false(에러 아님).
 	PreviousRun2(ctx context.Context) (RunRecord, bool, error)
+	// RunHistory는 리플레이 실행 중 최근 것부터 최대 runHistoryMaxLen(5)건을
+	// 반환합니다("시뮬레이션 ID로 과거 실행 찾기" 지원, runHistoryKey 주석 참고).
+	// 트레이더(페이퍼 트레이딩)는 포함되지 않습니다. 한 번도 리플레이가 실행된
+	// 적이 없으면 빈 슬라이스입니다(에러 아님).
+	RunHistory(ctx context.Context) ([]RunRecord, error)
 	// AppendLastRunNote는 runID가 지금 LastRun 슬롯을 차지하고 있는 경우에만
 	// 그 RunRecord.Message에 note를 덧붙입니다(2026-08-20, 세션 종료 자동
 	// 정리가 매칭 엔진 랙으로 건너뛰었을 때 그 사실을 "실행 결과" 화면에도
@@ -507,6 +527,10 @@ func (s *RedisStore) finalizeLastRun(ctx context.Context, runID string, outcome 
 	}
 	if body, err := json.Marshal(record); err == nil {
 		s.client.Set(ctx, lastRunKey, body, 0)
+		if record.Owner == "replayengine" {
+			s.client.LPush(ctx, runHistoryKey, body)
+			s.client.LTrim(ctx, runHistoryKey, 0, runHistoryMaxLen-1)
+		}
 	}
 	return record
 }
@@ -655,6 +679,25 @@ func (s *RedisStore) PreviousRun2(ctx context.Context) (RunRecord, bool, error) 
 		return RunRecord{}, false, fmt.Errorf("전전 실행 기록 파싱 실패: %w", err)
 	}
 	return record, true, nil
+}
+
+// RunHistory는 runHistoryKey(리플레이 전용, 최근 것부터 최대 5건)를 그대로
+// JSON 배열로 반환합니다. 손상된 항목(있을 리 없지만) 하나 때문에 전체 조회를
+// 실패시키지 않고 그 항목만 건너뜁니다.
+func (s *RedisStore) RunHistory(ctx context.Context) ([]RunRecord, error) {
+	items, err := s.client.LRange(ctx, runHistoryKey, 0, runHistoryMaxLen-1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("실행 이력 조회 실패: %w", err)
+	}
+	records := make([]RunRecord, 0, len(items))
+	for _, item := range items {
+		var record RunRecord
+		if err := json.Unmarshal([]byte(item), &record); err != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 // currentInfo는 충돌 에러 메시지를 사람이 읽기 좋게 만들기 위한 최선의 노력(best

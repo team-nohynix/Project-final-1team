@@ -294,6 +294,34 @@ func previousRunHandler(store session.Store) http.HandlerFunc {
 	}
 }
 
+// runHistoryHandler는 GET /v1/sessions/runs를 처리합니다 — 리플레이 실행만
+// 최근 것부터 최대 5건, lastRunResponse와 같은 모양의 배열로 돌려줍니다
+// (2026-08-25, "테스트 결과·추적" 화면의 "시뮬레이션 ID로 과거 실행 찾기"
+// 지원). 상세 결과(접수/체결/미체결)는 여기서 새로 안 만듭니다 — 프론트가 이
+// 목록에서 원하는 항목의 startedAt/endedAt을 가져다 기존
+// GET /v1/orders/summary?mode=...&from=...&to=...(recorder)를 그대로
+// 호출하면 됩니다. 한 번도 리플레이가 실행된 적이 없어도 빈 배열(에러 아님)을
+// 돌려줍니다 — last-run과 달리 "이력이 없다"는 404로 취급할 이유가 없습니다
+// (목록 화면은 빈 목록을 그냥 보여주면 되는 것이지, 에러 상태가 아닙니다).
+func runHistoryHandler(store session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		records, err := store.RunHistory(r.Context())
+		if err != nil {
+			log.Printf("실행 이력 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "실행 이력 조회에 실패했습니다.")
+			return
+		}
+		resp := make([]lastRunResponse, len(records))
+		for i, record := range records {
+			resp[i] = toLastRunResponse(record)
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
 // previousRun2Handler는 GET /v1/sessions/previous-run-2를 처리합니다 —
 // previousRunHandler보다 한 번 더 이전 실행(2026-08-25, 프론트 "실행 상태"
 // 카드에 최근 3개를 한 줄로 보여달라는 요청 지원). 실행이 3번 미만이었으면
