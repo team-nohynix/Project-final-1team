@@ -145,6 +145,7 @@ jobs:
     # 먼저 실행되면서 RBAC 없이 막혔다).
     needs: [detect-changes, bootstrap-k8s]
     if: |
+      always() &&
       needs.detect-changes.outputs.backend == 'true' &&
       (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
@@ -184,6 +185,7 @@ jobs:
     # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
     needs: [detect-changes, bootstrap-k8s]
     if: |
+      always() &&
       needs.detect-changes.outputs.orderapi == 'true' &&
       (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
@@ -223,6 +225,7 @@ jobs:
     # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
     needs: [detect-changes, bootstrap-k8s]
     if: |
+      always() &&
       needs.detect-changes.outputs.matching == 'true' &&
       (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
@@ -262,6 +265,7 @@ jobs:
     # build-push-backend와 같은 이유(위 주석 참고) — bootstrap-k8s를 기다린다.
     needs: [detect-changes, bootstrap-k8s]
     if: |
+      always() &&
       needs.detect-changes.outputs.recorder == 'true' &&
       (github.event_name != 'workflow_dispatch' || needs.bootstrap-k8s.result == 'success')
     runs-on: ubuntu-latest
