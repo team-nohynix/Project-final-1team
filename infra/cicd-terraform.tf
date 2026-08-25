@@ -209,6 +209,46 @@ resource "aws_eks_access_entry" "github_actions_terraform_apply" {
   kubernetes_groups = ["team1-tf-apply"]
 }
 
+# tf_apply의 cluster-admin은 원래 kubernetes_cluster_role_binding(K8s RBAC API 호출)로만
+# 줬었는데, 이건 access_config.bootstrap_cluster_creator_admin_permissions("클러스터를
+# 만든 바로 그 principal에게 자동으로 admin을 준다")에 실질적으로 기대는 구조라 두 가지로
+# 깨진다: (1) 이 자동 admin은 EKS 클러스터가 ACTIVE된 시점부터 K8s API 서버 인증
+# 레이어에 실제로 반영되기까지 지연이 있을 수 있고(2026-08-25, destroy→apply 리허설
+# 중 실측 — Karpenter/Lambda/모니터링 EC2가 겪은 것과 같은 종류의 AWS eventual-
+# consistency), (2) 더 근본적으로 "누가 CreateCluster를 호출했는가"에 전적으로
+# 의존한다 — CI가 아니라 사람이 로컬에서 terraform apply -target=...으로 (의도치
+# 않게 EKS가 딸려 들어와서) 클러스터를 먼저 만들어버리면, 그 admin 권한은
+# TF_APPLY_ROLE이 아니라 그 사람의 IAM 정체성으로 가버려서 이후 CI가 영원히
+# 403을 받는다(2026-08-25 실측 — CloudTrail로 원인 확인).
+# aws_eks_access_policy_association은 K8s API가 아니라 EKS 컨트롤 플레인 API
+# 호출이라 이 두 문제 다 없다 — "누가 클러스터를 만들었나"와 무관하게, TF_APPLY_ROLE이
+# access entry를 만들 수 있는 IAM 권한만 있으면 즉시 유효해진다.
+resource "aws_eks_access_policy_association" "github_actions_terraform_apply_admin" {
+  cluster_name  = aws_eks_cluster.team1.name
+  principal_arn = aws_iam_role.github_actions_terraform_apply.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
+
+# tf_plan은 Secret까지 읽어야 해서(helm_release가 릴리스 메타데이터를 Secret으로
+# 저장) 아래 kubernetes_cluster_role.tf_plan_readonly(커스텀, Secret 포함 read-only)가
+# 여전히 주력이지만, 그 커스텀 RBAC 자체도 K8s API 호출로 만들어지는 리소스라 위와
+# 같은 이유로 부트스트랩 시점에 지연/실패할 수 있다 — AWS 관리형 View 정책(Secret
+# 값은 제외, 존재 여부/메타데이터만)을 기본 baseline으로 같이 붙여 최소한의 plan은
+# 항상 되게 한다.
+resource "aws_eks_access_policy_association" "github_actions_terraform_plan_view" {
+  cluster_name  = aws_eks_cluster.team1.name
+  principal_arn = aws_iam_role.github_actions_terraform_plan.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+}
+
 # RBAC 자체도 여기(terraform, kubernetes provider)에 둔다 — 처음엔 infra/k8s/의
 # 다른 RBAC들처럼 YAML+kubectl apply로 뒀었는데, 그러면 순환 문제가 생긴다:
 # terraform apply 자체가(같은 apply 안의 helm_release/kubernetes_secret/
@@ -248,25 +288,6 @@ resource "kubernetes_cluster_role_binding" "tf_plan_readonly" {
   }
 }
 
-# cluster-admin은 모든 K8s 클러스터에 기본 내장된 ClusterRole이라 따로 정의할
-# 필요가 없다 — 바인딩만 있으면 된다.
-resource "kubernetes_cluster_role_binding" "tf_apply_admin" {
-  depends_on = [time_sleep.wait_for_eks_auth]
-
-  metadata {
-    name = "team1-tf-apply-admin"
-  }
-  role_ref {
-    api_group = "rbac.authorization.k8s.io"
-    kind      = "ClusterRole"
-    name      = "cluster-admin"
-  }
-  subject {
-    kind      = "Group"
-    name      = "team1-tf-apply"
-    api_group = "rbac.authorization.k8s.io"
-  }
-}
 
 output "github_actions_terraform_plan_role_arn" {
   value = aws_iam_role.github_actions_terraform_plan.arn
