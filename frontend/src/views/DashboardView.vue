@@ -117,13 +117,13 @@ const metricCards = computed(() => {
     {
       label: `전체 처리 p99 (${e2eWin})`,
       value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
-      description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '목표 500ms 이하',
+      description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '',
       color: '#20c8e8',
     },
     {
       label: '실행 중인 Pod (현재)',
       value: m ? displayValue(m.runningEnginePods) : '--',
-      description: '매칭 엔진',
+      description: '',
       color: '#9b7bff',
     },
   ]
