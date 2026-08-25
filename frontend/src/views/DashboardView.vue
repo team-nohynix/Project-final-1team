@@ -966,19 +966,24 @@ function drawFlowFrame() {
     }
   }
 
+  // 이 박스는 캔버스 높이(h)와 무관하게 항상 고정 픽셀 크기였다 — 흐름도
+  // 여백을 줄이려고 캔버스를 320→260px로 낮췄더니(2026-08-25) 트렁크 줄이
+  // 비례해서 위로 따라 올라오면서 이 박스 마지막 줄("Redis 캐시")과
+  // 겹치는 걸 실측했다. 캔버스 높이에 맞춰 다시 늘리는 대신, 이 박스 자체를
+  // 더 촘촘하게(74px→60px) 줄여서 어떤 캔버스 높이에서도 여유를 두게 한다.
   ctx.fillStyle = 'rgba(10,20,32,0.6)'
-  ctx.fillRect(6, 6, 210, 74)
+  ctx.fillRect(6, 6, 210, 60)
   ctx.fillStyle = '#cfe6ff'
-  ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 24)
+  ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 20)
   ctx.fillStyle = '#8ff5cf'
-  ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 42)
+  ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 35)
   ctx.fillStyle = '#9fb0c2'
-  ctx.font = '500 10px -apple-system, BlinkMacSystemFont, sans-serif'
-  ctx.fillText(`레플리카: 매칭 ${Math.round(scale.matching)} · 기록기 ${Math.round(scale.recorder)}`, 14, 58)
+  ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.fillText(`레플리카: 매칭 ${Math.round(scale.matching)} · 기록기 ${Math.round(scale.recorder)}`, 14, 48)
   ctx.fillStyle = flowUp('Redis 캐시') ? '#2ed39a' : '#ff5c7a'
-  ctx.fillText(`● Redis 캐시 (오더북 스냅샷)`, 14, 72)
+  ctx.fillText(`● Redis 캐시 (오더북 스냅샷)`, 14, 59)
 
   ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillStyle = '#9fb0c2'
