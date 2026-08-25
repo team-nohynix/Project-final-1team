@@ -36,6 +36,22 @@ resource "aws_security_group_rule" "team1_backend_from_fargate_real_sg" {
   description              = "Fargate pods (real EKS auto-created cluster SG) to backend node group (CoreDNS etc.)"
 }
 
+# 네 번째, 같은 함정의 반대 방향: orderapi(team1_sg_eks_backend)가 시세 수집기를
+# 대시보드 헬스체크용으로 http://backend.collector:8080/... 직접 호출하도록
+# 2026-08-25에 추가했는데(orderapi/systemstatus.go), 이 SG 갭 때문에 SYN이 그냥
+# 버려져 3초 타임아웃마다 "down"으로 표시되는 걸 실측으로 확인(ENI 조회 —
+# 콜렉터 파드 인바운드가 team1_sg_alb_public 하나뿐이었음). ALB→Fargate 규칙만
+# 있고 backend 노드그룹→Fargate 규칙이 없었던 것.
+resource "aws_security_group_rule" "team1_fargate_from_backend_real_sg" {
+  type                     = "ingress"
+  security_group_id        = aws_eks_cluster.team1.vpc_config[0].cluster_security_group_id
+  source_security_group_id = data.terraform_remote_state.network.outputs.security_group_ids.eks_backend
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  description              = "Backend node group (orderapi dashboard health-check) to market-data collector Fargate pod"
+}
+
 data "aws_iam_policy_document" "fargate_pod_execution_assume" {
   statement {
     actions = ["sts:AssumeRole"]
