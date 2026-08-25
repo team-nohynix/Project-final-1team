@@ -894,7 +894,12 @@ function drawFlowFrame() {
     const bx = bl.x * w
     const by = cy + (flowLaneCenterFrac(bl.x, bl.lane) - 0.5) * 2 * laneSpan
     const half = flowBandHalfFrac(bl.x, bl.lane, scale) * h
-    const ty = bl.lane === 'upper' ? by - half - 12 : by + half + 18
+    // 트렁크 분리 폭을 늘린 뒤(2026-08-25) 레플리카 수가 많아 통로가 두꺼울
+    // 때 이 라벨이 캔버스 위/아래 바깥으로 밀려 잘리는 문제가 실제로
+    // 재현됐다 — 캔버스 높이를 늘린 것과 별개로, 라벨 자체도 안전 여백
+    // 안쪽으로 clamp해서 어떤 조합에서도 안 잘리게 한다.
+    const rawTy = bl.lane === 'upper' ? by - half - 12 : by + half + 18
+    const ty = bl.lane === 'upper' ? Math.max(rawTy, 14) : Math.min(rawTy, h - 6)
     ctx.fillText(bl.text, bx, ty)
   }
 
@@ -1264,7 +1269,9 @@ onBeforeUnmount(() => {
 .flow-canvas-wrap {
   position: relative;
   width: 100%;
-  height: 280px;
+  /* 280px였을 때 트렁크 분리 폭을 늘린 뒤(2026-08-25) 라벨이 캔버스
+     위쪽 바깥으로 밀려 잘리는 걸 실측 — 절대 여백을 늘려서 여유를 둔다. */
+  height: 320px;
   margin-top: 10px;
   border-radius: 8px;
   overflow: hidden;
