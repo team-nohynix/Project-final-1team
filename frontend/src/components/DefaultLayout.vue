@@ -9,8 +9,7 @@ const openMenu = ref('')
 
 const updateOpenMenu = () => {
   const p = route.path || ''
-  if (p === '/' || p === '') openMenu.value = 'overview'
-  else if (p.startsWith('/load-test')) openMenu.value = 'loadtest'
+  if (p.startsWith('/load-test')) openMenu.value = 'loadtest'
   else if (
     p.startsWith('/matching-engine') ||
     p.startsWith('/market-orderbook')
@@ -45,17 +44,15 @@ const isActive = (path) => route.path === path
       </div>
 
       <nav class="navigation">
-        <button class="menu-button" type="button" @click="toggleMenu('overview')">
-          <span>종합 현황</span>
-          <span class="arrow" :class="{ open: openMenu === 'overview' }">›</span>
+        <button
+          class="submenu-item"
+          :class="{ selected: isActive('/') }"
+          type="button"
+          @click.prevent="go('/')"
+        >
+          <span class="menu-dot"></span>
+          시스템 종합 현황
         </button>
-
-        <div v-if="openMenu === 'overview'" class="submenu">
-          <button class="submenu-item selected" type="button" @click="go('/')">
-            <span class="menu-dot"></span>
-            시스템 종합 현황
-          </button>
-        </div>
 
         <button class="menu-button" type="button" @click="toggleMenu('trading')">
           <span>거래 처리</span>
@@ -118,7 +115,7 @@ const isActive = (path) => route.path === path
           @click.prevent="go('/test-results')"
         >
           <span class="menu-dot"></span>
-          결과 추적
+          결과 분석
         </button>
 
         <button
@@ -245,6 +242,9 @@ button {
 
 .submenu {
   padding: 0 0 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .submenu-item {
@@ -258,6 +258,7 @@ button {
   border: 1px solid transparent;
   border-radius: 9px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 /* Selected submenu: darker blue background with blue border and bright text/dot */
