@@ -111,6 +111,7 @@ func main() {
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(sessionStore))
 	mux.HandleFunc("GET /v1/sessions/previous-run-2", previousRun2Handler(sessionStore))
+	mux.HandleFunc("GET /v1/sessions/runs", runHistoryHandler(sessionStore))
 	mux.HandleFunc("GET /v1/dropped-orders", droppedOrdersHandler())
 
 	// RECORDER_URL이 없으면(로컬 개발 등) 이 라우트들도 등록하지 않습니다 —

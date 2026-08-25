@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,8 @@ type fakeSessionStore struct {
 	prevRun2Rec       session.RunRecord
 	prevRun2Found     bool
 	prevRun2Err       error
+	runHistoryRecs    []session.RunRecord
+	runHistoryErr     error
 	requestStopErr    error
 	appendNoteErr     error
 
@@ -89,6 +92,10 @@ func (f *fakeSessionStore) PreviousRun2(ctx context.Context) (session.RunRecord,
 	return f.prevRun2Rec, f.prevRun2Found, f.prevRun2Err
 }
 
+func (f *fakeSessionStore) RunHistory(ctx context.Context) ([]session.RunRecord, error) {
+	return f.runHistoryRecs, f.runHistoryErr
+}
+
 func (f *fakeSessionStore) AppendLastRunNote(ctx context.Context, runID, note string) error {
 	f.lastNoteRunID = runID
 	f.lastNote = note
@@ -106,6 +113,7 @@ func newSessionMux(store session.Store) *http.ServeMux {
 	mux.HandleFunc("DELETE /v1/sessions/{sessionId}", releaseSessionHandler(store, &fakePublisher{}, &http.Client{}, "", &fakeChecker{}))
 	mux.HandleFunc("GET /v1/sessions/last-run", lastRunHandler(store))
 	mux.HandleFunc("GET /v1/sessions/previous-run", previousRunHandler(store))
+	mux.HandleFunc("GET /v1/sessions/runs", runHistoryHandler(store))
 	return mux
 }
 
@@ -375,6 +383,67 @@ func TestLastRunHandlerNeverRun(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestRunHistoryHandlerReturnsRecords(t *testing.T) {
+	started := time.Date(2026, 8, 25, 21, 40, 13, 0, time.UTC)
+	ended := started.Add(5*time.Minute + 41*time.Second)
+	store := &fakeSessionStore{runHistoryRecs: []session.RunRecord{
+		{RunID: "run_2", Owner: "replayengine", Status: session.RunStatusCompleted, StartedAt: started, EndedAt: ended},
+		{RunID: "run_1", Owner: "replayengine", Status: session.RunStatusFailed, StartedAt: started.Add(-time.Hour), EndedAt: started.Add(-time.Hour + time.Minute)},
+	}}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/runs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got []lastRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if len(got) != 2 || got[0].RunID != "run_2" || got[1].RunID != "run_1" {
+		t.Fatalf("got = %+v", got)
+	}
+	if got[0].Status != "COMPLETED" || got[0].EndedAt == "" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+}
+
+func TestRunHistoryHandlerEmptyIsNotAnError(t *testing.T) {
+	store := &fakeSessionStore{runHistoryRecs: nil}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/runs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var got []lastRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got = %+v, want empty", got)
+	}
+}
+
+func TestRunHistoryHandlerStoreError(t *testing.T) {
+	store := &fakeSessionStore{runHistoryErr: errors.New("redis 장애")}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/runs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
 
