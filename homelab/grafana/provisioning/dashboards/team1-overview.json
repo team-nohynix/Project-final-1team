@@ -63,7 +63,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"orderapi-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"orderapi\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "orderapi-metrics"
         }
       ],
@@ -121,7 +121,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"matching-engine-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"matching-engine\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "matching-engine-metrics"
         }
       ],
@@ -179,7 +179,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"recorder-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"recorder\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "recorder-metrics"
         }
       ],
@@ -664,7 +664,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"orderapi-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"orderapi\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "orderapi"
         }
       ],
@@ -974,7 +974,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"matching-engine-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"matching-engine\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "matching-engine"
         }
       ],
@@ -1389,7 +1389,7 @@
       },
       "targets": [
         {
-          "expr": "(count(up{job=\"k8s-services\", service=\"recorder-metrics\"} == 1) > bool 0) or vector(0)",
+          "expr": "(count(up{job=\"recorder\"} == 1) > bool 0) or vector(0)",
           "legendFormat": "recorder"
         }
       ],
