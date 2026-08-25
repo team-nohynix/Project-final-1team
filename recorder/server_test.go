@@ -60,7 +60,7 @@ func (f *fakeQuerier) ListEngines(ctx context.Context) ([]query.EngineAssignment
 	return f.engines, f.enginesErr
 }
 
-func (f *fakeQuerier) DashboardMetrics(ctx context.Context) (query.DashboardMetrics, error) {
+func (f *fakeQuerier) DashboardMetrics(ctx context.Context, window *query.TimeWindow) (query.DashboardMetrics, error) {
 	return f.metrics, f.metricsErr
 }
 

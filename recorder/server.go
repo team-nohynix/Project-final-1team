@@ -95,7 +95,7 @@ func dashboardMetricsHandler(q query.Querier, redisClient *redis.Client) http.Ha
 			log.Printf("대시보드 지표 캐시 조회 실패, 라이브 조회로 폴백: %v", err)
 		}
 
-		metrics, err := q.DashboardMetrics(r.Context())
+		metrics, err := q.DashboardMetrics(r.Context(), currentDashboardWindow(r.Context(), redisClient))
 		if err != nil {
 			log.Printf("대시보드 지표 조회 실패: %v", err)
 			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "대시보드 지표 조회에 실패했습니다.")

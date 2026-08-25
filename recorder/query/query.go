@@ -20,6 +20,13 @@ import (
 
 // tpsWindow/p99Window/seriesWindow/seriesBucket은 DashboardMetrics의 계산
 // 창입니다 — 실측 후 조정할 잠정값입니다(backpressure 워터마크와 같은 성격).
+// TimeWindow는 DashboardMetrics의 TPS/p99 계산 구간을 기본 롤링 창 대신
+// 명시적으로 지정할 때 씁니다 — Querier.DashboardMetrics 주석 참고.
+type TimeWindow struct {
+	From time.Time
+	To   time.Time
+}
+
 const (
 	tpsWindow       = 60 * time.Second
 	p99Window       = 5 * time.Minute
@@ -121,8 +128,14 @@ type Querier interface {
 	ListEngines(ctx context.Context) ([]EngineAssignment, error)
 	// DashboardMetrics는 프론트 DashboardView가 필요로 하는 실시간 지표
 	// (docs/frontend-backend-integration.md 3.1)를 recorder가 이미 RDS에
-	// 쌓아둔 데이터에서 계산해 반환합니다.
-	DashboardMetrics(ctx context.Context) (DashboardMetrics, error)
+	// 쌓아둔 데이터에서 계산해 반환합니다. window가 nil이면 기본 동작(TPS는
+	// 최근 tpsWindow, p99는 최근 p99Window의 롤링 창)입니다 — 진행 중인
+	// 테스트가 있을 때(방금 몇 초/분 안의 실시간 처리량이 의미 있을 때)
+	// 씁니다. window가 주어지면(2026-08-25, "진행 중인 테스트가 없을 땐
+	// 최근 실행 통계를 보여주는 게 낫다"는 요청 지원) TPS/p99를 그 [From,To)
+	// 구간 전체로 계산합니다 — TPS는 그 구간 전체 평균(카운트 ÷ 구간
+	// 길이)이 됩니다. 호출부(metrics.go의 poller)가 세션 상태를 보고 결정합니다.
+	DashboardMetrics(ctx context.Context, window *TimeWindow) (DashboardMetrics, error)
 	// OrderSummary는 mode+[from,to) 구간에 접수된 주문을 상태별로 집계합니다 —
 	// 프론트의 "페이퍼 트레이딩 실행 결과" 화면(접수/체결/미체결 수, 2026-08-12)을
 	// 지원합니다. to가 zero value면 지금 시각을 씁니다(아직 IN_PROGRESS인 실행의
@@ -253,14 +266,24 @@ type MetricsBucket struct {
 // 부재와 같은 근본 원인). RunningEnginePods는 ListEngines 결과의 distinct
 // engineInstanceId 수를 그대로 씁니다.
 type DashboardMetrics struct {
-	OrderAcceptTps    float64          `json:"orderAcceptTps"`
-	ExecutionTps      float64          `json:"executionTps"`
-	PendingOrders     int64            `json:"pendingOrders"`
-	E2EP99Ms          float64          `json:"e2eP99Ms"`
-	E2EP99SampleCount int              `json:"e2eP99SampleCount"`
-	RunningEnginePods int              `json:"runningEnginePods"`
-	Series            []MetricsBucket  `json:"series"`
-	OrdersByStatus    map[string]int64 `json:"ordersByStatus"`
+	OrderAcceptTps    float64 `json:"orderAcceptTps"`
+	ExecutionTps      float64 `json:"executionTps"`
+	PendingOrders     int64   `json:"pendingOrders"`
+	E2EP99Ms          float64 `json:"e2eP99Ms"`
+	E2EP99SampleCount int     `json:"e2eP99SampleCount"`
+	RunningEnginePods int     `json:"runningEnginePods"`
+	// TpsWindowSource/E2EWindowSource는 2026-08-25 추가 — OrderAcceptTps/
+	// ExecutionTps/E2EP99Ms가 "최근 롤링 창"과 "마지막 실행 구간" 중 어느
+	// 쪽으로 계산됐는지(DashboardMetrics(ctx, window) 주석 참고)를 프론트가
+	// 그대로 표시할 수 있게 합니다 — "realtime"(최근 tpsWindow/p99Window)
+	// 또는 "last_run"(진행 중인 테스트가 없어 마지막 실행 [시작,종료) 구간
+	// 전체로 계산). 지금은 TPS 둘, E2E P99 하나가 항상 같은 window를
+	// 공유해서 값이 서로 같지만, 필드를 나눠 두면 나중에 서로 다른 소스로
+	// 갈라져도 API를 안 깨도 됩니다.
+	TpsWindowSource string           `json:"tpsWindowSource"`
+	E2EWindowSource string           `json:"e2eWindowSource"`
+	Series          []MetricsBucket  `json:"series"`
+	OrdersByStatus  map[string]int64 `json:"ordersByStatus"`
 }
 
 // MySQLQuerier는 Querier를 실제 MySQL(RDS)로 구현합니다. store/mysql.go와
@@ -379,29 +402,59 @@ func formatNullTime(t sql.NullTime) string {
 	return t.Time.UTC().Format(store.ISOLayout)
 }
 
-func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, error) {
+func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow) (DashboardMetrics, error) {
 	var m DashboardMetrics
-
-	var acceptCount, execCount, pendingCount int64
-	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM trade_order WHERE submitted_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`,
-		int(tpsWindow.Seconds()),
-	).Scan(&acceptCount); err != nil {
-		return DashboardMetrics{}, fmt.Errorf("접수 TPS 조회 실패: %w", err)
+	if window != nil {
+		m.TpsWindowSource = "last_run"
+		m.E2EWindowSource = "last_run"
+	} else {
+		m.TpsWindowSource = "realtime"
+		m.E2EWindowSource = "realtime"
 	}
-	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM execution WHERE executed_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`,
-		int(tpsWindow.Seconds()),
-	).Scan(&execCount); err != nil {
-		return DashboardMetrics{}, fmt.Errorf("체결 TPS 조회 실패: %w", err)
+
+	// window가 있으면(진행 중인 테스트가 없어 "최근 실행" 구간을 통째로
+	// 보여줄 때) 그 [From,To) 구간 전체 카운트 ÷ 구간 길이를 평균 TPS로
+	// 쓴다 — 없으면(기본) 지금까지처럼 최근 tpsWindow(1분) 롤링 창.
+	tpsSeconds := tpsWindow.Seconds()
+	var acceptCount, execCount, pendingCount int64
+	if window != nil {
+		tpsSeconds = window.To.Sub(window.From).Seconds()
+		if tpsSeconds <= 0 {
+			tpsSeconds = 1 // 0으로 나누기 방지 — 시작·종료가 같은 순간이면(사실상 없던 실행) TPS는 그냥 0이 되게
+		}
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM trade_order WHERE submitted_at >= ? AND submitted_at < ?`,
+			window.From, window.To,
+		).Scan(&acceptCount); err != nil {
+			return DashboardMetrics{}, fmt.Errorf("접수 TPS 조회 실패: %w", err)
+		}
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM execution WHERE executed_at >= ? AND executed_at < ?`,
+			window.From, window.To,
+		).Scan(&execCount); err != nil {
+			return DashboardMetrics{}, fmt.Errorf("체결 TPS 조회 실패: %w", err)
+		}
+	} else {
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM trade_order WHERE submitted_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`,
+			int(tpsWindow.Seconds()),
+		).Scan(&acceptCount); err != nil {
+			return DashboardMetrics{}, fmt.Errorf("접수 TPS 조회 실패: %w", err)
+		}
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM execution WHERE executed_at >= UTC_TIMESTAMP() - INTERVAL ? SECOND`,
+			int(tpsWindow.Seconds()),
+		).Scan(&execCount); err != nil {
+			return DashboardMetrics{}, fmt.Errorf("체결 TPS 조회 실패: %w", err)
+		}
 	}
 	if err := q.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM trade_order WHERE status IN ('ACCEPTED', 'PARTIALLY_FILLED')`,
 	).Scan(&pendingCount); err != nil {
 		return DashboardMetrics{}, fmt.Errorf("처리 대기 주문 조회 실패: %w", err)
 	}
-	m.OrderAcceptTps = float64(acceptCount) / tpsWindow.Seconds()
-	m.ExecutionTps = float64(execCount) / tpsWindow.Seconds()
+	m.OrderAcceptTps = float64(acceptCount) / tpsSeconds
+	m.ExecutionTps = float64(execCount) / tpsSeconds
 	m.PendingOrders = pendingCount
 
 	// 상태별 건수(recorder_orders_by_status, Grafana "주문 상태별 건수 추이"
@@ -443,10 +496,22 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context) (DashboardMetrics, 
 	// 뒤 ②execution을 buy_order_id/sell_order_id 각각 자기 인덱스로 따로
 	// 조회해서 Go에서 합친다 — OR-JOIN 자체를 없애 최근 창 크기에만 비례하게
 	// 만든다(schema.sql의 idx_trade_order_status_submitted 주석 참고).
-	orderRows, err := q.db.QueryContext(ctx, `
-		SELECT order_id, submitted_at FROM trade_order
-		WHERE status = 'FILLED' AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
-	`, int(p99Window.Minutes()))
+	// window가 있으면(위 TPS와 같은 이유) 최근 p99Window 대신 그 [From,To)
+	// 구간 전체에서 FILLED된 주문을 표본으로 삼는다 — idx_trade_order_status_submitted
+	// (status, submitted_at) 인덱스는 절대 구간 조건에도 그대로 쓰인다.
+	var orderRows *sql.Rows
+	var err error
+	if window != nil {
+		orderRows, err = q.db.QueryContext(ctx, `
+			SELECT order_id, submitted_at FROM trade_order
+			WHERE status = 'FILLED' AND submitted_at >= ? AND submitted_at < ?
+		`, window.From, window.To)
+	} else {
+		orderRows, err = q.db.QueryContext(ctx, `
+			SELECT order_id, submitted_at FROM trade_order
+			WHERE status = 'FILLED' AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
+		`, int(p99Window.Minutes()))
+	}
 	if err != nil {
 		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
 	}

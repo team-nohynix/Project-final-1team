@@ -78,21 +78,32 @@ const pendingOrdersTrend = computed(() => {
   return `${arrow} ${displayValue(Math.abs(delta))} (${delta > 0 ? '밀리는 중' : '따라잡는 중'})`
 })
 
+// 각 카드가 재는 시간 범위가 서로 달라서(TPS/p99는 롤링 창, 처리 대기 주문은
+// 시간창 없이 전체 누적) 라벨에 그 범위를 명시한다 — 안 그러면 "이게 지금
+// 진행 중인 테스트 얘기인지, 최근 몇 분인지" 알 수 없다는 문의를 받았다
+// (2026-08-25). TPS/p99는 한 발 더 나가서, recorder가 응답에 실어주는
+// tpsWindowSource/e2eWindowSource(realtime|last_run)를 보고 라벨 자체를
+// 상황에 맞게 바꾼다 — 진행 중인 테스트가 있으면 "최근 1분/5분"(방금 몇
+// 초/분의 실시간 처리량이 의미 있음), 없으면 "지난 실행 기준"(recorder가
+// 마지막 실행의 [시작,종료) 구간 전체로 다시 계산해줌 — "최근 1분"이라고
+// 해놓고 아무 일도 없어 0만 뜨는 것보다 훨씬 유용함).
+function windowLabel(source, recentSuffix) {
+  return source === 'last_run' ? '지난 실행 기준' : `최근 ${recentSuffix}`
+}
+
 const metricCards = computed(() => {
   const m = metrics.value
+  const tpsWin = windowLabel(m?.tpsWindowSource, '1분')
+  const e2eWin = windowLabel(m?.e2eWindowSource, '5분')
   return [
     {
-      // 각 카드가 재는 시간 범위가 서로 달라서(TPS는 최근 1분 롤링, p99는
-      // 최근 5분, 처리 대기 주문은 시간창 없이 전체 누적) 라벨에 그 범위를
-      // 명시한다 — 안 그러면 "이게 지금 진행 중인 테스트 얘기인지, 최근
-      // 몇 분인지" 알 수 없다는 문의를 받았다(2026-08-25).
-      label: '주문 접수 TPS (최근 1분)',
+      label: `주문 접수 TPS (${tpsWin})`,
       value: m ? displayValue(m.orderAcceptTps, 1) : '--',
       description: '목표 10,000건/초',
       color: '#3478f6',
     },
     {
-      label: '체결 TPS (최근 1분)',
+      label: `체결 TPS (${tpsWin})`,
       value: m ? displayValue(m.executionTps, 1) : '--',
       description: '',
       color: '#2ed39a',
@@ -104,7 +115,7 @@ const metricCards = computed(() => {
       color: '#ffb84d',
     },
     {
-      label: '전체 처리 p99 (최근 5분)',
+      label: `전체 처리 p99 (${e2eWin})`,
       value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
       description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '목표 500ms 이하',
       color: '#20c8e8',

@@ -33,6 +33,43 @@ var (
 	)
 )
 
+// sessionLastRunKey는 orderapi/session.go의 lastRunKey와 정확히 같은 값이어야
+// 합니다(모듈 간 타입 비공유 원칙 — 값만 맞추면 됨). orderapi/recorder가 같은
+// Redis를 공유해서, orderapi가 세션 시작/종료 때 쓰는 이 키를 recorder도 읽을
+// 수 있습니다 — currentDashboardWindow(아래)가 씁니다.
+const sessionLastRunKey = "orderapi:session:lastrun"
+
+// sessionLastRunRecord는 orderapi/session.RunRecord에서 recorder가 필요한
+// 필드만 복사한 것입니다(json 태그가 없는 구조체라 Go 기본 필드명 그대로
+// 직렬화됩니다 — 이름만 맞으면 됩니다).
+type sessionLastRunRecord struct {
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
+// currentDashboardWindow는 "진행 중인 테스트가 없을 땐 최근 N분 롤링 창 대신
+// 마지막 실행 구간을 보여주는 게 더 유용하다"는 요청(2026-08-25) 지원 —
+// TPS/p99를 그 실행의 [시작,종료) 구간 전체로 계산하기 위한 구간을 정합니다.
+// 다음 경우엔 nil을 돌려줘서 DashboardMetrics가 기본 롤링 창을 쓰게 둡니다:
+// 진행 중(IN_PROGRESS — 방금 몇 초/분의 실시간 처리량이 의미 있는 시점이라
+// 오히려 롤링 창이 맞음), 세션 키 자체가 없음(한 번도 실행된 적 없음),
+// EndedAt이 비어있음(정상 반납 없이 죽은 좀비 기록 — 구간을 알 수 없음).
+func currentDashboardWindow(ctx context.Context, redisClient *redis.Client) *query.TimeWindow {
+	body, err := redisClient.Get(ctx, sessionLastRunKey).Bytes()
+	if err != nil {
+		return nil
+	}
+	var rec sessionLastRunRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return nil
+	}
+	if rec.Status == "IN_PROGRESS" || rec.EndedAt.IsZero() {
+		return nil
+	}
+	return &query.TimeWindow{From: rec.StartedAt, To: rec.EndedAt}
+}
+
 // dashboardMetricsPollInterval은 GET /v1/metrics/dashboard가 이미 계산하는 값들을
 // 그대로 재사용해 Grafana에도 노출하기 위한 폴링 주기입니다(2026-08-19, 프론트
 // "실시간 모니터링" 화면과 동일한 지표를 Grafana에도 띄워달라는 요청으로 추가) —
@@ -190,7 +227,7 @@ func dashboardMetricsForThisCycle(ctx context.Context, querier *query.MySQLQueri
 	}
 
 	if isLeader {
-		m, err := querier.DashboardMetrics(ctx)
+		m, err := querier.DashboardMetrics(ctx, currentDashboardWindow(ctx, redisClient))
 		if err != nil {
 			log.Printf("대시보드 지표 폴링 실패(다음 주기에 재시도): %v", err)
 			return query.DashboardMetrics{}, false
