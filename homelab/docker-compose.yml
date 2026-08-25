@@ -123,6 +123,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
+      APP_ENV: "prod" # "dev"/"prod" 둘 다 유효하지만, .env 파일 부재 경고를 정상으로 취급하려면 prod
     volumes:
       - backend-data:/app/data
 
