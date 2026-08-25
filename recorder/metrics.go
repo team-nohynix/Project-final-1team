@@ -195,8 +195,21 @@ func pollDashboardMetrics(ctx context.Context, querier *query.MySQLQuerier, redi
 	defer ticker.Stop()
 	for {
 		if m, ok := dashboardMetricsForThisCycle(ctx, querier, redisClient); ok {
-			recorderOrderAcceptTps.Set(m.OrderAcceptTps)
-			recorderExecutionTps.Set(m.ExecutionTps)
+			// TpsWindowSource=="last_run"이면 진행 중인 테스트가 없다는 뜻이고,
+			// m.OrderAcceptTps/ExecutionTps는 그 대신 지난 실행의 평균으로 채워져
+			// 있습니다(currentDashboardWindow 주석 참고, "핵심 지표" 카드가 유휴
+			// 상태에 0 대신 지난 실행값을 보여주도록 2026-08-25 추가한 기능). 이
+			// 두 게이지는 그 값과 별개로 Grafana team1-overview의 "실시간 처리
+			// 흐름" 패널이 파티클 스폰율로 직접 씁니다 — 지난 실행 평균을 그대로
+			// 흘리면 아무 작업도 안 도는데 트래픽이 흐르는 것처럼 보입니다
+			// (DashboardView.vue의 flowSpawnPair에서 같은 버그를 먼저 발견·수정한
+			// 것과 동일 원인). 실시간 전용 소비자를 위해 유휴 상태에선 0으로 덮어씁니다.
+			acceptTps, execTps := m.OrderAcceptTps, m.ExecutionTps
+			if m.TpsWindowSource == "last_run" {
+				acceptTps, execTps = 0, 0
+			}
+			recorderOrderAcceptTps.Set(acceptTps)
+			recorderExecutionTps.Set(execTps)
 			recorderPendingOrders.Set(float64(m.PendingOrders))
 			recorderE2EP99Ms.Set(m.E2EP99Ms)
 			recorderE2EP99SampleCount.Set(float64(m.E2EP99SampleCount))
