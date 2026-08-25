@@ -28,6 +28,9 @@ type fakeSessionStore struct {
 	prevRunRec        session.RunRecord
 	prevRunFound      bool
 	prevRunErr        error
+	prevRun2Rec       session.RunRecord
+	prevRun2Found     bool
+	prevRun2Err       error
 	requestStopErr    error
 	appendNoteErr     error
 
@@ -80,6 +83,10 @@ func (f *fakeSessionStore) LastRun(ctx context.Context) (session.RunRecord, bool
 
 func (f *fakeSessionStore) PreviousRun(ctx context.Context) (session.RunRecord, bool, error) {
 	return f.prevRunRec, f.prevRunFound, f.prevRunErr
+}
+
+func (f *fakeSessionStore) PreviousRun2(ctx context.Context) (session.RunRecord, bool, error) {
+	return f.prevRun2Rec, f.prevRun2Found, f.prevRun2Err
 }
 
 func (f *fakeSessionStore) AppendLastRunNote(ctx context.Context, runID, note string) error {

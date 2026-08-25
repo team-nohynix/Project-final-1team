@@ -117,6 +117,11 @@ const (
 	// 만들 때만 다시 밀려납니다.
 	prevRunKey = "orderapi:session:prevrun"
 
+	// prevRun2Key는 prevRunKey보다 한 번 더 이전 실행의 기록입니다(2026-08-25,
+	// 프론트 "실행 상태" 카드에 최근 3개를 한 줄로 보여달라는 요청 지원).
+	// prevRunKey와 완전히 같은 방식으로 밀려납니다 — 다만 한 칸 더 뒤에서.
+	prevRun2Key = "orderapi:session:prevrun2"
+
 	// stopKeyPrefix+runID는 "이 그룹은 정지 요청됨" 플래그입니다(2026-08-20,
 	// 프론트 "중지" 버튼 지원). 활성 그룹의 exclusivity를 보장하는
 	// activeKey/membersKey와 달리 원자적 스크립트로 묶여있지 않습니다 —
@@ -264,6 +269,9 @@ type Store interface {
 	// PreviousRun은 LastRun 바로 이전 실행의 기록을 반환합니다("직전 실행과
 	// 비교" 지원). 실행이 2번 미만이었으면 found=false(에러 아님).
 	PreviousRun(ctx context.Context) (RunRecord, bool, error)
+	// PreviousRun2는 PreviousRun보다 한 번 더 이전 실행의 기록을 반환합니다
+	// ("최근 3개 실행" 지원). 실행이 3번 미만이었으면 found=false(에러 아님).
+	PreviousRun2(ctx context.Context) (RunRecord, bool, error)
 	// AppendLastRunNote는 runID가 지금 LastRun 슬롯을 차지하고 있는 경우에만
 	// 그 RunRecord.Message에 note를 덧붙입니다(2026-08-20, 세션 종료 자동
 	// 정리가 매칭 엔진 랙으로 건너뛰었을 때 그 사실을 "실행 결과" 화면에도
@@ -345,12 +353,16 @@ func (s *RedisStore) Claim(ctx context.Context, owner, runID, date string, speed
 	// 2(기존 그룹에 합류, 예: 리플레이 샤드 2번째 이후)면 이미 첫 멤버가 써둔
 	// StartedAt을 건드리면 안 됩니다.
 	if n == 1 {
-		// lastRunKey를 덮어쓰기 전에, 지금 거기 있는 값(=방금 전까지 "마지막
-		// 실행"이었던 것)을 prevRunKey로 한 칸 밀어둡니다 — 이 시점 이후로는
-		// 새로 시작하는 이 실행이 lastRunKey를 차지하므로, 그 이전 값을 못
-		// 읽게 되기 전에 옮겨야 합니다. claimScript가 이미 activeKey를 원자적으로
+		// lastRunKey를 덮어쓰기 전에, 지금 거기 있는 값들을 한 칸씩 뒤로
+		// 밀어둡니다(prevRun→prevRun2, lastRun→prevRun 순서로, 밀리는 대상을
+		// 먼저 비워야 다음 밀기가 안 꼬입니다) — 이 시점 이후로는 새로
+		// 시작하는 이 실행이 lastRunKey를 차지하므로, 그 이전 값들을 못 읽게
+		// 되기 전에 옮겨야 합니다. claimScript가 이미 activeKey를 원자적으로
 		// 선점한 뒤라 이 시점에 다른 Claim이 동시에 새 그룹을 만들 수 없으므로,
 		// 별도 Lua 스크립트 없이 plain GET+SET으로도 안전합니다.
+		if body, err := s.client.Get(ctx, prevRunKey).Bytes(); err == nil {
+			s.client.Set(ctx, prevRun2Key, body, 0)
+		}
 		if body, err := s.client.Get(ctx, lastRunKey).Bytes(); err == nil {
 			s.client.Set(ctx, prevRunKey, body, 0)
 		}
@@ -626,6 +638,21 @@ func (s *RedisStore) PreviousRun(ctx context.Context) (RunRecord, bool, error) {
 	var record RunRecord
 	if err := json.Unmarshal(body, &record); err != nil {
 		return RunRecord{}, false, fmt.Errorf("직전 실행 기록 파싱 실패: %w", err)
+	}
+	return record, true, nil
+}
+
+func (s *RedisStore) PreviousRun2(ctx context.Context) (RunRecord, bool, error) {
+	body, err := s.client.Get(ctx, prevRun2Key).Bytes()
+	if err == redis.Nil {
+		return RunRecord{}, false, nil
+	}
+	if err != nil {
+		return RunRecord{}, false, fmt.Errorf("전전 실행 기록 조회 실패: %w", err)
+	}
+	var record RunRecord
+	if err := json.Unmarshal(body, &record); err != nil {
+		return RunRecord{}, false, fmt.Errorf("전전 실행 기록 파싱 실패: %w", err)
 	}
 	return record, true, nil
 }

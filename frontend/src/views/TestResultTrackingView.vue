@@ -289,8 +289,8 @@ const overallState = computed(() => {
 <template>
   <div class="trt-page">
     <header class="page-header">
-      <h2>테스트 결과·추적</h2>
-      <p class="subtitle">성능 시험 결과, 주문 단위 구간 추적</p>
+      <h2>리플레이 결과 분석</h2>
+      <p class="subtitle">리플레이 실행 결과와 목표 대비 성능을 확인합니다.</p>
       <hr />
     </header>
 
