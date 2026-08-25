@@ -565,19 +565,20 @@ const recentRunCards = computed(() => {
   ]
   return slots
     .filter((s) => s.found)
-    .map((s) => {
+    .map((s, i) => {
       const owner = RUN_OWNER_LABELS[s.record.owner] || s.record.owner || '-'
-      const status = RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
-      // "몇 번째 전" 슬롯이든 status가 그대로 IN_PROGRESS일 수 있다 — 새 실행이
-      // 밀어냈을 뿐 정상 반납(Release)된 적 없는 좀비 세션(예: OOMKilled로
-      // 죽어서 세션 반납 코드가 아예 못 돈 경우, 2026-08-25 실측)이면 몇 칸
-      // 밀려나도 계속 IN_PROGRESS로 남는다. 슬롯 위치가 아니라 실제 저장된
-      // status로만 판단해야 배지("종료됨"/"실행 중")와 본문 텍스트가 안 어긋난다
-      // — 예전엔 첫 번째 슬롯만 "실행 중"일 수 있다고 가정해서 배지는 항상
-      // "종료됨"인데 본문엔 "실행 중"이라고 나오는 모순이 있었다.
-      const inProgress = s.record.status === 'IN_PROGRESS'
+      // "몇 번째 전" 슬롯(i>0)은 정의상 그 뒤로 새 실행이 이미 (한 번 이상)
+      // 시작됐다는 뜻이라 — 이 프로젝트의 세션 배타성 보장상 그 시점에 이미
+      // 끝나 있었어야 정상입니다 — 저장된 status가 여전히 IN_PROGRESS라면
+      // "지금 실행 중"이 아니라 "정상 반납 없이 죽었다"(예: OOMKilled로
+      // SIGKILL돼 반납 코드가 아예 못 돔, 2026-08-25 실측)는 뜻입니다.
+      // "실행 중"이라고 보여주면 사실과 다르므로 별도 상태로 구분합니다.
+      const zombie = i > 0 && s.record.status === 'IN_PROGRESS'
+      const status = zombie ? '미종료 (비정상 종료 추정)' : RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
+      const inProgress = !zombie && s.record.status === 'IN_PROGRESS'
       return {
         inProgress,
+        zombie,
         owner,
         status,
         startedAt: s.record.startedAt,
@@ -1049,8 +1050,8 @@ onBeforeUnmount(() => {
           class="run-status-row"
           :class="{ 'run-active': card.inProgress }"
         >
-          <span class="run-badge" :class="{ running: card.inProgress }">
-            {{ card.inProgress ? '실행 중' : '종료됨' }}
+          <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
+            {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
           </span>
           <div class="run-status-text">
             <strong>{{ i === 0 ? card.owner : `${i + 1}번째 전: ${card.owner}` }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
@@ -1311,6 +1312,11 @@ onBeforeUnmount(() => {
 .run-badge.running {
   color: #0d1b2a;
   background: #2ed39a;
+}
+
+.run-badge.zombie {
+  color: #ffb84d;
+  background: rgba(255, 184, 77, 0.15);
 }
 
 .run-status-text {
