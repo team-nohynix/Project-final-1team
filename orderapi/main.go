@@ -201,17 +201,26 @@ func main() {
 
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// JOB_TRIGGER_QUEUE_URL이 없으면(로컬 개발 등) 이 라우트 자체를 등록하지
-	// 않습니다 — config.go 참고, orderapi의 핵심 기능과는 무관한 선택 기능입니다.
-	if cfg.JobTriggerQueueURL != "" {
+	// JOB_TRIGGER_QUEUE_URL/JOB_TRIGGER_URL 둘 다 없으면(로컬 개발 등) 이 라우트
+	// 자체를 등록하지 않습니다 — config.go 참고, orderapi의 핵심 기능과는 무관한
+	// 선택 기능입니다. JOB_TRIGGER_URL(2026-08-25, 홈서버 이전)이 SQS보다
+	// 우선합니다 — 홈서버에는 SQS가 없고, 대신 로컬 job-trigger HTTP 서비스가
+	// docker run으로 trader/replayengine을 직접 실행합니다
+	// (homelab/job-trigger, infra/lambda/job-trigger/index.py와 같은 역할).
+	switch {
+	case cfg.JobTriggerURL != "":
+		jobPublisher := jobtrigger.NewHTTPPublisher(cfg.JobTriggerURL)
+		mux.HandleFunc("POST /v1/jobs", startJobHandler(jobPublisher, cfg.OrderRecordsBucket))
+		log.Printf("작업 트리거 활성화 (http url=%s)", cfg.JobTriggerURL)
+	case cfg.JobTriggerQueueURL != "":
 		jobPublisher, err := jobtrigger.NewSQSPublisher(ctx, cfg.JobTriggerQueueURL)
 		if err != nil {
 			log.Fatalf("작업 트리거 SQS 발행자 생성 실패: %v", err)
 		}
 		mux.HandleFunc("POST /v1/jobs", startJobHandler(jobPublisher, cfg.OrderRecordsBucket))
 		log.Printf("작업 트리거 활성화 (queue=%s)", cfg.JobTriggerQueueURL)
-	} else {
-		log.Printf("JOB_TRIGGER_QUEUE_URL이 없어 POST /v1/jobs 비활성화")
+	default:
+		log.Printf("JOB_TRIGGER_QUEUE_URL/JOB_TRIGGER_URL이 없어 POST /v1/jobs 비활성화")
 	}
 
 	addr := ":" + cfg.Port

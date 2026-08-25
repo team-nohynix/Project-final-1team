@@ -6,9 +6,11 @@
 package jobtrigger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -90,4 +92,44 @@ func (p *SQSPublisher) Publish(ctx context.Context, req Request) error {
 		MessageBody: aws.String(string(body)),
 	})
 	return err
+}
+
+// HTTPPublisher는 2026-08-25 홈서버 이전용 SQSPublisher 대체 구현체입니다 —
+// SQS/Lambda 대신, 같은 Docker Compose 네트워크 안의 job-trigger 서비스
+// (homelab/job-trigger)에 그대로 JSON을 POST합니다. job-trigger가 이
+// Request를 받아 trader/replayengine 이미지를 `docker run`으로 직접
+// 실행합니다 — job-trigger Lambda(infra/lambda/job-trigger/index.py)가
+// SQS를 소비해 K8s Job을 만들던 것과 같은 역할, 다른 실행 수단.
+type HTTPPublisher struct {
+	url    string
+	client *http.Client
+}
+
+// NewHTTPPublisher는 url(예: http://job-trigger:9000/v1/jobs)에 그대로 POST할
+// Publisher를 만듭니다. job-trigger는 신뢰된 내부 네트워크 전용이라 인증이
+// 없습니다 — orderapi 자신의 POST /v1/jobs 핸들러가 이미 입력을 검증하므로
+// (ValidateRequest), 여기서 다시 검증하지 않습니다.
+func NewHTTPPublisher(url string) *HTTPPublisher {
+	return &HTTPPublisher{url: url, client: &http.Client{Timeout: 10 * time.Second}}
+}
+
+func (p *HTTPPublisher) Publish(ctx context.Context, req Request) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("작업 요청 직렬화 실패: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("작업 트리거 요청 생성 실패: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("작업 트리거 요청 실패: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("작업 트리거가 %d를 반환함", resp.StatusCode)
+	}
+	return nil
 }

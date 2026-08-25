@@ -1,0 +1,229 @@
+# TRUSS 홈서버(Proxmox truss-vm) 배포 — AWS EKS/MSK/RDS/ElastiCache를
+# 단일 Docker Compose 스택으로 대체. 프로젝트가 원래부터 지원하던 "로컬
+# 개발 모드"(KAFKA_USE_IAM_AUTH=false, REDIS_TLS_ENABLED=false, S3 버킷
+# env var 비우면 로컬 파일시스템 폴백)를 상시 운영으로 격상시킨 것 —
+# 서비스 코드 자체는 대부분 무수정.
+#
+# 파티션 수(20 — 마켓 20개), 스키마(schema.sql), Grafana 대시보드 JSON은
+# 전부 infra/의 기존 파일을 그대로 재사용한다(mysql-ec2, monitoring-ec2,
+# dev-kafka, kafka-admin-job.yaml 참고 — 파일 상단 주석에 출처 표시).
+
+services:
+  # === 데이터 계층 ===
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: team1_truss
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ../recorder/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    command:
+      - --max_connections=200
+      - --skip-log-bin
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # KAFKA_ADVERTISED_LISTENERS를 반드시 컨테이너 서비스명(kafka)으로 둔다 —
+  # infra/dev-kafka/docker-compose.yml 원본은 localhost로 돼 있는데, 그건
+  # "호스트에서 직접 도는 Go 프로세스가 접속"하는 로컬 개발 시나리오 전용이다.
+  # 여기서는 다른 컨테이너(orderapi 등)가 접속해야 하므로 localhost로 두면
+  # 최초 연결 후 메타데이터 응답이 "localhost로 재연결하라"고 알려줘서 접속한
+  # 컨테이너 자기 자신으로 되돌아가는 접속 실패가 난다.
+  kafka:
+    image: apache/kafka:3.7.0
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" # 파티션 수를 20으로 고정해야 해서(마켓당 1개) 자동생성은 끈다 — kafka-topic-init이 명시적으로 만든다
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # kafka-admin-job.yaml과 동일한 목적(orders/executions/assignments, 20파티션) —
+  # replication-factor만 1로 낮춘다(브로커 1대뿐이라 3은 애초에 불가능).
+  # 1회 실행 후 종료(restart: "no") — 이미 있으면 --if-not-exists라 재실행해도 안전.
+  kafka-topic-init:
+    image: apache/kafka:3.7.0
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for topic in orders executions assignments; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$topic" --partitions 20 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  # === 모니터링 (infra/monitoring-ec2 패턴 재사용) ===
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_PANELS_DISABLE_SANITIZE_HTML: "true" # "실시간 처리 흐름" 캔버스 패널의 인라인 JS 실행에 필요(AWS 버전과 동일 이유)
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000" # nginx가 80/443을 쓰므로 grafana는 별도 포트, nginx가 monitor.jhyang.click을 여기로 라우팅
+
+  # === 애플리케이션 계층 ===
+  # 전부 KAFKA_USE_IAM_AUTH=false/REDIS_TLS_ENABLED=false — 원래부터 있던
+  # "로컬 개발" 인증 우회 경로(kafkaclient.NewDialer 등)를 그대로 씀.
+  # S3 버킷 env var는 전부 비워서 로컬 파일시스템 스토리지 폴백을 쓴다
+  # (orderapi/main.go:192, backend/dataset 로직 확인됨).
+  backend:
+    build: ../backend
+    image: truss-backend:latest
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+    volumes:
+      - backend-data:/app/data
+
+  orderapi:
+    build: ../orderapi
+    image: truss-orderapi:latest
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8081"
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_USE_IAM_AUTH: "false"
+      REDIS_ADDR: "redis:6379"
+      REDIS_TLS_ENABLED: "false"
+      RECORDER_URL: "http://recorder:8082"
+      PROMETHEUS_URL: "http://prometheus:9090"
+      JOB_TRIGGER_URL: "http://job-trigger:9000/v1/jobs"
+    volumes:
+      - orderapi-data:/app/orders
+    ports:
+      - "8081:8081"
+
+  recorder:
+    build: ../recorder
+    image: truss-recorder:latest
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_USE_IAM_AUTH: "false"
+      REDIS_ADDR: "redis:6379"
+      REDIS_TLS_ENABLED: "false"
+      DATABASE_URL: "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/team1_truss?parseTime=true&loc=UTC"
+    ports:
+      - "8082:8082"
+
+  # 매칭 엔진은 오토스케일 없이 고정 2개 — 계획 문서 참고(홈서버 코어 제한상
+  # KEDA 오토스케일 미구현). 서비스명을 prometheus.yml의 static target과
+  # 맞춰야 한다(matching-engine-1/2).
+  matching-engine-1:
+    build: ../matching
+    image: truss-matching:latest
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_USE_IAM_AUTH: "false"
+      REDIS_ADDR: "redis:6379"
+      REDIS_TLS_ENABLED: "false"
+
+  matching-engine-2:
+    build: ../matching
+    image: truss-matching:latest
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_USE_IAM_AUTH: "false"
+      REDIS_ADDR: "redis:6379"
+      REDIS_TLS_ENABLED: "false"
+
+  # job-trigger는 형제 컨테이너(trader/replayengine)를 띄워야 하므로 호스트
+  # Docker 소켓이 필요하다 — Docker-outside-of-Docker, job-trigger/main.go 주석 참고.
+  job-trigger:
+    build: ../job-trigger
+    image: truss-job-trigger:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DOCKER_NETWORK: "homelab_default"
+      BACKEND_URL: "http://backend:8080"
+      ORDERAPI_URL: "http://orderapi:8081"
+      BEDROCK_REGION: "ap-northeast-2"
+      BEDROCK_MODEL_ID: "apac.anthropic.claude-3-haiku-20240307-v1:0"
+      BEDROCK_AWS_ACCESS_KEY_ID: "${BEDROCK_AWS_ACCESS_KEY_ID}"
+      BEDROCK_AWS_SECRET_ACCESS_KEY: "${BEDROCK_AWS_SECRET_ACCESS_KEY}"
+
+volumes:
+  mysql-data:
+  prometheus-data:
+  grafana-data:
+  backend-data:
+  orderapi-data:

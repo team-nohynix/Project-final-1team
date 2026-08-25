@@ -18,6 +18,7 @@ type Config struct {
 	RedisPassword      string
 	RedisTLSEnabled    bool
 	JobTriggerQueueURL string
+	JobTriggerURL      string
 	OrderRecordsBucket string
 	RecorderURL        string
 	PrometheusURL      string
@@ -97,6 +98,12 @@ func LoadConfig() Config {
 	// 안 쓰는 로컬 개발 환경에 억지로 값을 채우게 하지 않습니다.
 	jobTriggerQueueURL := os.Getenv("JOB_TRIGGER_QUEUE_URL")
 
+	// JOB_TRIGGER_URL(2026-08-25, 홈서버 이전)은 JOB_TRIGGER_QUEUE_URL의 대체
+	// 경로입니다 — 홈서버 Docker Compose 환경엔 SQS가 없어서, 대신 로컬
+	// job-trigger HTTP 서비스(homelab/job-trigger)로 POST합니다. 이 값이
+	// 있으면 QUEUE_URL보다 우선합니다(main.go 참고).
+	jobTriggerURL := os.Getenv("JOB_TRIGGER_URL")
+
 	// ORDER_RECORDS_BUCKET도 선택입니다 — trader/replayengine의 -order-bucket
 	// 플래그와 같은 기본값 규칙(비어있으면 로컬 ./orders 디렉터리)입니다.
 	// GET /v1/jobs/replay-preview(2026-08-19 추가, "부하 시나리오 미리보기"
@@ -133,6 +140,7 @@ func LoadConfig() Config {
 		RedisPassword:      redisPassword,
 		RedisTLSEnabled:    redisTLSEnabled,
 		JobTriggerQueueURL: jobTriggerQueueURL,
+		JobTriggerURL:      jobTriggerURL,
 		RecorderURL:        recorderURL,
 		PrometheusURL:      prometheusURL,
 		OrderRecordsBucket: orderRecordsBucket,

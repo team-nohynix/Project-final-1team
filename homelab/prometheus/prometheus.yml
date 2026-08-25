@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 2026-08-25 홈서버 이전: AWS 버전(infra/monitoring-ec2/prometheus.yml.tpl)은
+# EKS API 서버 프록시를 거치는 kubernetes_sd_configs를 썼지만, 여기는 고정된
+# 소수 컨테이너만 도는 단일 Docker Compose 환경이라 서비스 디스커버리 자체가
+# 불필요 — 컨테이너 이름을 Compose 내부 DNS로 바로 스크레이프한다.
+# matching-engine은 반드시 레플리카별로 개별 타겟이어야 한다 — 하나로 합치면
+# sum(matching_engine_book_size) 등이 "합"이 아니라 무작위로 하나만 보게 되는
+# 버그를 AWS에서 실측으로 겪었다(같은 파일의 AWS 버전 주석 참고).
+scrape_configs:
+  - job_name: prometheus-self
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: orderapi
+    static_configs:
+      - targets: ["orderapi:8081"]
+        labels: { service: orderapi-metrics }
+
+  - job_name: recorder
+    static_configs:
+      - targets: ["recorder:8082"]
+        labels: { service: recorder-metrics }
+
+  - job_name: matching-engine
+    static_configs:
+      - targets: ["matching-engine-1:9090"]
+        labels: { service: matching-engine-metrics, pod: matching-engine-1 }
+      - targets: ["matching-engine-2:9090"]
+        labels: { service: matching-engine-metrics, pod: matching-engine-2 }
