@@ -546,8 +546,6 @@ function formatElapsed(startedAt) {
   return h > 0 ? `${h}시간 ${m}분 ${s}초` : m > 0 ? `${m}분 ${s}초` : `${s}초`
 }
 
-const runElapsed = computed(() => (isRunInProgress.value ? formatElapsed(lastRun.value.startedAt) : '-'))
-
 function formatKST(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
@@ -561,16 +559,23 @@ function formatKST(iso) {
 // 새 실행에 밀려난 "무조건 끝난" 기록이라서.
 const recentRunCards = computed(() => {
   const slots = [
-    { record: lastRun.value, found: lastRunFound.value, live: true },
-    { record: previousRun.value, found: previousRunFound.value, live: false },
-    { record: previousRun2.value, found: previousRun2Found.value, live: false },
+    { record: lastRun.value, found: lastRunFound.value },
+    { record: previousRun.value, found: previousRunFound.value },
+    { record: previousRun2.value, found: previousRun2Found.value },
   ]
   return slots
     .filter((s) => s.found)
     .map((s) => {
       const owner = RUN_OWNER_LABELS[s.record.owner] || s.record.owner || '-'
       const status = RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
-      const inProgress = s.live && s.record.status === 'IN_PROGRESS'
+      // "몇 번째 전" 슬롯이든 status가 그대로 IN_PROGRESS일 수 있다 — 새 실행이
+      // 밀어냈을 뿐 정상 반납(Release)된 적 없는 좀비 세션(예: OOMKilled로
+      // 죽어서 세션 반납 코드가 아예 못 돈 경우, 2026-08-25 실측)이면 몇 칸
+      // 밀려나도 계속 IN_PROGRESS로 남는다. 슬롯 위치가 아니라 실제 저장된
+      // status로만 판단해야 배지("종료됨"/"실행 중")와 본문 텍스트가 안 어긋난다
+      // — 예전엔 첫 번째 슬롯만 "실행 중"일 수 있다고 가정해서 배지는 항상
+      // "종료됨"인데 본문엔 "실행 중"이라고 나오는 모순이 있었다.
+      const inProgress = s.record.status === 'IN_PROGRESS'
       return {
         inProgress,
         owner,
@@ -1044,7 +1049,7 @@ onBeforeUnmount(() => {
           <div class="run-status-text">
             <strong>{{ i === 0 ? card.owner : `${i + 1}번째 전: ${card.owner}` }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
             <span v-if="card.speed">{{ card.speed }}배속</span>
-            <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ runElapsed }}</span>
+            <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ formatElapsed(card.startedAt) }}</span>
             <span v-else>{{ formatKST(card.startedAt) }} ~ {{ formatKST(card.endedAt) }}</span>
             <span v-if="card.message" class="run-message">{{ card.message }}</span>
           </div>
