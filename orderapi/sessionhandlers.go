@@ -293,3 +293,26 @@ func previousRunHandler(store session.Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, toLastRunResponse(record))
 	}
 }
+
+// previousRun2Handler는 GET /v1/sessions/previous-run-2를 처리합니다 —
+// previousRunHandler보다 한 번 더 이전 실행(2026-08-25, 프론트 "실행 상태"
+// 카드에 최근 3개를 한 줄로 보여달라는 요청 지원). 실행이 3번 미만이었으면
+// 404입니다.
+func previousRun2Handler(store session.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		record, found, err := store.PreviousRun2(r.Context())
+		if err != nil {
+			log.Printf("전전 실행 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "전전 실행 조회에 실패했습니다.")
+			return
+		}
+		if !found {
+			writeError(w, reqID, http.StatusNotFound, "NO_PREVIOUS_RUN", "전전 실행 기록이 없습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, toLastRunResponse(record))
+	}
+}

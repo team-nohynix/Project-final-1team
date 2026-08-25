@@ -41,6 +41,10 @@ const systemStatus = ref(null)
 const pods = ref({})
 const lastRun = ref(null)
 const lastRunFound = ref(false)
+const previousRun = ref(null)
+const previousRunFound = ref(false)
+const previousRun2 = ref(null)
+const previousRun2Found = ref(false)
 const loadError = ref('')
 
 const integrityData = ref(null)
@@ -64,6 +68,16 @@ const displayValue = (v, digits = 0) => {
   return Number(v).toLocaleString('ko-KR', { maximumFractionDigits: digits, minimumFractionDigits: digits })
 }
 
+const pendingOrdersTrend = computed(() => {
+  const m = metrics.value
+  const prev = previousPendingOrders.value
+  if (!m || prev === null) return ''
+  const delta = m.pendingOrders - prev
+  if (delta === 0) return '변화 없음'
+  const arrow = delta > 0 ? '▲' : '▼'
+  return `${arrow} ${displayValue(Math.abs(delta))} (${delta > 0 ? '밀리는 중' : '따라잡는 중'})`
+})
+
 const metricCards = computed(() => {
   const m = metrics.value
   return [
@@ -82,7 +96,7 @@ const metricCards = computed(() => {
     {
       label: '처리 대기 주문',
       value: m ? displayValue(m.pendingOrders) : '--',
-      description: '',
+      description: pendingOrdersTrend.value,
       color: '#ffb84d',
     },
     {
@@ -250,19 +264,21 @@ const integrityCards = computed(() => {
   ]
 })
 
-// 그라파나 "① 주문 처리 현황" 행과 같은 5개 카드 — 매칭엔진 호가창 잔량만
-// 새 cluster 엔드포인트(Prometheus)에서 오고, 나머지 4개(상태별 건수)는
-// 이미 폴링 중인 recorder DashboardMetrics.ordersByStatus를 그대로 씁니다
-// (그라파나의 recorder_orders_by_status Prometheus 게이지도 recorder가 이
-// 값을 그대로 내보내는 것이라 같은 데이터입니다).
+// 그라파나 "① 주문 처리 현황" 행의 상태별 건수 4개 — recorder
+// DashboardMetrics.ordersByStatus 그대로(그라파나의 recorder_orders_by_status
+// Prometheus 게이지도 recorder가 이 값을 그대로 내보내는 것이라 같은 데이터).
+// 전부 recorder/query/query.go의 ordersByStatusWindow(최근 10분) 안에서
+// "접수된" 주문 기준이라, 핵심 지표의 "처리 대기 주문"(전체 누적, 시간창
+// 없음)과 절대 숫자가 안 맞는 게 정상입니다 — 언뜻 같은 걸 나타내는 걸로
+// 보이기 쉬워서(2026-08-25 사용자 문의) 패널 부제로 시간창을 명시합니다.
+//
+// 매칭엔진 호가창 잔량은 여기서 뺐습니다 — 주문 개수가 아니라 매칭엔진이
+// 메모리에 들고 있는 실시간 오더북 크기(내부 구현 디테일)라, 사용자가 보는
+// "주문이 얼마나 밀려있나"와는 다른 질문에 답하는 지표입니다. 클러스터
+// 현황(엔지니어용 Prometheus 지표 섹션)으로 옮겼습니다.
 const orderStatusCards = computed(() => {
   const byStatus = metrics.value?.ordersByStatus || {}
   return [
-    {
-      label: '매칭엔진 호가창 잔량',
-      value: clusterMetrics.value ? displayValue(clusterMetrics.value.matchingBookSize) : '--',
-      color: '#9b7bff',
-    },
     { label: '처리해야 할 (ACCEPTED)', value: displayValue(byStatus.ACCEPTED ?? 0), color: '#ff5c7a' },
     { label: '처리 중 (PARTIALLY_FILLED)', value: displayValue(byStatus.PARTIALLY_FILLED ?? 0), color: '#ffd23f' },
     { label: '처리 완료 (FILLED)', value: displayValue(byStatus.FILLED ?? 0), color: '#2ed39a' },
@@ -287,6 +303,9 @@ const clusterCards = computed(() => {
       value: c ? `${displayValue(c.autoscaling.recorder.current)} / ${displayValue(c.autoscaling.recorder.max)}` : '--',
     },
     { label: 'Karpenter 노드', value: c ? displayValue(c.autoscaling.karpenterNodes) : '--' },
+    // 원래 "주문 처리 현황"에 있었던 카드 — 내부 구현 디테일(매칭엔진 메모리
+    // 오더북 크기)이라 여기 엔지니어용 섹션으로 옮겼습니다(2026-08-25).
+    { label: '매칭엔진 호가창 잔량', value: c ? displayValue(c.matchingBookSize) : '--' },
   ]
 })
 const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
@@ -398,9 +417,15 @@ const chartLabels = computed(() => {
   return [...new Set(idxs)].map((i) => toHHMM(s[i].bucketStart))
 })
 
+// 처리 대기 주문의 절대값만으로는 "334,654가 많은 건지 적은 건지" 판단이 안
+// 된다는 피드백(2026-08-25)에 따라, 직전 폴링 대비 증감 추세를 같이 보여준다
+// — 밀리는 중(늘어남)인지 따라잡는 중(줄어듦)인지가 실질적으로 더 유용하다.
+const previousPendingOrders = ref(null)
+
 async function fetchDashboardMetrics() {
   const res = await fetch('/recorder-api/v1/metrics/dashboard')
   if (!res.ok) throw new Error(`지표 조회 실패: ${res.status}`)
+  previousPendingOrders.value = metrics.value?.pendingOrders ?? null
   metrics.value = await res.json()
 }
 
@@ -428,12 +453,40 @@ async function fetchLastRun() {
   lastRunFound.value = true
 }
 
+// previous-run/previous-run-2는 최근 3개를 한 줄로 보여달라는 요청(2026-08-25)
+// 지원 — 404(그 순번까지 실행이 없었음)는 정상 상태라 조용히 "없음"으로 둔다.
+async function fetchPreviousRun() {
+  const res = await fetch('/order-api/v1/sessions/previous-run')
+  if (res.status === 404) {
+    previousRun.value = null
+    previousRunFound.value = false
+    return
+  }
+  if (!res.ok) throw new Error(`직전 실행 조회 실패: ${res.status}`)
+  previousRun.value = await res.json()
+  previousRunFound.value = true
+}
+
+async function fetchPreviousRun2() {
+  const res = await fetch('/order-api/v1/sessions/previous-run-2')
+  if (res.status === 404) {
+    previousRun2.value = null
+    previousRun2Found.value = false
+    return
+  }
+  if (!res.ok) throw new Error(`전전 실행 조회 실패: ${res.status}`)
+  previousRun2.value = await res.json()
+  previousRun2Found.value = true
+}
+
 async function refresh() {
   try {
     await Promise.all([
       fetchDashboardMetrics(),
       fetchSystemStatus(),
       fetchLastRun(),
+      fetchPreviousRun(),
+      fetchPreviousRun2(),
       // 드롭된 주문 조회 실패는 다른 카드까지 '--'로 만들 정도로 치명적이지
       // 않으니 별도로 삼킨다 — 값은 그냥 이전 걸 유지.
       fetchDroppedSeriesDefault().catch(() => {}),
@@ -475,8 +528,6 @@ const RUN_OWNER_LABELS = {
 }
 
 const isRunInProgress = computed(() => lastRunFound.value && lastRun.value?.status === 'IN_PROGRESS')
-const runTypeLabel = computed(() => RUN_OWNER_LABELS[lastRun.value?.owner] || lastRun.value?.owner || '-')
-const runStatusLabel = computed(() => RUN_STATUS_LABELS[lastRun.value?.status] || lastRun.value?.status || '-')
 
 // 실시간 경과 시간 표시용 — POLL_INTERVAL_MS(10초)보다 자주 갱신해야 "실행
 // 중" 배지의 경과 시간이 그럴듯하게 흐르므로 별도의 1초 틱을 둔다. 서버에
@@ -503,6 +554,34 @@ function formatKST(iso) {
   if (Number.isNaN(d.getTime())) return '-'
   return d.toLocaleString('ko-KR', { hour12: false })
 }
+
+// 최근 3개 실행을 한 줄로(2026-08-25 요청) — last-run/previous-run/
+// previous-run-2 중 실제로 있는 것만 순서대로 담는다. 진행 중(경과 시간 실시간
+// 표시)일 수 있는 건 항상 첫 번째(last-run)뿐이다 — previous-run(-2)은 이미
+// 새 실행에 밀려난 "무조건 끝난" 기록이라서.
+const recentRunCards = computed(() => {
+  const slots = [
+    { record: lastRun.value, found: lastRunFound.value, live: true },
+    { record: previousRun.value, found: previousRunFound.value, live: false },
+    { record: previousRun2.value, found: previousRun2Found.value, live: false },
+  ]
+  return slots
+    .filter((s) => s.found)
+    .map((s) => {
+      const owner = RUN_OWNER_LABELS[s.record.owner] || s.record.owner || '-'
+      const status = RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
+      const inProgress = s.live && s.record.status === 'IN_PROGRESS'
+      return {
+        inProgress,
+        owner,
+        status,
+        startedAt: s.record.startedAt,
+        endedAt: s.record.endedAt,
+        message: s.record.message,
+        speed: s.record.speed,
+      }
+    })
+})
 
 // ---- 실시간 처리 흐름 (Grafana "Team1 AI Trader - 실시간 메트릭"의
 // 파이프라인 다이어그램을 이 화면에도 반영, 2026-08-24) ----
@@ -655,8 +734,15 @@ function flowSpawnPair(tps, color, mode, w) {
   }
 }
 
-function flowNodeBoxWidth(ctx, label) {
-  return Math.max(ctx.measureText(label).width + 20, 60)
+function flowNodeBoxWidth(ctx, label, sub) {
+  // label(굵게 12px)만 재고 sub(가늘게 9px, "matching-engine"처럼 label보다
+  // 긴 영문 표기가 많음)는 안 재서, sub가 박스 폭을 넘어 삐져나오는 문제가
+  // 있었다(2026-08-25) — 두 폰트 각각으로 재서 더 넓은 쪽에 맞춘다.
+  ctx.font = '700 12px -apple-system, BlinkMacSystemFont, sans-serif'
+  const labelWidth = ctx.measureText(label).width
+  ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
+  const subWidth = sub ? ctx.measureText(sub).width : 0
+  return Math.max(Math.max(labelWidth, subWidth) + 20, 60)
 }
 
 function drawFlowFrame() {
@@ -806,8 +892,7 @@ function drawFlowFrame() {
   for (const nd of flowNodesDef) {
     const nx = nd.x * w
     const ny = cy + (flowLaneCenterFrac(nd.x, nd.lane) - 0.5) * 2 * laneSpan
-    ctx.font = '700 12px -apple-system, BlinkMacSystemFont, sans-serif'
-    const bw = flowNodeBoxWidth(ctx, nd.label)
+    const bw = flowNodeBoxWidth(ctx, nd.label, nd.sub)
     const bh = 34
     const drawCx = Math.min(Math.max(nx, bw / 2 + 4), w - bw / 2 - 4)
     const bx = drawCx - bw / 2
@@ -946,19 +1031,23 @@ onBeforeUnmount(() => {
 
     <section class="panel run-status-panel">
       <h3>실행 상태</h3>
-      <div v-if="isRunInProgress" class="run-status-row run-active">
-        <span class="run-badge running">실행 중</span>
-        <div class="run-status-text">
-          <strong>{{ runTypeLabel }}</strong>
-          <span>시작 {{ formatKST(lastRun.startedAt) }} · 경과 {{ runElapsed }}</span>
-        </div>
-      </div>
-      <div v-else-if="lastRunFound" class="run-status-row">
-        <span class="run-badge">종료됨</span>
-        <div class="run-status-text">
-          <strong>최근 실행: {{ runTypeLabel }} — {{ runStatusLabel }}</strong>
-          <span>{{ formatKST(lastRun.startedAt) }} ~ {{ formatKST(lastRun.endedAt) }}</span>
-          <span v-if="lastRun.message" class="run-message">{{ lastRun.message }}</span>
+      <div v-if="recentRunCards.length" class="run-status-list">
+        <div
+          v-for="(card, i) in recentRunCards"
+          :key="i"
+          class="run-status-row"
+          :class="{ 'run-active': card.inProgress }"
+        >
+          <span class="run-badge" :class="{ running: card.inProgress }">
+            {{ card.inProgress ? '실행 중' : '종료됨' }}
+          </span>
+          <div class="run-status-text">
+            <strong>{{ i === 0 ? card.owner : `${i + 1}번째 전: ${card.owner}` }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
+            <span v-if="card.speed">{{ card.speed }}배속</span>
+            <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ runElapsed }}</span>
+            <span v-else>{{ formatKST(card.startedAt) }} ~ {{ formatKST(card.endedAt) }}</span>
+            <span v-if="card.message" class="run-message">{{ card.message }}</span>
+          </div>
         </div>
       </div>
       <div v-else class="run-status-row">
@@ -987,7 +1076,8 @@ onBeforeUnmount(() => {
 
     <section class="panel order-status-panel">
       <h3>주문 처리 현황</h3>
-      <div class="stat-grid stat-grid-5">
+      <p class="cluster-note">최근 10분간 접수된 주문의 상태별 건수입니다 — 핵심 지표의 "처리 대기 주문"(전체 누적)과는 집계 기간이 다릅니다.</p>
+      <div class="stat-grid stat-grid-4">
         <div v-for="card in orderStatusCards" :key="card.label">
           <span>{{ card.label }}</span>
           <strong :style="{ color: card.color }">{{ card.value }}</strong>
@@ -1001,7 +1091,7 @@ onBeforeUnmount(() => {
         그라파나 team1-overview 대시보드와 같은 지표(Prometheus)입니다.
         {{ clusterMetricsError ? ' — ' + clusterMetricsError : '' }}
       </p>
-      <div class="stat-grid stat-grid-5">
+      <div class="stat-grid stat-grid-6">
         <div v-for="card in clusterCards" :key="card.label">
           <span>{{ card.label }}</span>
           <strong>{{ card.value }}</strong>
@@ -1174,11 +1264,27 @@ onBeforeUnmount(() => {
   margin-bottom: 18px;
 }
 
+.run-status-list {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  gap: 12px;
+}
+
 .run-status-row {
   display: flex;
-  margin-top: 14px;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 12px 14px;
+  background: #0e1b2b;
+  border: 1px solid #16283d;
+  border-radius: 10px;
+}
+
+.run-status-row.run-active {
+  border-color: rgba(46, 211, 154, 0.5);
 }
 
 .run-badge {
@@ -1505,8 +1611,12 @@ onBeforeUnmount(() => {
   margin-top: 20px;
 }
 
-.stat-grid-5 {
-  grid-template-columns: repeat(5, 1fr);
+.stat-grid-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.stat-grid-6 {
+  grid-template-columns: repeat(6, 1fr);
 }
 
 .stat-grid div {
