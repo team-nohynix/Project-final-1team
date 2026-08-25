@@ -49,7 +49,7 @@ resource "helm_release" "keda" {
   version          = "2.20.2" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth, helm_release.aws_load_balancer_controller]
 }
 
 resource "helm_release" "kube_state_metrics" {
@@ -60,7 +60,7 @@ resource "helm_release" "kube_state_metrics" {
   version          = "8.4.0" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth, helm_release.aws_load_balancer_controller]
 }
 
 resource "helm_release" "node_exporter" {
@@ -71,5 +71,5 @@ resource "helm_release" "node_exporter" {
   version          = "4.56.1" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
   create_namespace = true
 
-  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
+  depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth, helm_release.aws_load_balancer_controller]
 }
