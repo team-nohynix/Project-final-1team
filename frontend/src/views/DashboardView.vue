@@ -82,31 +82,35 @@ const metricCards = computed(() => {
   const m = metrics.value
   return [
     {
-      label: '주문 접수 TPS',
+      // 각 카드가 재는 시간 범위가 서로 달라서(TPS는 최근 1분 롤링, p99는
+      // 최근 5분, 처리 대기 주문은 시간창 없이 전체 누적) 라벨에 그 범위를
+      // 명시한다 — 안 그러면 "이게 지금 진행 중인 테스트 얘기인지, 최근
+      // 몇 분인지" 알 수 없다는 문의를 받았다(2026-08-25).
+      label: '주문 접수 TPS (최근 1분)',
       value: m ? displayValue(m.orderAcceptTps, 1) : '--',
       description: '목표 10,000건/초',
       color: '#3478f6',
     },
     {
-      label: '체결 TPS',
+      label: '체결 TPS (최근 1분)',
       value: m ? displayValue(m.executionTps, 1) : '--',
       description: '',
       color: '#2ed39a',
     },
     {
-      label: '처리 대기 주문',
+      label: '처리 대기 주문 (전체 누적)',
       value: m ? displayValue(m.pendingOrders) : '--',
       description: pendingOrdersTrend.value,
       color: '#ffb84d',
     },
     {
-      label: '전체 처리 p99',
+      label: '전체 처리 p99 (최근 5분)',
       value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
       description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '목표 500ms 이하',
       color: '#20c8e8',
     },
     {
-      label: '실행 중인 Pod',
+      label: '실행 중인 Pod (현재)',
       value: m ? displayValue(m.runningEnginePods) : '--',
       description: '매칭 엔진',
       color: '#9b7bff',
@@ -626,10 +630,6 @@ const flowNodesDef = [
   { key: 'recorder', x: 0.862, label: '기록기', sub: 'recorder', lane: 'trunk' },
   { key: 'mysql', x: 0.965, label: 'MySQL', sub: 'trade_order', lane: 'trunk' },
 ]
-const flowBranchLabels = [
-  { x: 0.44, lane: 'upper', text: '→ 매칭 엔진행' },
-  { x: 0.44, lane: 'lower', text: '→ 기록기 직접 구독' },
-]
 const FLOW_SVC_COLOR = { orderapi: '#4a90ff', matching: '#ffb84d', recorder: '#33e6a8' }
 const FLOW_SCALE_RANGE = { matching: { min: 2, max: 10 }, recorder: { min: 1, max: 10 } }
 const FLOW_BRANCH_START = 0.388
@@ -903,21 +903,10 @@ function drawFlowFrame() {
     ctx.shadowBlur = 0
   }
 
-  ctx.font = '500 10px -apple-system, BlinkMacSystemFont, sans-serif'
-  ctx.fillStyle = 'rgba(159,176,194,0.85)'
-  ctx.textAlign = 'left'
-  for (const bl of flowBranchLabels) {
-    const bx = bl.x * w
-    const by = cy + (flowLaneCenterFrac(bl.x, bl.lane) - 0.5) * 2 * laneSpan
-    const half = flowBandHalfFrac(bl.x, bl.lane, scale) * h
-    // 트렁크 분리 폭을 늘린 뒤(2026-08-25) 레플리카 수가 많아 통로가 두꺼울
-    // 때 이 라벨이 캔버스 위/아래 바깥으로 밀려 잘리는 문제가 실제로
-    // 재현됐다 — 캔버스 높이를 늘린 것과 별개로, 라벨 자체도 안전 여백
-    // 안쪽으로 clamp해서 어떤 조합에서도 안 잘리게 한다.
-    const rawTy = bl.lane === 'upper' ? by - half - 12 : by + half + 18
-    const ty = bl.lane === 'upper' ? Math.max(rawTy, 14) : Math.min(rawTy, h - 6)
-    ctx.fillText(bl.text, bx, ty)
-  }
+  // "→ 매칭 엔진행"/"→ 기록기 직접 구독" 화살표 라벨은 지웠다(2026-08-25) —
+  // 박스 자체가 이미 어디로 가는지("매칭 엔진"/"기록기") 보여줘서 중복이었고,
+  // 레플리카 수가 많아 통로가 두꺼울 때 캔버스 밖으로 밀려 잘리는 문제의
+  // 근본 원인이기도 했다.
 
   const okMap = flowNodeOk.value
   for (const nd of flowNodesDef) {
@@ -1285,9 +1274,11 @@ onBeforeUnmount(() => {
 .flow-canvas-wrap {
   position: relative;
   width: 100%;
-  /* 280px였을 때 트렁크 분리 폭을 늘린 뒤(2026-08-25) 라벨이 캔버스
-     위쪽 바깥으로 밀려 잘리는 걸 실측 — 절대 여백을 늘려서 여유를 둔다. */
-  height: 320px;
+  /* 320px는 화살표 라벨이 캔버스 밖으로 잘리는 걸 막으려고 늘렸던 값인데
+     (2026-08-25), 그 라벨 자체를 없애면서 더 이상 필요 없어졌고 — 대신
+     lower 레인(박스 없이 그냥 흐르기만 함)과 범례 사이에 빈 공간만
+     많이 남는다는 지적을 받아 다시 줄인다. */
+  height: 260px;
   margin-top: 10px;
   border-radius: 8px;
   overflow: hidden;
