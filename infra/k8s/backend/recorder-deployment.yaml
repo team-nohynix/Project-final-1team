@@ -115,3 +115,25 @@ spec:
   ports:
     - port: 8082
       targetPort: 8082
+---
+# orderapi-metrics와 같은 이유(위 주석 참고) — 그라파나가 up{service="recorder-metrics"}로
+# 물어서 스크레이프 전용 Service를 따로 둔다. 위 "recorder" Service(ALB 헬스체크 경로
+# 오버라이드가 걸려있음)는 그대로 둔다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: recorder-metrics
+  namespace: backend
+  labels:
+    app: recorder
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: recorder
+  ports:
+    - name: metrics
+      port: 8082
+      targetPort: 8082

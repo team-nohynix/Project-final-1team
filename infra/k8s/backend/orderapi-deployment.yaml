@@ -138,3 +138,26 @@ spec:
   ports:
     - port: 8081
       targetPort: 8081
+---
+# 그라파나 대시보드가 up{service="orderapi-metrics"}로 스크레이프 성공 여부를 묻는데
+# (matching-engine-metrics와 같은 이유), Ingress가 참조하는 위 "orderapi" Service의
+# 이름은 그대로 둔 채(건드리면 Ingress 백엔드까지 같이 손봐야 해서) 스크레이프
+# 전용으로 별도 Service를 둔다. 같은 포트/셀렉터라 트래픽 경로는 안 늘어난다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderapi-metrics
+  namespace: backend
+  labels:
+    app: orderapi
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8081"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: orderapi
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: 8081

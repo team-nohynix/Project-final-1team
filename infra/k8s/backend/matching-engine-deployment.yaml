@@ -125,6 +125,16 @@ metadata:
   namespace: backend
   labels:
     app: matching-engine
+  annotations:
+    # 이 annotation 3개가 없으면 monitoring-ec2/prometheus.yml.tpl의 k8s-services
+    # job이 이 Service를 아예 발견하지 못한다(relabel_configs가 prometheus_io_scrape
+    # annotation을 keep 조건으로 씀) — 위 name 수정과 같은 이유로 예전엔 손으로만
+    # 붙어있었던 것으로 보인다. 이게 없어서 그라파나 "매칭 엔진 상태" 패널이
+    # up{service="matching-engine-metrics"}에 데이터가 아예 없어 "장애"로 나오는 걸
+    # 보고 발견(2026-08-25, EKS 전체 destroy→apply 리허설 후 그라파나에서 실측).
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: /metrics
 spec:
   selector:
     app: matching-engine
