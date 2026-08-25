@@ -985,12 +985,7 @@ const resetMatchingEngineBook = async () => {
 
         <div class="form-field">
           <label>시세 수집 날짜</label>
-          <input
-            v-model="selectedDate"
-            type="date"
-            :max="todayDate"
-            :disabled="collectionStatus === 'collecting'"
-          />
+          <input v-model="selectedDate" type="date" class="date-input" :max="todayDate" :disabled="collectionStatus === 'collecting'" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
           <p class="date-hint">
             선택한 날짜의 KST 00:00부터 다음 날 KST 00:00까지 20개 마켓의 시세를 수집합니다.
           </p>
@@ -1756,5 +1751,9 @@ const resetMatchingEngineBook = async () => {
     flex-direction: column;
     align-items: stretch;
   }
+}
+input.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
 }
 </style>

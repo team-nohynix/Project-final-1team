@@ -226,7 +226,7 @@ function formatEventTime(e: StreamEvent) {
 
           <label>
             날짜 (KST 기준)
-            <input type="date" v-model="selectedDate" />
+            <input type="date" v-model="selectedDate" class="date-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
           </label>
 
           <button class="market-fetch-btn" :disabled="loading" @click="activeTab === 'batch' ? fetchBatch(selectedMarket, selectedDate) : fetchStream(selectedMarket, selectedDate)">
@@ -558,5 +558,9 @@ function formatEventTime(e: StreamEvent) {
 }
 @media (max-width: 900px) {
   .stream-summary-row { flex-direction: column; }
+}
+input.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
 }
 </style>
