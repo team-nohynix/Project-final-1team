@@ -1290,7 +1290,7 @@ const resetMatchingEngineBook = async () => {
     <section class="cleanup-section">
       <div class="cleanup-text">
         <h4>미종결 주문 일괄 정리</h4>
-        <p>과거 실행들이 남긴 접수/부분체결 상태 주문을 전부 취소합니다. 세션이 끝날 때마다 자동으로 그 실행 몫은 정리되지만, 그 이전에 쌓인 건 이 버튼으로 처리해야 합니다.</p>
+        <p>과거 세션이 남긴 미체결 주문을 전부 취소합니다.</p>
       </div>
       <button class="btn-dark" :disabled="cleanupLoading" @click="cleanupUnresolvedOrders">
         {{ cleanupLoading ? '정리 중...' : '일괄 정리' }}
@@ -1301,7 +1301,7 @@ const resetMatchingEngineBook = async () => {
     <section class="cleanup-section">
       <div class="cleanup-text">
         <h4>매칭엔진 호가창 잔량 지우기</h4>
-        <p>위 "일괄 정리"는 DB(recorder) 기준으로만 정리됩니다 — 매칭엔진이 그 취소를 못 받았거나 저장에 실패하면 매칭엔진 자신의 Redis 스냅샷과 각 파드 메모리에는 미체결 주문이 그대로 남을 수 있습니다. 이 버튼은 워터마크를 최신 오프셋으로 강제 이동시켜 과거 미체결 이력째로 완전히 비우고 매칭엔진을 재시작합니다(진행 중인 세션이 있으면 매칭이 잠시 끊깁니다). 페이퍼 트레이딩 환경 전용 — 실거래라면 절대 쓰면 안 되는 파괴적 동작입니다.</p>
+        <p>매칭엔진에 남은 미체결 주문을 강제로 비우고 재시작합니다. 진행 중인 세션은 잠시 끊깁니다. 페이퍼 트레이딩 전용 — 실거래에는 쓰지 마세요.</p>
       </div>
       <button class="btn-dark" :disabled="bookResetLoading" @click="resetMatchingEngineBook">
         {{ bookResetLoading ? '초기화 중...' : '잔량 지우기' }}
