@@ -99,7 +99,7 @@ const metricCards = computed(() => {
     {
       label: `주문 접수 TPS (${tpsWin})`,
       value: m ? displayValue(m.orderAcceptTps, 1) : '--',
-      description: '목표 10,000건/초',
+      description: '',
       color: '#3478f6',
     },
     {
@@ -649,7 +649,11 @@ const FLOW_MERGE_START = 0.813
 const FLOW_MERGE_END = 0.849
 
 const flowNodeOk = computed(() => ({
-  collector: traderRunning.value,
+  // 시세 수집기(collector)는 트레이더/리플레이 세션과 무관하게 항상 떠
+  // 있는 배치 서비스라(2026-08-25 실측), 세션 상태(traderRunning) 대신
+  // orderapi가 실제로 그 서비스에 도달 가능한지 확인한 결과(systemstatus.go의
+  // "시세 수집기" 컴포넌트)를 쓴다.
+  collector: flowUp('시세 수집기'),
   trader: traderRunning.value,
   orderapi: flowUp('주문 접수 API'),
   'orders-topic': flowUp('Kafka 브로커'),
@@ -890,9 +894,16 @@ function drawFlowFrame() {
     strokeBroken(lowerPts)
   }
 
+  // orderAcceptTps/executionTps는 유휴 상태일 때 "지난 실행 기준" 평균으로
+  // 대체된다(windowLabel 주석 참고) — 핵심 지표 카드에는 그게 0보다 유용하지만,
+  // 이 파티클 애니메이션은 "지금 실제로 흐르고 있는가"를 보여주는 용도라
+  // 지난 실행 평균으로 스폰하면 아무 작업도 안 도는데 트래픽이 흐르는 것처럼
+  // 보인다(2026-08-25, 사용자 리포트). tpsWindowSource==='realtime'일 때만
+  // (진행 중인 테스트가 있을 때만) 실제 값으로 스폰한다.
   const m = metrics.value
-  flowSpawnPair(m?.orderAcceptTps || 0, FLOW_SVC_COLOR.orderapi, 'both', w)
-  flowSpawnPair(m?.executionTps || 0, FLOW_SVC_COLOR.recorder, { x: 0.585 * w, lane: 'upper' }, w)
+  const isRealtime = m?.tpsWindowSource === 'realtime'
+  flowSpawnPair(isRealtime ? m?.orderAcceptTps || 0 : 0, FLOW_SVC_COLOR.orderapi, 'both', w)
+  flowSpawnPair(isRealtime ? m?.executionTps || 0 : 0, FLOW_SVC_COLOR.recorder, { x: 0.585 * w, lane: 'upper' }, w)
 
   for (let i = flowParticles.length - 1; i >= 0; i--) {
     const p = flowParticles[i]
@@ -953,37 +964,37 @@ function drawFlowFrame() {
     // 저장소라, 자기 노드 대신 매칭엔진 박스 오른쪽 위에 위성 점으로 붙임
     // (2026-08-24, "시스템 구성요소 상태" 패널을 없애고 여기로 통합).
     if (nd.key === 'matching') {
+      // 점이 박스 테두리 선(매칭엔진이 정상이면 초록, 이 점도 정상이면
+      // 초록)과 거의 겹치는 자리(bx+bw-2, by-2 — 테두리 선 바로 위)에 있어서
+      // 같은 색일 때 안 보이는 것처럼 눈에 안 띄던 문제(2026-08-25 지적) —
+      // 박스 모서리 바깥쪽으로 완전히 빼서 테두리 선과 안 겹치게 하고,
+      // 어두운 테두리도 더 두껍게 줘서 박스 색과 무관하게 항상 도드라지게 함.
       const redisOk = flowUp('Redis 캐시')
-      const rx = bx + bw - 2
-      const ry = by - 2
+      const rx = bx + bw + 3
+      const ry = by - 3
       ctx.beginPath()
       ctx.fillStyle = redisOk ? '#2ed39a' : '#ff5c7a'
-      ctx.arc(rx, ry, 3.4, 0, Math.PI * 2)
+      ctx.arc(rx, ry, 4, 0, Math.PI * 2)
       ctx.fill()
       ctx.strokeStyle = '#0a1420'
-      ctx.lineWidth = 1
+      ctx.lineWidth = 1.8
       ctx.stroke()
     }
   }
 
-  // 이 박스는 캔버스 높이(h)와 무관하게 항상 고정 픽셀 크기였다 — 흐름도
-  // 여백을 줄이려고 캔버스를 320→260px로 낮췄더니(2026-08-25) 트렁크 줄이
-  // 비례해서 위로 따라 올라오면서 이 박스 마지막 줄("Redis 캐시")과
-  // 겹치는 걸 실측했다. 캔버스 높이에 맞춰 다시 늘리는 대신, 이 박스 자체를
-  // 더 촘촘하게(74px→60px) 줄여서 어떤 캔버스 높이에서도 여유를 두게 한다.
+  // "레플리카: 매칭 X · 기록기 Y"는 아래 "클러스터 현황" 패널에 이미 있는
+  // 정보라 중복이었고, "Redis 캐시" 상태는 매칭엔진 박스 모서리의 점(바로
+  // 위에서 그림, 이번에 더 잘 보이게 고침)이 이미 보여주고 있어서 텍스트로
+  // 또 안 적어도 됨(2026-08-25 지적) — 이 박스엔 여기서만 볼 수 있는
+  // 실시간 TPS만 남긴다.
   ctx.fillStyle = 'rgba(10,20,32,0.6)'
-  ctx.fillRect(6, 6, 210, 60)
+  ctx.fillRect(6, 6, 150, 40)
   ctx.fillStyle = '#cfe6ff'
   ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.textAlign = 'left'
   ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 20)
   ctx.fillStyle = '#8ff5cf'
   ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 35)
-  ctx.fillStyle = '#9fb0c2'
-  ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
-  ctx.fillText(`레플리카: 매칭 ${Math.round(scale.matching)} · 기록기 ${Math.round(scale.recorder)}`, 14, 48)
-  ctx.fillStyle = flowUp('Redis 캐시') ? '#2ed39a' : '#ff5c7a'
-  ctx.fillText(`● Redis 캐시 (오더북 스냅샷)`, 14, 59)
 
   ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillStyle = '#9fb0c2'

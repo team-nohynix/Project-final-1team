@@ -25,6 +25,16 @@ const systemStatusCheckTimeout = 3 * time.Second
 // 옮기지 않는 한 안 바뀜).
 const matchingEngineMetricsURL = "http://matching-engine-metrics:9090/metrics"
 
+// collectorHealthURL은 시세 수집기(backend, collector 네임스페이스)의
+// GET /v1/markets/data를 순수 도달 가능성 확인 용도로 부릅니다 —
+// matchingEngineMetricsURL과 같은 패턴(원래 목적과 다른 엔드포인트를
+// "이게 응답하면 살아있다"로만 씀). date는 필수 파라미터지만 이 핸들러
+// 자체는 그 날짜의 실제 데이터를 조회하지 않고 URL만 조립하므로(backend/
+// server.go의 manifestHandler 참고) 형식만 맞는 아무 날짜나 써도 된다 —
+// 시세 수집기는 collector 네임스페이스(orderapi가 있는 backend와 다름)라
+// 크로스 네임스페이스 K8s DNS(<service>.<namespace>)로 부른다.
+const collectorHealthURL = "http://backend.collector:8080/v1/markets/data?date=2026-01-01"
+
 // componentStatus는 DashboardView "시스템 구성요소 상태" 패널 한 줄입니다.
 type componentStatus struct {
 	Name   string `json:"name"`
@@ -66,6 +76,12 @@ func systemStatusHandler(redisClient *redis.Client, kafkaDialer *kafka.Dialer, k
 			{Name: "매칭 엔진", Status: boolStatus(checkHTTPReachable(ctx, matchingEngineMetricsURL, recorderHTTPClient))},
 			{Name: "MySQL", Status: boolStatus(checkRecorderHealth(ctx, recorderURL, recorderHTTPClient))},
 			{Name: "Redis 캐시", Status: boolStatus(redisClient.Ping(ctx).Err() == nil)},
+			// 시세 수집기(collector)는 트레이더/리플레이 세션과 무관하게 항상 떠
+			// 있는 배치 서비스인데, 프론트가 예전엔 "트레이더 세션이 진행
+			// 중인가"를 대신 써서(별도 헬스체크가 없었음) 실제로는 정상 동작
+			// 중인데도 세션이 없으면 무조건 장애로 표시되는 문제가 있었다
+			// (2026-08-25 실측 — 실제로는 backend 파드가 계속 떠 있었음).
+			{Name: "시세 수집기", Status: boolStatus(checkHTTPReachable(ctx, collectorHealthURL, recorderHTTPClient))},
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
