@@ -424,7 +424,7 @@ function goToResults() {
 
         <div class="form-field">
           <label>재생 날짜</label>
-          <input v-model="selectedDate" type="date" />
+          <input v-model="selectedDate" type="date" class="date-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
         </div>
 
         <div class="form-field">
@@ -821,5 +821,11 @@ function goToResults() {
   body {
     min-width: 0;
   }
+}
+
+/* date input custom indicator */
+input.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
 }
 </style>
