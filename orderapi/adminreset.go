@@ -82,13 +82,22 @@ func resetMatchingEngineBookHandler(redisClient *redis.Client, deployments appsv
 			return
 		}
 
-		if err := waitForRolloutComplete(r.Context(), deployments, deploymentName, rolloutWaitTimeout); err != nil {
+		// 아래 두 단계(롤아웃 완료 대기 + 스냅샷 삭제)는 r.Context()가 아니라
+		// context.Background()로 돌립니다 — r.Context()를 그대로 쓰면 ALB/클라이언트
+		// 쪽 타임아웃이 rolloutWaitTimeout(90s)보다 먼저 끊길 때 대기가 "context
+		// canceled"로 조기 실패해 스냅샷 삭제를 건너뜁니다(2026-08-25, 실측 — 롤아웃
+		// 자체는 정상적으로 끝났는데도 핸들러가 먼저 포기해서 삭제가 안 됨). Release의
+		// Handoff가 genCtx 대신 context.Background()를 쓰는 것과 같은 이유입니다 —
+		// 클라이언트 연결이 끊겨도 서버 쪽 정리 작업 자체는 끝까지 마쳐야 합니다.
+		// 응답을 못 받은 클라이언트는 재시도하면 되지만, 응답은 받았는데 실제로는
+		// 안 지워진 상태보다는 이 쪽이 훨씬 안전합니다.
+		if err := waitForRolloutComplete(context.Background(), deployments, deploymentName, rolloutWaitTimeout); err != nil {
 			log.Printf("매칭엔진 호가창 잔량 초기화 — 재시작은 트리거됨, 완료 대기 실패(스냅샷 삭제 건너뜀): %v", err)
 			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "매칭엔진 재시작 완료를 기다리다 실패했습니다 — 스냅샷은 아직 안 지웠습니다. 파드 상태를 확인한 뒤 다시 시도하세요.")
 			return
 		}
 
-		deleted, err := deleteOrderbookSnapshots(r.Context(), redisClient)
+		deleted, err := deleteOrderbookSnapshots(context.Background(), redisClient)
 		if err != nil {
 			log.Printf("매칭엔진 호가창 잔량 초기화 실패 — 롤아웃은 끝났지만 스냅샷 삭제 실패: %v", err)
 			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "매칭엔진은 재시작됐지만 스냅샷 삭제에 실패했습니다 — 다시 시도하세요.")
