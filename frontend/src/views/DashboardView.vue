@@ -421,7 +421,7 @@ const droppedPoints = computed(() => pointsFor(seriesWithDropped.value, 'dropped
 function toHHMM(bucketStart) {
   const d = new Date(bucketStart)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Seoul' })
 }
 
 const chartLabels = computed(() => {
@@ -565,7 +565,11 @@ function formatKST(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '-'
-  return d.toLocaleString('ko-KR', { hour12: false })
+  // 'ko-KR'은 로케일(숫자/구두점 표기 방식)일 뿐 시간대가 아니다 — timeZone을
+  // 명시하지 않으면 브라우저의 시스템 시간대를 그대로 쓴다. 함수 이름이
+  // "KST"인 이상 뷰어의 로컬 설정과 무관하게 항상 Asia/Seoul로 강제해야
+  // 한다(2026-08-25, 실제 KST보다 9시간 밀려 표시되는 걸 실측으로 발견).
+  return d.toLocaleString('ko-KR', { hour12: false, timeZone: 'Asia/Seoul' })
 }
 
 // 최근 3개 실행을 한 줄로(2026-08-25 요청) — last-run/previous-run/

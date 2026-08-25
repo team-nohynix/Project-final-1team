@@ -157,8 +157,8 @@ func main() {
 	// orderBatcher)는 원래부터 인메모리 버퍼링이라 굳이 같이 안 묶어도 저렴하므로,
 	// RDS 배치 하나당 건별로 계속 Add합니다 — RDS 왕복 배칭과 S3 아카이브
 	// 배칭은 서로 다른 목적의, 독립적인 두 배치입니다(크기/주기도 다름).
-	go func() {
-		err := execReader.Run(ctx, func(ctx context.Context, evs []events.ExecutionEvent) error {
+	go runReaderWithRetry(ctx, "executions", func() error {
+		return execReader.Run(ctx, func(ctx context.Context, evs []events.ExecutionEvent) error {
 			for _, ev := range evs {
 				execBatcher.Add(ev)
 			}
@@ -173,29 +173,88 @@ func main() {
 			recorderExecutionTotal.Add(float64(applied))
 			return nil
 		})
-		log.Fatalf("executions 리더 종료: %v", err)
-	}()
+	})
 
-	go func() {
-		err := assignmentReader.Run(ctx, func(ctx context.Context, ev events.AssignmentEvent) error {
+	go runReaderWithRetry(ctx, "assignments", func() error {
+		return assignmentReader.Run(ctx, func(ctx context.Context, ev events.AssignmentEvent) error {
 			return store.ApplyAssignmentEvent(ctx, dbStore, ev)
 		})
-		log.Fatalf("assignments 리더 종료: %v", err)
-	}()
-
-	err = orderReader.Run(ctx, func(ctx context.Context, evs []events.OrderEvent) error {
-		for _, ev := range evs {
-			orderBatcher.Add(ev)
-		}
-		accepted, err := store.ApplyOrderEvents(ctx, dbStore, evs)
-		if err != nil {
-			return err
-		}
-		// execReader 콜백과 같은 이유로 성공했을 때만 늘립니다.
-		recorderOrderAcceptTotal.Add(float64(accepted))
-		return nil
 	})
-	log.Fatalf("orders 리더 종료: %v", err)
+
+	runReaderWithRetry(ctx, "orders", func() error {
+		return orderReader.Run(ctx, func(ctx context.Context, evs []events.OrderEvent) error {
+			for _, ev := range evs {
+				orderBatcher.Add(ev)
+			}
+			accepted, err := store.ApplyOrderEvents(ctx, dbStore, evs)
+			if err != nil {
+				return err
+			}
+			// execReader 콜백과 같은 이유로 성공했을 때만 늘립니다.
+			recorderOrderAcceptTotal.Add(float64(accepted))
+			return nil
+		})
+	})
+}
+
+// maxReaderRunFailures/readerRunRetry* — runReaderWithRetry가 리더(orders/
+// executions/assignments) 하나가 실패했을 때 곧장 log.Fatalf로 프로세스
+// 전체를 죽이지 않고 재시도하는 데 쓰는 백오프 파라미터입니다. 2026-08-25,
+// 80배속 세션 도중 "orders 오프셋 커밋 실패: use of closed network
+// connection"(일시적 Kafka 연결 끊김) 하나로 recorder 전체가 죽는 걸 라이브로
+// 확인 — matching/kafkaclient.GroupConsumer.Run이 리밸런스 에러를 fatal
+// 대신 재시도하도록 고친 것과 정확히 같은 클래스의 문제입니다. 배치
+// 재전달(재시도로 인한 중복 배치)은 이미 이 프로젝트의 기본 전제이자
+// 설계 원칙입니다(INSERT IGNORE/유니크 인덱스로 멱등 처리 — store/apply.go,
+// store/mysql.go 주석 참고) 이므로, 실패한 Run() 호출 전체를 다시 실행해도
+// 안전합니다.
+const (
+	maxReaderRunFailures      = 10
+	readerRunRetryBase        = 500 * time.Millisecond
+	readerRunRetryMaxWait     = 10 * time.Second
+	healthyRunResetsFailures  = 60 * time.Second
+)
+
+// runReaderWithRetry는 run(리더 하나의 전체 수명 주기, Run() 호출)이 에러를
+// 반환할 때마다 짧은 백오프 후 재시도합니다. ctx가 취소된 뒤(정상 종료)엔
+// run()이 무엇을 반환하든 재시도하지 않고 그대로 반환합니다 — 세 리더 모두
+// Run()이 정상 종료 시에도 항상 non-nil 에러를 반환하는 구조라서(orders_reader.go
+// 참고), "진짜 실패"와 "종료 중"을 구분하는 유일하게 신뢰할 수 있는 신호는
+// 이 함수가 들고 있는 ctx 자체의 취소 여부뿐입니다. 연속 실패가
+// maxReaderRunFailures를 넘으면 기존처럼 log.Fatalf로 프로세스를 종료해
+// K8s 재시작 안전망에 맡깁니다.
+func runReaderWithRetry(ctx context.Context, name string, run func() error) {
+	consecutiveFailures := 0
+	for {
+		startedAt := time.Now()
+		err := run()
+		if ctx.Err() != nil {
+			return
+		}
+		// run()이 충분히 오래(healthyRunResetsFailures) 살아있다가 실패했으면
+		// 그 이전 실패들과 무관한, 독립적인 새 문제로 보고 연속 실패 카운트를
+		// 리셋합니다 — 안 그러면 몇 시간에 한 번씩만 뜨문뜨문 발생하는 별개의
+		// 일시적 장애들이 누적돼, 실제로는 매번 잘 복구되고 있었는데도 언젠가
+		// maxReaderRunFailures를 넘겨 불필요하게 fatal 종료될 수 있습니다.
+		if time.Since(startedAt) >= healthyRunResetsFailures {
+			consecutiveFailures = 0
+		}
+		consecutiveFailures++
+		if consecutiveFailures >= maxReaderRunFailures {
+			log.Fatalf("%s 리더 종료 (%d회 연속 실패): %v", name, consecutiveFailures, err)
+		}
+		delay := readerRunRetryBase * time.Duration(consecutiveFailures)
+		if delay > readerRunRetryMaxWait {
+			delay = readerRunRetryMaxWait
+		}
+		log.Printf("%s 리더 실패 (%d/%d회 연속, %v 후 재시도): %v",
+			name, consecutiveFailures, maxReaderRunFailures, delay, err)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func runPeriodicFlush(ctx context.Context, b *archive.Batcher, interval time.Duration) {
