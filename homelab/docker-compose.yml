@@ -151,6 +151,11 @@ services:
       RECORDER_URL: "http://recorder:8082"
       PROMETHEUS_URL: "http://prometheus:9090"
       JOB_TRIGGER_URL: "http://job-trigger:9000/v1/jobs"
+      # Docker Compose엔 K8s Service 같은 다중 컨테이너 앞단 이름이 없어서
+      # matching-engine-1 하나를 대표로 가리킨다(systemstatus.go 참고, 얕은
+      # 헬스체크 용도라 어느 레플리카든 상관없음).
+      MATCHING_ENGINE_METRICS_URL: "http://matching-engine-1:9090/metrics"
+      COLLECTOR_HEALTH_URL: "http://backend:8080/v1/markets/data?date=2026-01-01"
     volumes:
       - orderapi-data:/app/orders
     ports:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,8 +23,10 @@ const systemStatusCheckTimeout = 3 * time.Second
 // 네임스페이스, infra/k8s/backend/matching-engine-deployment.yaml 참고)를
 // 클러스터 내부 DNS로 직접 부릅니다 — Ingress를 거치지 않는 파드↔파드 호출이라
 // matchingEngineNamespace 상수와 별개로 고정 문자열로 둡니다(다른 네임스페이스로
-// 옮기지 않는 한 안 바뀜).
-const matchingEngineMetricsURL = "http://matching-engine-metrics:9090/metrics"
+// 옮기지 않는 한 안 바뀜). MATCHING_ENGINE_METRICS_URL(2026-08-25, 홈서버
+// 이전)로 오버라이드 가능 — Docker Compose엔 K8s Service 같은 다중 파드
+// 앞단 이름이 없어서, 컨테이너 하나(예: matching-engine-1:9090)를 직접 가리켜야 함.
+var matchingEngineMetricsURL = envOrDefault("MATCHING_ENGINE_METRICS_URL", "http://matching-engine-metrics:9090/metrics")
 
 // collectorHealthURL은 시세 수집기(backend, collector 네임스페이스)의
 // GET /v1/markets/data를 순수 도달 가능성 확인 용도로 부릅니다 —
@@ -33,7 +36,16 @@ const matchingEngineMetricsURL = "http://matching-engine-metrics:9090/metrics"
 // server.go의 manifestHandler 참고) 형식만 맞는 아무 날짜나 써도 된다 —
 // 시세 수집기는 collector 네임스페이스(orderapi가 있는 backend와 다름)라
 // 크로스 네임스페이스 K8s DNS(<service>.<namespace>)로 부른다.
-const collectorHealthURL = "http://backend.collector:8080/v1/markets/data?date=2026-01-01"
+// COLLECTOR_HEALTH_URL(2026-08-25, 홈서버 이전)로 오버라이드 가능 — Docker
+// Compose엔 네임스페이스가 없어서 collector가 그냥 backend 서비스명 하나.
+var collectorHealthURL = envOrDefault("COLLECTOR_HEALTH_URL", "http://backend.collector:8080/v1/markets/data?date=2026-01-01")
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // componentStatus는 DashboardView "시스템 구성요소 상태" 패널 한 줄입니다.
 type componentStatus struct {
