@@ -296,7 +296,12 @@ data "aws_iam_policy_document" "sa_ai_trader_policy" {
     resources = [aws_s3_bucket.market_data.arn]
   }
   statement {
-    actions   = ["s3:PutObject"]
+    # 2026-08-25 실측: trader가 주문 기록을 저장할 때(orderstore/s3.go) 기존 파일을
+    # 먼저 GetObject로 읽어 병합한 뒤 PutObject로 다시 쓴다 — PutObject만 부여돼
+    # 있어서 GetObject가 계속 AccessDenied로 실패, 거의 모든 마켓에서 주문 기록
+    # 저장이 실패하고 있었다("PutObject(order-records 쓰기)"라고만 의도했던 게
+    # 실제로는 읽기도 필요했던 것). 80배속 세션 로그에서 라이브로 발견.
+    actions   = ["s3:GetObject", "s3:PutObject"]
     resources = ["${aws_s3_bucket.order_records.arn}/*"]
   }
   statement {
