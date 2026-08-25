@@ -680,7 +680,23 @@ function flowBandHalfFrac(xFrac, lane, scale) {
   const narrow = 0.045
   const wide = 0.135
   const svcKey = flowLaneServiceAt(xFrac, lane)
-  return narrow + (wide - narrow) * flowScaleFrac(scale[svcKey], svcKey)
+  const own = narrow + (wide - narrow) * flowScaleFrac(scale[svcKey], svcKey)
+  // 트렁크 구간(분기 전/병합 후, flowLaneBlend=0)에서는 upper/lower 둘 다
+  // cy에 겹쳐 그려지는데(flowLaneCenterFrac이 둘 다 0.5를 줌), 각자 다른
+  // 서비스 스케일(매칭 vs 기록기)을 그대로 쓰면 두께가 서로 달라서 —
+  // drawFlowFrame의 클램프(upper는 cy 아래쪽만, lower는 cy 위쪽만 그리게
+  // 자름)와 겹치면서 전체 트렁크 통로가 더 두꺼운 쪽(대개 매칭, 레플리카가
+  // 많음) 방향으로만 치우친 모양이 된다 — 트렁크 박스 4개(시세수집기~Orders
+  // 토픽)가 아래로 치우쳐 보이던 진짜 원인이었다(2026-08-25 실측, 매칭
+  // 캔버스 위쪽 절반만 채워지고 기록기 스케일이 작아 아래쪽은 거의 안
+  // 채워짐). blend가 0일 땐 두 서비스 중 더 두꺼운 쪽으로 맞춰 대칭
+  // 단일 통로처럼 보이게 하고, 완전히 갈라진 뒤(blend=1)엔 원래대로 각자의
+  // 서비스 스케일을 쓴다.
+  const otherKey = svcKey === 'matching' ? 'recorder' : 'matching'
+  const other = narrow + (wide - narrow) * flowScaleFrac(scale[otherKey], otherKey)
+  const shared = Math.max(own, other)
+  const blend = flowLaneBlend(xFrac)
+  return shared + (own - shared) * blend
 }
 function flowRoundRect(ctx, x, y, w, h, r) {
   ctx.beginPath()
