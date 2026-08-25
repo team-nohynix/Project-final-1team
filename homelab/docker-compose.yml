@@ -123,7 +123,11 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      APP_ENV: "prod" # "dev"/"prod" 둘 다 유효하지만, .env 파일 부재 경고를 정상으로 취급하려면 prod
+      # APP_ENV=dev — "dev"가 로컬 스토리지 폴백이 허용되는 모드다(backend/config/config.go
+      # 확인: prod는 S3_BUCKET을 강제 요구). 이름과 달리 "미완성"을 뜻하는 게
+      # 아니라 "로컬 파일시스템 스토리지 허용" 모드 — 계획 문서의 전제(로컬
+      # 개발 모드를 상시 운영으로 격상)와 정확히 부합.
+      APP_ENV: "dev"
     volumes:
       - backend-data:/app/data
 
