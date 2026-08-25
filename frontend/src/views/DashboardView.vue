@@ -1129,7 +1129,7 @@ onBeforeUnmount(() => {
 
     <section class="panel order-status-panel">
       <h3>주문 처리 현황</h3>
-      <p class="cluster-note">최근 10분간 접수된 주문의 상태별 건수입니다 — 핵심 지표의 "처리 대기 주문"(전체 누적)과는 집계 기간이 다릅니다.</p>
+      <p class="cluster-note">최근 10분간 접수된 주문의 상태별 건수입니다.</p>
       <div class="stat-grid stat-grid-4">
         <div v-for="card in orderStatusCards" :key="card.label">
           <span>{{ card.label }}</span>
@@ -1140,10 +1140,7 @@ onBeforeUnmount(() => {
 
     <section class="panel cluster-panel">
       <h3>클러스터 현황</h3>
-      <p class="cluster-note">
-        그라파나 team1-overview 대시보드와 같은 지표(Prometheus)입니다.
-        {{ clusterMetricsError ? ' — ' + clusterMetricsError : '' }}
-      </p>
+      <p v-if="clusterMetricsError" class="cluster-note">{{ clusterMetricsError }}</p>
       <div class="stat-grid stat-grid-6">
         <div v-for="card in clusterCards" :key="card.label">
           <span>{{ card.label }}</span>
