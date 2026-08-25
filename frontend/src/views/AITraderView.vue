@@ -95,6 +95,10 @@ function saveStateToSession() {
       // stop request state
       stopRequested: stopRequested.value,
       stopRequestInFlight: stopRequestInFlight.value,
+      // final summary retry state (2026-08-24)
+      finalSummaryFailed: finalSummaryFailed.value,
+        // stored run id for execution session (preserved across reloads)
+        storedRunId: storedRunId.value,
       // timestamp to help debugging
       savedAt: new Date().toISOString(),
     }
@@ -799,6 +803,17 @@ onMounted(async () => {
       executionError.value = stored.executionError ?? executionError.value
       previousRunId.value = stored.previousRunId ?? previousRunId.value
       awaitingNewRun.value = stored.awaitingNewRun ?? awaitingNewRun.value
+      // restore stored run id so Stop/re-polling resume correctly after reload
+      storedRunId.value = stored.storedRunId ?? storedRunId.value
+      // If execution was running when saved, resume polling to refresh status/results
+      if (executionStatus.value === 'running') {
+        try {
+          // poll once immediately to resume live updates
+          await pollLastRun()
+        } catch (e) {
+          // ignore poll errors on restore
+        }
+      }
       // stopRequested persistence
       stopRequested.value = stored.stopRequested ?? stopRequested.value
       stopRequestInFlight.value = stored.stopRequestInFlight ?? stopRequestInFlight.value
