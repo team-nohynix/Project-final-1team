@@ -104,6 +104,11 @@ const unfilledPercent = computed(() => {
   return Math.round((Number(summary.value?.unfilled ?? 0) / a) * 100)
 })
 
+// whether user may start a new replay: not polling and no IN_PROGRESS run visible
+const canStartReplay = computed(() => {
+  return !isPolling.value && runInfo.value?.status !== 'IN_PROGRESS'
+})
+
 // sessionStorage keys (separate from paper trading)
 const SS_PREFIX = 'replay_' // keep distinct
 const SS_KEYS = {
@@ -444,7 +449,8 @@ function goToResults() {
         </div>
 
         <div class="actions">
-          <button class="btn-primary" :disabled="isStarting || isPolling" @click="onStart">재생 시작</button>
+          <button class="btn-primary" :disabled="isStarting || isPolling || !canStartReplay" @click="onStart">재생 시작</button>
+          <div v-if="isPolling" style="margin-top:8px;color:#cfe6ff">이미 실행 중입니다 — 재생이 종료될 때까지 기다려주세요.</div>
           <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
           <button
             class="btn-stop"
