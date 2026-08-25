@@ -22,15 +22,19 @@ func NewLocalFileStorage(root string) Storage {
 	return &LocalFileStorage{root: root}
 }
 
-func (s *LocalFileStorage) Save(market string, start, end time.Time, orders []order.RecordedOrder) (string, error) {
+func (s *LocalFileStorage) Save(market string, start, end time.Time, orders []order.RecordedOrder, reset bool) (string, error) {
 	path := filepath.Join(s.root, filepath.FromSlash(objectKey(market, start, end)))
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return "", fmt.Errorf("디렉터리 생성 실패: %w", err)
 	}
 
-	combined, err := mergeWithExistingLocal(path, orders)
-	if err != nil {
-		return "", err
+	combined := orders
+	if !reset {
+		merged, err := mergeWithExistingLocal(path, orders)
+		if err != nil {
+			return "", err
+		}
+		combined = merged
 	}
 
 	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: combined}, "", "  ")

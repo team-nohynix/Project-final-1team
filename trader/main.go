@@ -214,32 +214,42 @@ func run() (err error) {
 	// 있다가 끝에 한 번에 저장하던 것이 실전에서 OOMKill을 냈습니다(2026-08-25).
 	// 이 고루틴이 주기적으로 각 마켓의 버퍼를 Drain(스냅샷 + 비우기)해서 그때그때
 	// storage에 흘려보내므로, 프로세스가 붙들고 있는 양은 "마지막 플러시 이후 쌓인
-	// 만큼"으로만 유지됩니다. orderstore.Storage.Save가 덮어쓰기가 아니라 병합이라
-	// 파일/오브젝트는 여전히 마켓당 하나 그대로입니다(replayengine 읽기 쪽 변경 불필요).
+	// 만큼"으로만 유지됩니다. 파일/오브젝트는 여전히 마켓당 하나 그대로입니다
+	// (replayengine 읽기 쪽 변경 불필요).
 	// ctx가 아니라 별도 stopFlush로 멈추는 이유: ctx는 wg.Wait() 직후 취소되는데,
 	// 그 시점에 남아있는 마지막 몫을 이 고루틴이 아니라 아래 finalFlush가 한 번 더
 	// 확실히 처리하게 하려면, 이 고루틴이 완전히 멈춘 뒤에 finalFlush를 불러야
 	// 합니다(같은 마켓에 대해 두 곳이 동시에 Drain하는 걸 피하기 위함).
 	//
-	// 간격을 너무 짧게 잡으면 안 되는 이유: orderstore.Storage.Save는 매번 기존
-	// 파일 전체를 읽어와 합치고 다시 쓰는 방식이라(위 Storage 주석 참고), 플러시
-	// 횟수가 늘어날수록 그때마다 다시 쓰는 파일 크기도 커져 총 I/O량이 플러시
+	// 간격을 너무 짧게 잡으면 안 되는 이유: orderstore.Storage.Save는 병합일 때
+	// 매번 기존 파일 전체를 읽어와 합치고 다시 쓰는 방식이라(위 Storage 주석 참고),
+	// 플러시 횟수가 늘어날수록 그때마다 다시 쓰는 파일 크기도 커져 총 I/O량이 플러시
 	// 횟수에 거의 비례해 불어납니다. 3분은 "메모리 상한을 실행 총량이 아니라
 	// 최대 몇 분치로 확실히 묶으면서" I/O 비용은 크게 늘리지 않는 절충값입니다.
+	//
+	// resetDone은 마켓별로 "이번 실행에서 이미 한 번 저장했는지"를 추적합니다 —
+	// 같은 날짜(-date)로 트레이더를 재실행했을 때 이전 실행의 기록과 섞이는 걸
+	// 막기 위해, 이번 실행의 첫 저장(reset=true)은 그 마켓의 기존 파일 내용을
+	// 버리고 덮어씁니다(orderstore.Storage 주석 참고 — 실전에서 여러 실행의 기록이
+	// 한 파일에 누적돼 replayengine 소요시간 추정이 76시간으로 부풀었던 사고
+	// 재발 방지). 이후 같은 실행 안의 플러시들만 병합(reset=false)합니다.
 	flushInterval := 3 * time.Minute
 	stopFlush := make(chan struct{})
 	flushDone := make(chan struct{})
+	resetDone := make(map[string]bool, len(manifest.Markets))
 	flushOnce := func() {
 		for _, entry := range manifest.Markets {
 			orders := recorder.Drain(entry.Market)
 			if len(orders) == 0 {
 				continue
 			}
-			path, err := orderStorage.Save(entry.Market, start, end, orders)
+			reset := !resetDone[entry.Market]
+			path, err := orderStorage.Save(entry.Market, start, end, orders, reset)
 			if err != nil {
 				log.Printf("[%s] 주문 기록 저장 실패: %v", entry.Market, err)
 				continue
 			}
+			resetDone[entry.Market] = true
 			log.Printf("[%s] 주문 기록 저장 완료 (%d건) -> %s", entry.Market, len(orders), path)
 		}
 	}

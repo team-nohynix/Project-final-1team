@@ -44,12 +44,16 @@ func NewS3Storage(bucket string) Storage {
 	return &S3Storage{bucket: bucket, client: s3.NewFromConfig(cfg)}
 }
 
-func (s *S3Storage) Save(market string, start, end time.Time, orders []order.RecordedOrder) (string, error) {
+func (s *S3Storage) Save(market string, start, end time.Time, orders []order.RecordedOrder, reset bool) (string, error) {
 	key := objectKey(market, start, end)
 
-	combined, err := s.mergeWithExisting(key, orders)
-	if err != nil {
-		return "", err
+	combined := orders
+	if !reset {
+		merged, err := s.mergeWithExisting(key, orders)
+		if err != nil {
+			return "", err
+		}
+		combined = merged
 	}
 
 	body, err := json.MarshalIndent(orderRecordFile{Market: market, Range: toRange(start, end), Orders: combined}, "", "  ")
