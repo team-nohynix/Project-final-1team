@@ -3,7 +3,12 @@ services:
     image: mysql:8.4
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${mysql_root_password}
+      # 반드시 큰따옴표로 감싼다 — random_password.mysql_root의 override_special에
+      # "#"가 포함돼있어서(mysql-ec2.tf), 비밀번호가 우연히 "#"로 시작하면
+      # 따옴표 없는 YAML 스칼라에서 그 뒤 전체가 주석 처리돼 값이 빈 문자열이
+      # 되고, MySQL 컨테이너가 "password option is not specified"로 계속
+      # 재시작한다(2026-08-25, EKS 전체 destroy→apply 리허설 중 실측).
+      MYSQL_ROOT_PASSWORD: "${mysql_root_password}"
       MYSQL_DATABASE: team1_truss
     ports:
       - "3306:3306"
