@@ -77,11 +77,26 @@ const (
 	marketLockTTL        = 15 * time.Second
 	marketLockRetryDelay = 100 * time.Millisecond
 	marketLockMaxWait    = 10 * time.Second
+
+	// marketLockRenewInterval — 2026-08-27, 락을 추가했는데도 검증 리플레이에서
+	// 중복 체결이 그대로 재현(147/103번 체결되는 두 건)돼 찾아낸 락 자체의 버그.
+	// TTL을 Acquire 시점에 한 번만 걸고 다시는 갱신하지 않았다 — 한 마켓을 실제로
+	// 담당하는 기간(다음 리밸런스까지, 보통 TTL 15초보다 훨씬 김)이 TTL을 넘기면
+	// 락이 "아직 이 인스턴스가 쓰고 있는데도" 조용히 만료되고, 그 사이 다른
+	// 인스턴스가 리밸런스로 같은 마켓을 배정받아 SETNX에 성공해버리면 — 이전
+	// 인스턴스는 (아직 자기 제너레이션이 끝난 걸 readLoop이 알아채기 전이라)
+	// 계속 Apply 중이고, 새 인스턴스도 동시에 Apply를 시작하는 진짜 동시-소유
+	// (split-brain) 창이 열린다. TTL을 마냥 늘리는 건 상한이 없어 무의미하므로,
+	// 표준적인 리스 갱신 패턴으로 고친다: 소유하는 동안 이 주기마다 "내가 아직
+	// 주인이면" TTL을 되돌려 놓는다 — TTL(15s)보다 충분히 짧아 갱신 사이 만료될
+	// 여지가 없다.
+	marketLockRenewInterval = 5 * time.Second
 )
 
 type marketRegistry struct {
 	mu               sync.Mutex
 	engines          map[string]*engine.Engine
+	renewStops       map[string]chan struct{} // market -> 리스 갱신 고루틴 종료 신호
 	producer         engine.ExecutionPublisher
 	store            engine.SnapshotStore
 	redisClient      *redis.Client
@@ -98,6 +113,7 @@ type marketRegistry struct {
 func newMarketRegistry(producer engine.ExecutionPublisher, store engine.SnapshotStore, redisClient *redis.Client, assignments *kafkaclient.AssignmentProducer, instanceID string) *marketRegistry {
 	return &marketRegistry{
 		engines:          make(map[string]*engine.Engine),
+		renewStops:       make(map[string]chan struct{}),
 		producer:         producer,
 		store:            store,
 		redisClient:      redisClient,
@@ -121,6 +137,49 @@ var releaseLockScript = redis.NewScript(`
 	end
 	return 0
 `)
+
+// renewLockScript는 "내가 아직 이 락의 주인일 때만" TTL을 되돌립니다 — 이미 다른
+// 인스턴스가 가져간 락의 TTL을 실수로 늘려주면(=상대의 소유권을 우리가 연장) 안
+// 되므로 GET+PEXPIRE를 releaseLockScript와 같은 이유로 Lua로 묶습니다.
+var renewLockScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		redis.call("PEXPIRE", KEYS[1], ARGV[2])
+		return 1
+	end
+	return 0
+`)
+
+// startLockRenewal은 이 마켓의 락을 marketLockRenewInterval마다 갱신하는 고루틴을
+// 백그라운드로 띄웁니다(Acquire 성공 직후 호출). stopCh가 닫히면(Release가 호출)
+// 멈춥니다. 갱신 시도 자체가 실패해도(일시적 Redis 오류) 조용히 다음 주기에 다시
+// 시도합니다 — 진짜 문제(락을 잃음)는 renewLockScript가 0을 돌려줄 때뿐이고, 그건
+// 이미 다른 인스턴스가 이 마켓을 가져갔다는 뜻이므로 요란하게 로그를 남기고
+// 갱신을 멈춥니다(더 갱신해봐야 이제 남의 락일 뿐입니다).
+func (r *marketRegistry) startLockRenewal(market string) chan struct{} {
+	stopCh := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(marketLockRenewInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				ok, err := renewLockScript.Run(context.Background(), r.redisClient,
+					[]string{marketLockKey(market)}, r.instanceID, marketLockTTL.Milliseconds()).Int64()
+				if err != nil {
+					log.Printf("마켓 락 갱신 실패, 다음 주기에 재시도 (market=%s): %v", market, err)
+					continue
+				}
+				if ok != 1 {
+					log.Printf("경고: 마켓 락 갱신 중 이미 다른 인스턴스가 이 마켓을 가져간 것으로 확인됨 (market=%s) — 갱신 중단", market)
+					return
+				}
+			}
+		}
+	}()
+	return stopCh
+}
 
 // acquireMarketLock은 이 마켓의 소유권을 Redis 락으로 직렬화합니다 — 이전 담당자가
 // 아직 락을 들고 있으면(Handoff 진행 중이거나, 리밸런스 타임아웃을 넘겨 코디네이터는
@@ -160,15 +219,19 @@ func (r *marketRegistry) Acquire(ctx context.Context, market string) (int64, err
 	if err := r.acquireMarketLock(ctx, market); err != nil {
 		return 0, err
 	}
+	stopRenewal := r.startLockRenewal(market)
+
 	e := engine.New(market, r.producer, r.store, r.snapshotEvery, r.snapshotInterval)
 	resumeFrom, err := e.Recover(ctx)
 	if err != nil {
+		close(stopRenewal)
 		r.releaseMarketLock(ctx, market)
 		return 0, fmt.Errorf("복구 실패: %w", err)
 	}
 
 	r.mu.Lock()
 	r.engines[market] = e
+	r.renewStops[market] = stopRenewal
 	r.mu.Unlock()
 
 	if err := r.assignments.PublishAssigned(ctx, market, r.instanceID); err != nil {
@@ -192,7 +255,15 @@ func (r *marketRegistry) Release(ctx context.Context, market string) error {
 	r.mu.Lock()
 	e, ok := r.engines[market]
 	delete(r.engines, market)
+	stopRenewal, hasStop := r.renewStops[market]
+	delete(r.renewStops, market)
 	r.mu.Unlock()
+	if hasStop {
+		// Handoff/락 해제보다 먼저 갱신을 멈춥니다 — 어느 쪽이든 이 인스턴스는
+		// 이 마켓을 더 이상 담당하지 않으므로(Handoff 실패 시에도 engines 맵에서
+		// 이미 지워짐, TTL로 자연 만료되는 게 맞음) 갱신을 계속할 이유가 없습니다.
+		close(stopRenewal)
+	}
 	if !ok {
 		return nil
 	}
