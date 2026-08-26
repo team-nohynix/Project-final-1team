@@ -81,6 +81,31 @@ func (s *RedisStore) Handoff(ctx context.Context, snap engine.Snapshot) error {
 	return s.writeNow(ctx, snap)
 }
 
+// writeSnapshotScript — 2026-08-27, marketLock(main.go)를 추가했는데도 정합성
+// 검사에서 중복 체결이 그대로 재현돼 찾아낸 진짜 원인 대응. Save(비동기, 마켓
+// 전체가 공유하는 하나의 큐+백그라운드 워커)와 Handoff(동기, 즉시 씀)가 같은
+// Redis 키에 쓰는데, 락은 Acquire/Release 순서만 지킬 뿐 이 큐 자체는 전혀
+// 보호하지 않습니다 — Handoff 직전에 이미 큐에 들어가 있던(아직 워커가 못 그린)
+// 오래된 Save가, Handoff가 최신 상태를 쓴 "뒤에" 워커에 의해 뒤늦게 처리되면
+// 그 오래된(=더 작은 offset) 스냅샷이 방금 쓴 최신 상태를 덮어씁니다. 다음
+// 인수자는 그 낡은 offset부터 다시 읽으므로, 이미 매칭됐던 주문들의 NEW
+// 이벤트를 다시 소비해 재매칭 — 그 결과가 중복 체결입니다. offset은 마켓당
+// 항상 단조증가하므로(Apply가 마켓별로 항상 순차 호출됨), "저장하려는 값의
+// offset이 지금 저장된 값보다 작으면 쓰지 않는다"는 조건부 쓰기 하나로 이
+// 경쟁을 근본적으로 막습니다 — Save/Handoff 어느 쪽이 실제로 나중에
+// 도착하든 상관없이, 항상 offset이 더 큰 쪽이 이깁니다.
+var writeSnapshotScript = redis.NewScript(`
+	local current = redis.call("GET", KEYS[1])
+	if current then
+		local ok, decoded = pcall(cjson.decode, current)
+		if ok and decoded.offset ~= nil and tonumber(decoded.offset) >= tonumber(ARGV[2]) then
+			return 0
+		end
+	end
+	redis.call("SET", KEYS[1], ARGV[1])
+	return 1
+`)
+
 func (s *RedisStore) writeNow(ctx context.Context, snap engine.Snapshot) error {
 	doc := snapshotDoc{
 		Market: snap.Market,
@@ -92,7 +117,7 @@ func (s *RedisStore) writeNow(ctx context.Context, snap engine.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	return s.client.Set(ctx, key(snap.Market), body, 0).Err()
+	return writeSnapshotScript.Run(ctx, s.client, []string{key(snap.Market)}, body, snap.Offset).Err()
 }
 
 // Load는 engine.SnapshotStore를 만족합니다 — 최초 실행이라 저장된 스냅샷이 없으면
