@@ -1,10 +1,6 @@
 package orderbook
 
-import (
-	"log"
-
-	"github.com/shopspring/decimal"
-)
+import "github.com/shopspring/decimal"
 
 // Apply는 incoming 주문을 반대편 호가와 매칭합니다(FR-06/FR-07). 가격-시간 우선 원칙에
 // 따라 각 가격 레벨의 맨 앞(가장 먼저 접수된) 주문부터 체결하고, 체결가는 항상 먼저
@@ -25,7 +21,6 @@ import (
 // 호출은 매칭도 편입도 하지 않고 완전히 무시한다.
 func (ob *OrderBook) Apply(incoming *Order) []Execution {
 	if _, exists := ob.elements[incoming.OrderID]; exists {
-		log.Printf("[진단] Apply 중복 방어 발동 (market=%s orderId=%s bookPtr=%p) — 매칭 건너뜀", ob.Market, incoming.OrderID, ob)
 		return nil
 	}
 	incoming.Price = normalizePrice(incoming.Price)
@@ -68,17 +63,6 @@ func (ob *OrderBook) matchIncoming(incoming *Order, oppositeSide Side, crosses f
 			fillQty := minDecimal(incoming.Quantity, resting.Quantity)
 			incoming.Quantity = incoming.Quantity.Sub(fillQty)
 			resting.Quantity = resting.Quantity.Sub(fillQty)
-
-			// **임시 진단 로깅(2026-08-27) — 다섯 번의 수정으로도 중복 체결이 계속
-			// 재현돼(38→10→24→20→946건, 오히려 악화) 원인을 코드 리뷰만으로 못
-			// 찾아서 실제 런타임 동작을 직접 관찰하기 위한 계측. resting 포인터
-			// 주소(%p)로 "같은 유령 노드가 반복 체결되는지" vs "다른 메커니즘인지"를
-			// 구분한다. 원인 확정되면 제거.
-			ob.matchCounts[resting.OrderID]++
-			if ob.matchCounts[resting.OrderID] == 5 || ob.matchCounts[resting.OrderID]%50 == 0 {
-				log.Printf("[진단] resting 반복 체결 감지 (market=%s orderId=%s ptr=%p 누적체결=%d 남은수량=%s incoming=%s)",
-					ob.Market, resting.OrderID, resting, ob.matchCounts[resting.OrderID], resting.Quantity, incoming.OrderID)
-			}
 
 			exec := Execution{Market: ob.Market, Price: resting.Price, Quantity: fillQty}
 			if incoming.Side == Buy {
