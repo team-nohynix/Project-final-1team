@@ -34,7 +34,13 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 //   차이로 프론트에서 직접 계산합니다 — replayengine은 429 등 Submit 실패를
 //   재시도 없이 스킵하므로(FR-18 재현성 유지 목적), 이 차이가 곧 스킵된 주문
 //   수입니다(recorder DB 조회가 필요 없음).
-const POLL_INTERVAL_MS = 10000
+// 2026-08-26: "실시간 처리 흐름" 캔버스를 제외한 나머지 데이터는 1초로
+// 새로고침한다. 이 값은 recorder GET /v1/metrics/dashboard의 Redis 캐시
+// 갱신 주기(10초, recorder/metrics.go)보다 짧아서 매 틱마다 항상 새로운
+// 값을 받는 건 아니지만(캐시가 갱신되기 전엔 같은 값이 반복됨), 그 자체는
+// Redis 캐시 조회라 가볍다 — 무거운 데이터 정합성 검사만 별도 주기로 뺐다
+// (INTEGRITY_POLL_INTERVAL_MS 주석 참고).
+const POLL_INTERVAL_MS = 1000
 
 const metrics = ref(null)
 const systemStatus = ref(null)
@@ -578,7 +584,14 @@ async function fetchPreviousRun2() {
   previousRun2Found.value = true
 }
 
+// refresh()가 1초마다 도는 것과 별개로, 한 번의 호출이 1초보다 오래 걸리면
+// (네트워크 지연 등) 다음 타이머 틱과 겹쳐 요청이 계속 쌓일 수 있다 — 이전
+// 호출이 아직 진행 중이면 이번 틱은 건너뛴다.
+let refreshInFlight = false
+
 async function refresh() {
+  if (refreshInFlight) return
+  refreshInFlight = true
   try {
     await Promise.all([
       fetchDashboardMetrics(),
@@ -602,15 +615,32 @@ async function refresh() {
     // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
     // 잠깐의 네트워크 실패로 화면이 전부 '--'로 깜빡이지 않게.
     loadError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    refreshInFlight = false
   }
+}
 
-  // 정합성 검사는 별도 에러 상태로 분리 — 이게 실패해도 위 지표/상태
-  // 패널까지 같이 흔들리면 안 됩니다.
+// 데이터 정합성 검사(GET /v1/orders/integrity)는 recorder/query.go가 Redis
+// 캐시 없이 매번 MySQL을 직접 훑는 무거운 쿼리다 — 실측 16.7초(2026-08-26,
+// REPLAY 1시간 구간 기준). 위 refresh()와 같은 주기로 돌리면(예전엔 10초)
+// 쿼리 자체가 그보다 오래 걸려 다음 호출과 계속 겹쳐 쌓이면서 RDS에 상시
+// 부하를 준다 — 과거 RDS CPU 포화 사고와 같은 패턴. 게다가 이 지표는 "가장
+// 최근 실행 결과"라 그 실행이 끝나기 전까진 값 자체가 안 바뀌므로, 자주
+// 다시 물어볼 이유도 없다. refresh()의 1초 주기와 분리해 훨씬 느린 별도
+// 타이머로 두고, 이전 호출이 안 끝났으면 겹쳐 쏘지 않는다.
+const INTEGRITY_POLL_INTERVAL_MS = 60000
+let integrityCheckInFlight = false
+
+async function pollIntegrityCheck() {
+  if (integrityCheckInFlight) return
+  integrityCheckInFlight = true
   try {
     await fetchIntegrityCheck()
   } catch (e) {
     integrityData.value = null
     integrityNote.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    integrityCheckInFlight = false
   }
 }
 
@@ -1118,10 +1148,13 @@ function stopFlowCanvas() {
 }
 
 let pollTimer = null
+let integrityPollTimer = null
 
 onMounted(() => {
   refresh()
   pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS)
+  pollIntegrityCheck()
+  integrityPollTimer = window.setInterval(pollIntegrityCheck, INTEGRITY_POLL_INTERVAL_MS)
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
   }, 1000)
@@ -1132,6 +1165,10 @@ onBeforeUnmount(() => {
   if (pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+  if (integrityPollTimer !== null) {
+    clearInterval(integrityPollTimer)
+    integrityPollTimer = null
   }
   if (tickTimer !== null) {
     clearInterval(tickTimer)
