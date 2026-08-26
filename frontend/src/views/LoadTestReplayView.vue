@@ -549,8 +549,8 @@ function goToResults() {
               <div class="preview-main">총 {{ preview.totalOrders.toLocaleString() }}건 재생 예정 · {{ preview.marketsWithRecords }}/{{ preview.marketsTotal }}개 마켓</div>
             </div>
             <div class="preview-line" style="margin-top:8px">
-              <div class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</div>
-              <div class="preview-value">{{ estimatedDurationDisplay }}</div>
+              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</span>
+              <span class="preview-value"> {{ estimatedDurationDisplay }}</span>
             </div>
           </div>
 
