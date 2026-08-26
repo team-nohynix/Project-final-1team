@@ -10,6 +10,9 @@ const speed = ref(60)
 
 // shardCount replaces pod selection: number of replay shards (1..20)
 const shardCount = ref(1)
+// optional time range within the selected date (HH:MM), empty => full day
+const startTime = ref('') // HH:MM, 비어있으면 제한 없음
+const endTime = ref('')   // HH:MM, 비어있으면 제한 없음
 
 // UI / state
 const precheckMessage = ref('')
@@ -115,6 +118,8 @@ const SS_KEYS = {
   selectedDate: SS_PREFIX + 'selectedDate',
   speed: SS_PREFIX + 'speed',
   shardCount: SS_PREFIX + 'shardCount',
+  startTime: SS_PREFIX + 'startTime',
+  endTime: SS_PREFIX + 'endTime',
   runInfo: SS_PREFIX + 'runInfo',
 }
 
@@ -123,6 +128,7 @@ const validate = () => {
   if (!selectedDate.value) return '재생할 날짜를 선택해주세요'
   const sc = Number(shardCount.value)
   if (!sc || Number.isNaN(sc) || sc < 1 || sc > 20) return '샤드 수는 1~20 사이여야 합니다'
+  if (startTime.value && endTime.value && startTime.value >= endTime.value) return '종료 시각은 시작 시각보다 늦어야 합니다'
   return ''
 }
 
@@ -148,6 +154,8 @@ function saveToSession() {
     sessionStorage.setItem(SS_KEYS.selectedDate, selectedDate.value)
     sessionStorage.setItem(SS_KEYS.speed, String(speed.value))
     sessionStorage.setItem(SS_KEYS.shardCount, String(shardCount.value))
+    sessionStorage.setItem(SS_KEYS.startTime, startTime.value)
+    sessionStorage.setItem(SS_KEYS.endTime, endTime.value)
     sessionStorage.setItem(SS_KEYS.runInfo, JSON.stringify(runInfo.value || null))
     // persist stop request state
     sessionStorage.setItem(SS_PREFIX + 'stopRequested', JSON.stringify(stopRequested.value))
@@ -165,6 +173,10 @@ function loadFromSession() {
     if (sp) speed.value = Number(sp)
     const sc = sessionStorage.getItem(SS_KEYS.shardCount)
     if (sc) shardCount.value = Number(sc)
+    const st = sessionStorage.getItem(SS_KEYS.startTime)
+    if (st) startTime.value = st
+    const et = sessionStorage.getItem(SS_KEYS.endTime)
+    if (et) endTime.value = et
     const ri = sessionStorage.getItem(SS_KEYS.runInfo)
     if (ri) {
       const parsed = JSON.parse(ri)
@@ -269,7 +281,10 @@ async function startReplay() {
     previousRunId.value = existingRunId
 
     // 2) POST start job
-    const body = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    const toKstMs = (timeStr: string) => selectedDate.value && timeStr ? new Date(`${selectedDate.value}T${timeStr}:00+09:00`).getTime() : 0
+    const body: any = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    if (startTime.value) body.fromTs = toKstMs(startTime.value)
+    if (endTime.value) body.toTs = toKstMs(endTime.value)
     const res = await fetch('/order-api/v1/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (res.status !== 202) {
       const txt = await res.text()
@@ -425,6 +440,16 @@ function goToResults() {
         <div class="form-field">
           <label>재생 날짜</label>
           <input v-model="selectedDate" type="date" class="date-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+        </div>
+
+        <div class="form-field">
+          <label>시작 / 종료 시각 (선택)</label>
+          <div style="display:flex; gap:8px; align-items:center">
+            <input v-model="startTime" type="time" />
+            <span style="color:#9fb0c2; font-size:13px">—</span>
+            <input v-model="endTime" type="time" />
+          </div>
+          <p class="date-hint">비워두면 전체 날짜 범위가 사용됩니다. (KST)</p>
         </div>
 
         <div class="form-field">
