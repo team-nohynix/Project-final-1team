@@ -726,35 +726,54 @@ func percentile99(samplesMs []float64) float64 {
 // COALESCE로 SUM을 감싼 이유: 그 구간에 해당하는 행이 하나도 없으면 MySQL의
 // SUM(CASE...)이 NULL을 반환하는데(COUNT(*)와 달리), 이걸 그대로 *int64로
 // Scan하면 실패합니다 — 0건일 때도 정상적으로 0을 받기 위함입니다.
+// 3개 쿼리(전체 집계/마켓별/사이드별)는 전부 같은 mode+submitted_at 범위를
+// 독립적으로 훑습니다 — IntegrityCheck(2026-08-27, 502/504 원인)와 같은 이유로
+// 순차 실행하면 전체 지연이 세 쿼리의 합이 됩니다. 리플레이 데이터가 쌓일수록
+// (실측: 최근 리플레이 하나로 120만 행) 순차 합산이 CloudFront 타임아웃에
+// 가까워지는 걸 라이브로 확인해 병렬로 바꿉니다(가장 느린 쿼리 하나로 상한).
 func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to time.Time) (OrderSummary, error) {
 	if to.IsZero() {
 		to = time.Now().UTC()
 	}
 
 	var s OrderSummary
-	err := q.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END), 0)
-		FROM trade_order
-		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
-	`, mode, from, to).Scan(&s.Accepted, &s.Filled, &s.Unfilled)
-	if err != nil {
-		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", err)
-	}
+	var errs [3]error
+	var wg sync.WaitGroup
+	wg.Add(3)
 
-	byMarket, err := q.orderSummaryByMarket(ctx, mode, from, to)
-	if err != nil {
-		return OrderSummary{}, err
-	}
-	s.ByMarket = byMarket
+	go func() {
+		defer wg.Done()
+		errs[0] = q.db.QueryRowContext(ctx, `
+			SELECT
+				COUNT(*),
+				COALESCE(SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END), 0)
+			FROM trade_order
+			WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		`, mode, from, to).Scan(&s.Accepted, &s.Filled, &s.Unfilled)
+	}()
 
-	bySide, err := q.orderSummaryBySide(ctx, mode, from, to)
-	if err != nil {
-		return OrderSummary{}, err
+	go func() {
+		defer wg.Done()
+		s.ByMarket, errs[1] = q.orderSummaryByMarket(ctx, mode, from, to)
+	}()
+
+	go func() {
+		defer wg.Done()
+		s.BySide, errs[2] = q.orderSummaryBySide(ctx, mode, from, to)
+	}()
+
+	wg.Wait()
+
+	if errs[0] != nil {
+		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", errs[0])
 	}
-	s.BySide = bySide
+	if errs[1] != nil {
+		return OrderSummary{}, errs[1]
+	}
+	if errs[2] != nil {
+		return OrderSummary{}, errs[2]
+	}
 
 	return s, nil
 }
