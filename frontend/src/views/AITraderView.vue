@@ -8,6 +8,8 @@ const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 // 재생 배속 옵션 (프론트에서 선택만 제공)
 const speed = ref(60)
+const startTime = ref('') // HH:MM, 비어있으면 제한 없음
+const endTime = ref('')   // HH:MM, 비어있으면 제한 없음
 
 // 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
 const formatDateYYYYMMDD = (date: Date) => {
@@ -76,6 +78,8 @@ function saveStateToSession() {
       scenarioName: scenarioName.value,
       selectedDate: selectedDate.value,
       speed: speed.value,
+      startTime: startTime.value,
+      endTime: endTime.value,
       // collection
       collectJobId: collectJobId.value,
       collectionStatus: collectionStatus.value,
@@ -767,7 +771,21 @@ const startPaperTrading = async () => {
     awaitingNewRun.value = true
     saveStateToSession()
 
-    const payload = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
+    const toKstMs = (timeStr: string) => {
+      if (!selectedDate.value || !timeStr) return 0
+      // Build an explicit KST time string and get epoch ms
+      try {
+        return new Date(`${selectedDate.value}T${timeStr}:00+09:00`).getTime()
+      } catch (e) {
+        return 0
+      }
+    }
+
+    const payload: any = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
+    const from = startTime.value ? toKstMs(startTime.value) : 0
+    const to = endTime.value ? toKstMs(endTime.value) : 0
+    if (from) payload.fromTs = from
+    if (to) payload.toTs = to
     const res = await fetch('/order-api/v1/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     })
@@ -847,6 +865,8 @@ onMounted(async () => {
       selectedDate.value = stored.selectedDate ?? selectedDate.value
       // removed totalOrders/generationTime from restore
       speed.value = stored.speed ?? speed.value
+      startTime.value = stored.startTime ?? startTime.value
+      endTime.value = stored.endTime ?? endTime.value
 
       // Execution state
       executionStatus.value = stored.executionStatus ?? executionStatus.value
@@ -989,6 +1009,16 @@ const resetMatchingEngineBook = async () => {
           <p class="date-hint">
             선택한 날짜의 KST 00:00부터 다음 날 KST 00:00까지 20개 마켓의 시세를 수집합니다.
           </p>
+        </div>
+
+        <div class="form-field">
+          <label>시간 범위 (선택)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="time" v-model="startTime" />
+            <span style="color:#9fb0c2">~</span>
+            <input type="time" v-model="endTime" />
+          </div>
+          <p class="date-hint">비워두면 하루 전체를 재생합니다. 지정하면 그 시간대 주문만 재생합니다. (KST)</p>
         </div>
 
         <div class="form-field">
