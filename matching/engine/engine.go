@@ -155,11 +155,6 @@ func (e *Engine) Recover(ctx context.Context) (resumeFromOffset int64, err error
 			e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Sell, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
 		}
 		e.lastOffset = snap.Offset
-		// 임시 진단 로깅(2026-08-27, orderbook/match.go 주석 참고) — book 인스턴스
-		// 포인터로 "이 담당 기간이 언제 시작했는지"를 남겨, 반복 체결이 한 담당
-		// 기간 안에서 벌어지는지 여러 기간에 걸쳐 벌어지는지 구분한다.
-		log.Printf("[진단] Recover 완료 (market=%s bookPtr=%p bids=%d asks=%d resumeFrom=%d)",
-			e.Market, e.book, len(snap.Bids), len(snap.Asks), snap.Offset+1)
 		return snap.Offset + 1, nil
 	}
 
@@ -202,17 +197,34 @@ func (e *Engine) BookSize() int {
 // 순차 소비하므로(consumer.go 참고) offset은 항상 엄격한 전순서다 — 정상 상황이면
 // ev.Offset은 항상 e.lastOffset+1이어야 하고, 그보다 작거나 같으면 무조건 이미
 // 처리된(=재전달된) 이벤트다. NEW/CANCEL 둘 다 여기서 한 번에 막는다.
+//
+// **publishCtx(context.Background()) — 2026-08-27, 위 두 방어선을 다 넣고도 실측
+// 로그로 확인한 진짜 근본 원인.** 이 함수가 받는 ctx는 호출부 체인을 따라가면
+// consumer.go의 genCtx(Kafka 리밸런스 제너레이션과 함께 취소됨)다. e.book.Apply(o)는
+// 이미 이 시점에 무조건, 되돌릴 수 없이 호가창을 변형한다(매칭 반영, 잔량 편입) —
+// 그 뒤에 나오는 발행은 "이미 일어난 일을 Kafka에 알리는" 절차일 뿐인데, 여기에
+// genCtx를 그대로 쓰면 발행 도중 리밸런스가 나는 순간 컨텍스트가 취소돼 발행이
+// "consumer group generation has ended"로 실패한다(실측 로그로 확인). offset은
+// 이 실패로 인해 전진하지 않으므로 이 NEW 이벤트는 "아직 처리 안 됨"으로 남는데,
+// 호가창은 이미 그 이벤트를 반영한 채로 Handoff에 실려 다음 인수자에게 넘어간다 —
+// 다음 인수자가 이 offset부터 재생하면 이미 호가창에 없는(완전히 소진돼 지워졌거나,
+// 이번엔 다른 상대와) 주문을 처음 들어온 것처럼 다시 매칭해 진짜 중복 체결이 난다.
+// Release/Handoff를 배경 컨텍스트로 부르는 것과 정확히 같은 이유(주석 참고)를 발행에도
+// 그대로 적용한다 — 이미 커밋된 book 변형의 결과를 Kafka에 알리는 절차는 리밸런스
+// 타이밍과 무관하게 반드시 끝까지 시도돼야 한다.
 func (e *Engine) Apply(ctx context.Context, ev OrderEvent) error {
 	if ev.Offset <= e.lastOffset {
-		log.Printf("[진단] offset 가드 발동 (market=%s orderId=%s evOffset=%d lastOffset=%d)", e.Market, ev.OrderID, ev.Offset, e.lastOffset)
+		log.Printf("경고: offset 가드 발동 — 재전달/오래된 이벤트 무시 (market=%s orderId=%s evOffset=%d lastOffset=%d)", e.Market, ev.OrderID, ev.Offset, e.lastOffset)
 		return nil
 	}
+
+	publishCtx := context.Background()
 
 	switch ev.Type {
 	case EventNew:
 		o := &orderbook.Order{OrderID: ev.OrderID, Market: ev.Market, Side: ev.Side, Price: ev.Price, Quantity: ev.Quantity, Offset: ev.Offset}
 		for _, exec := range e.book.Apply(o) {
-			if err := e.publisher.Publish(ctx, exec); err != nil {
+			if err := e.publisher.Publish(publishCtx, exec); err != nil {
 				return fmt.Errorf("체결 발행 실패 (market=%s): %w", e.Market, err)
 			}
 		}
@@ -256,8 +268,6 @@ func (e *Engine) snapshot(ctx context.Context) error {
 // 그러면 저장하는 도중에도 상태가 계속 바뀌어 스냅샷이 일관되지 않을 수 있습니다.
 func (e *Engine) Handoff(ctx context.Context) error {
 	snap := e.currentSnapshot()
-	log.Printf("[진단] Handoff 시작 (market=%s bookPtr=%p bids=%d asks=%d offset=%d)",
-		e.Market, e.book, len(snap.Bids), len(snap.Asks), snap.Offset)
 	if err := e.snapshots.Handoff(ctx, snap); err != nil {
 		return fmt.Errorf("핸드오프 스냅샷 저장 실패 (market=%s): %w", e.Market, err)
 	}

@@ -12,11 +12,13 @@ import (
 )
 
 type fakePublisher struct {
-	published []orderbook.Execution
-	failNext  bool
+	published  []orderbook.Execution
+	failNext   bool
+	lastCtxErr error // Publish가 실제로 받은 ctx의 Err() — 호출부 컨텍스트 취소 여부 검증용
 }
 
-func (p *fakePublisher) Publish(_ context.Context, exec orderbook.Execution) error {
+func (p *fakePublisher) Publish(ctx context.Context, exec orderbook.Execution) error {
+	p.lastCtxErr = ctx.Err()
 	if p.failNext {
 		p.failNext = false
 		return errors.New("발행 실패(테스트용)")
@@ -390,5 +392,38 @@ func TestApplyOlderOffsetAfterRecoveryIsIgnored(t *testing.T) {
 	bids, asks := e.book.Snapshot(10)
 	if len(bids) != 0 || len(asks) != 0 {
 		t.Errorf("오래된 offset 이벤트가 무시되지 않고 호가창에 반영됨: bids=%v asks=%v", bids, asks)
+	}
+}
+
+// TestApplyPublishSurvivesCallerContextCancellation — 2026-08-27 중복 체결 사고의
+// 진짜 근본 원인을 그대로 재현합니다: Apply에 넘어온 ctx가(리밸런스로 genCtx가
+// 취소되는 실제 상황을 흉내내) 이미 취소돼 있어도, book 변형은 이미 되돌릴 수 없이
+// 끝난 뒤이므로 체결 발행은 그 취소와 무관하게 시도돼야 합니다 — publisher가 실제로
+// 받은 ctx가 살아있는(Err()==nil) 별도 컨텍스트인지 직접 확인합니다.
+func TestApplyPublishSurvivesCallerContextCancellation(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	e := New("KRW-BTC", pub, store, 1000, time.Hour)
+
+	e.Apply(context.Background(), newOrderEvent(EventNew, "ask1", orderbook.Sell, "100", "1", 1))
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // 리밸런스로 genCtx가 이미 끝난 상황을 흉내냄
+
+	if err := e.Apply(cancelledCtx, newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 2)); err != nil {
+		t.Fatalf("호출부 ctx가 취소돼 있어도 Apply 자체는 성공해야 하는데: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("체결 발행 1건을 기대했으나 %d건 (취소된 ctx 때문에 발행이 막혔을 가능성)", len(pub.published))
+	}
+	if pub.lastCtxErr != nil {
+		t.Errorf("publisher가 받은 ctx.Err() = %v, want nil (호출부의 취소된 ctx를 그대로 전달하면 안 됨)", pub.lastCtxErr)
+	}
+
+	// offset이 정상적으로 전진했는지도 확인 — 발행이 성공했으니 이 이벤트는 "처리됨"으로
+	// 기록돼야 하고, 재전달돼도 offset 가드에 걸려 무시돼야 함.
+	e.Apply(context.Background(), newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 2))
+	if len(pub.published) != 1 {
+		t.Fatalf("offset이 전진했다면 재전달은 무시돼야 하는데 published=%d", len(pub.published))
 	}
 }
