@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"recorder/store"
@@ -846,56 +847,86 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 	// 500만행+) 옵티마이저 통계가 낡아 EXPLAIN 결과 셋 다 key=NULL(전체
 	// 테이블 스캔, type=ALL)을 골랐다 — 실측으로 20분짜리 리플레이 구간 하나
 	// 조회에 90초+ 걸려 CloudFront 타임아웃(502/504)까지 재현됨. FORCE INDEX로
-	// 강제하면 type=range로 바뀌어 즉시 응답한다(실측 확인). ANALYZE TABLE로
-	// 통계만 갱신해도 일시적으로는 고쳐지지만, 부하테스트가 반복돼 테이블이
-	// 계속 급격히 커지는 이 프로젝트 특성상 통계가 금방 다시 낡으므로
-	// FORCE INDEX가 더 안정적이다.
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM (
-			SELECT f.order_id FROM (
-				SELECT buy_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
-				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
-				UNION ALL
-				SELECT sell_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
-				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
-			) f
-			JOIN trade_order o ON o.order_id = f.order_id
-			GROUP BY f.order_id
-			-- MySQL은 HAVING에서 GROUP BY 대상이 아닌 조인 테이블 컬럼(o.quantity)을
-			-- 집계 없이 직접 참조하면 Error 1054 "Unknown column"을 냅니다(실측,
-			-- 2026-08-24) — o.order_id=f.order_id로 그룹 안에서 항상 같은 값이라
-			-- 실제로는 안전한데도 MySQL이 그 함수적 종속성을 HAVING에서는 안
-			-- 봐줍니다. MAX()로 감싸면(그룹 내 값이 전부 같으니 결과는 동일) 문법
-			-- 요건을 만족시키면서 의미는 그대로입니다.
-			HAVING SUM(f.quantity) > MAX(o.quantity)
-		) over_filled
-	`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", err)
+	// 강제하면 type=range로 바뀐다(실측 확인). ANALYZE TABLE로 통계만 갱신해도
+	// 일시적으로는 고쳐지지만, 부하테스트가 반복돼 테이블이 계속 급격히
+	// 커지는 이 프로젝트 특성상 통계가 금방 다시 낡으므로 FORCE INDEX가 더
+	// 안정적이다.
+	//
+	// **병렬 실행(같은 날 추가)** — FORCE INDEX를 적용해도 각 쿼리 자체가
+	// 여전히 수십만~수백만 행을 훑는 range 스캔이라 개별로 10~30초씩 걸릴 수
+	// 있는데, 예전처럼 세 쿼리를 순서대로 기다리면 그 셋을 더한 시간(최대
+	// 90초 안팎)이 CloudFront 오리진 타임아웃을 다시 넘길 수 있다(실측
+	// 재현). 세 쿼리는 서로 다른 걸 세는 독립된 읽기라 결과를 합칠 필요가
+	// 없으므로, clustermetrics.go의 clusterMetricsHandler와 같은 패턴으로
+	// goroutine 3개에 병렬로 보내 전체 시간을 "합"이 아니라 "가장 느린 것
+	// 하나"로 줄인다.
+	var wg sync.WaitGroup
+	var errs [3]error
+	run := func(i int, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = fn()
+		}()
 	}
+
+	run(0, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM (
+				SELECT f.order_id FROM (
+					SELECT buy_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
+					WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+					UNION ALL
+					SELECT sell_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
+					WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+				) f
+				JOIN trade_order o ON o.order_id = f.order_id
+				GROUP BY f.order_id
+				-- MySQL은 HAVING에서 GROUP BY 대상이 아닌 조인 테이블 컬럼(o.quantity)을
+				-- 집계 없이 직접 참조하면 Error 1054 "Unknown column"을 냅니다(실측,
+				-- 2026-08-24) — o.order_id=f.order_id로 그룹 안에서 항상 같은 값이라
+				-- 실제로는 안전한데도 MySQL이 그 함수적 종속성을 HAVING에서는 안
+				-- 봐줍니다. MAX()로 감싸면(그룹 내 값이 전부 같으니 결과는 동일) 문법
+				-- 요건을 만족시키면서 의미는 그대로입니다.
+				HAVING SUM(f.quantity) > MAX(o.quantity)
+			) over_filled
+		`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions)
+	})
 
 	// 순서 역전: 체결 시각이 그 체결에 관련된 주문(매수 또는 매도)의 접수
 	// 시각보다 이른 경우. LEFT JOIN이라 관련 주문을 못 찾은 쪽은 NULL이 되고,
 	// NULL과의 비교는 항상 FALSE라 그 execution은 이 조건으로는 안 걸립니다
 	// (주문 유실은 별개 지표에서 다룸).
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM execution e FORCE INDEX (idx_execution_executed_at)
-		LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
-		LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
-		WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
-			AND (e.executed_at < ob.submitted_at OR e.executed_at < os.submitted_at)
-	`, mode, from, to).Scan(&c.SequenceReversals); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("순서 역전 검사 실패: %w", err)
-	}
+	run(1, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM execution e FORCE INDEX (idx_execution_executed_at)
+			LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
+			LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
+			WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
+				AND (e.executed_at < ob.submitted_at OR e.executed_at < os.submitted_at)
+		`, mode, from, to).Scan(&c.SequenceReversals)
+	})
 
 	// 매수·매도 총량: 각 주문의 quantity-remaining_quantity(=실제 체결량) 합.
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
-		FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
-		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
-	`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", err)
+	run(2, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT
+				COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
+			FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
+			WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled)
+	})
+
+	wg.Wait()
+	if errs[0] != nil {
+		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", errs[0])
+	}
+	if errs[1] != nil {
+		return IntegrityCheck{}, fmt.Errorf("순서 역전 검사 실패: %w", errs[1])
+	}
+	if errs[2] != nil {
+		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", errs[2])
 	}
 
 	return c, nil
