@@ -467,9 +467,9 @@ function goToResults() {
         <div class="form-field">
           <label>시작 / 종료 시각 (선택)</label>
           <div style="display:flex; gap:8px; align-items:center">
-            <input v-model="startTime" type="time" />
+            <input v-model="startTime" type="time" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
             <span style="color:#9fb0c2; font-size:13px">—</span>
-            <input v-model="endTime" type="time" />
+            <input v-model="endTime" type="time" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
           </div>
           <p class="date-hint">비워두면 전체 날짜 범위가 사용됩니다. (KST)</p>
         </div>
@@ -648,6 +648,11 @@ function goToResults() {
   color: #e6eef8;
   border-radius: 8px;
   outline: none;
+}
+
+input.time-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
 }
 
 .speed-slider-row {

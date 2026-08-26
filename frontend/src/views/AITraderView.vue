@@ -1014,9 +1014,9 @@ const resetMatchingEngineBook = async () => {
         <div class="form-field">
           <label>시간 범위 (선택)</label>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="time" v-model="startTime" />
+            <input type="time" v-model="startTime" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
             <span style="color:#9fb0c2">~</span>
-            <input type="time" v-model="endTime" />
+            <input type="time" v-model="endTime" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
           </div>
           <p class="date-hint">비워두면 하루 전체를 재생합니다. 지정하면 그 시간대 주문만 재생합니다. (KST)</p>
         </div>
@@ -1783,6 +1783,11 @@ const resetMatchingEngineBook = async () => {
   }
 }
 input.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+}
+
+input.time-input::-webkit-calendar-picker-indicator {
   filter: invert(1);
   cursor: pointer;
 }
