@@ -55,7 +55,7 @@ spec:
             - name: RECORDER_URL
               value: "http://recorder:8082"
             - name: PROMETHEUS_URL
-              value: "http://prometheus.monitoring.svc.cluster.local:9090"
+              value: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
           volumeMounts:
             - name: order-records
               mountPath: /app/orders

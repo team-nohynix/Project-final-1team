@@ -141,6 +141,16 @@ type clusterMetricsResponse struct {
 // Prometheus 응답이 느려질 때 최악의 경우 쿼리 수 × 타임아웃(5초)까지
 // 늘어질 수 있어서(대시보드 로드를 막는 요인), 하나가 느려도 나머지는
 // 기다리지 않게 goroutine으로 동시에 보냅니다.
+//
+// 2026-08-26(홈서버 jhyang 브랜치 전용 수정, prod에는 반영 안 함): AWS의
+// exported_namespace 라벨은 "외부"(EC2) Prometheus가 K8s API 서버 프록시로
+// federated scrape할 때 이미 있던 namespace 라벨과 스크레이프 자체의
+// namespace 라벨이 충돌해서 kube-state-metrics 쪽 원래 라벨이 자동으로
+// exported_namespace로 리네임되는 현상이다. 홈서버는 Prometheus가 클러스터
+// "안"에서 직접 스크레이프해서 이 충돌이 없어 그냥 namespace 그대로 나온다
+// (2026-08-26 kube-prometheus-stack 실측 확인) — 아래 4곳을 그에 맞게 바꿈.
+// k8s-nodes-cadvisor job도 마찬가지로 외부 Prometheus 전용 job 이름이라
+// kube_node_info로 교체(더 직접적이고 실제로 존재하는 지표).
 func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := requestID(r)
@@ -164,11 +174,11 @@ func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 		}
 
 		run(0, func() (err error) {
-			activeNodes, err = prom.queryScalar(ctx, `count(up{job="k8s-nodes-cadvisor"} == 1)`)
+			activeNodes, err = prom.queryScalar(ctx, `count(kube_node_info)`)
 			return
 		})
 		run(1, func() (err error) {
-			runningPods, err = prom.queryScalar(ctx, `sum(kube_pod_status_phase{exported_namespace="backend", phase="Running"})`)
+			runningPods, err = prom.queryScalar(ctx, `sum(kube_pod_status_phase{namespace="backend", phase="Running"})`)
 			return
 		})
 		run(2, func() (err error) {
@@ -176,15 +186,15 @@ func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 			return
 		})
 		run(3, func() (err error) {
-			restartSamples, err = prom.query(ctx, `sum by (pod) (kube_pod_container_status_restarts_total{exported_namespace="backend"})`)
+			restartSamples, err = prom.query(ctx, `sum by (pod) (kube_pod_container_status_restarts_total{namespace="backend"})`)
 			return
 		})
 		run(4, func() (err error) {
-			matchingReplicas, err = prom.queryScalar(ctx, `kube_deployment_status_replicas{exported_namespace="backend", deployment="matching-engine"}`)
+			matchingReplicas, err = prom.queryScalar(ctx, `kube_deployment_status_replicas{namespace="backend", deployment="matching-engine"}`)
 			return
 		})
 		run(5, func() (err error) {
-			recorderReplicas, err = prom.queryScalar(ctx, `kube_deployment_status_replicas{exported_namespace="backend", deployment="recorder"}`)
+			recorderReplicas, err = prom.queryScalar(ctx, `kube_deployment_status_replicas{namespace="backend", deployment="recorder"}`)
 			return
 		})
 		run(6, func() (err error) {
