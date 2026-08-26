@@ -4,6 +4,8 @@
 # 별도 ALB로 만든다(이미 정상 동작 중인 orderapi Ingress를 IngressGroup으로
 # 합치면서 건드리는 리스크를 피함). 헬스체크는 backend에 전용 헬스엔드포인트가
 # 없어서, 인증 없이 200을 주는 실제 GET /v1/markets/data?date=... 를 쓴다.
+# security-groups는 infra/network의 output security_group_ids.alb_public 리터럴 복사본 —
+# network 모듈 재생성 시 반드시 같이 갱신(orderapi-ingress.yaml과 같은 이유, 2026-08-26).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -13,11 +15,11 @@ metadata:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/security-groups: sg-086268e229a37b879
+    alb.ingress.kubernetes.io/security-groups: sg-030ac623921fb4c59
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:727646470302:certificate/9085e196-5c96-4d18-9214-315810d902e6
-    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-northeast-2:727646470302:regional/webacl/team1-waf-alb/afea7efb-02c0-4262-a373-564cd1c565a4
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-northeast-2:727646470302:regional/webacl/team1-waf-alb/c6550785-ce47-4b4c-a4d2-1ab37f735f1b
     alb.ingress.kubernetes.io/healthcheck-path: /v1/markets/data?date=2026-08-11
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/success-codes: "200"
