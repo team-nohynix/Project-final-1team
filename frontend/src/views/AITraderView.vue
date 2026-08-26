@@ -1277,6 +1277,9 @@ const resetMatchingEngineBook = async () => {
                 </table>
               </div>
             </div>
+            <div v-else class="result-desc">
+              페이퍼 트레이딩 준비 중입니다 — 첫 집계가 나오면 표가 표시됩니다.
+            </div>
           </template>
 
           <template v-else-if="executionStatus === 'error'">
