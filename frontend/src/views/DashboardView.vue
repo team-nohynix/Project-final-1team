@@ -996,9 +996,9 @@ function drawFlowFrame() {
   ctx.fillStyle = '#cfe6ff'
   ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 20)
+  ctx.fillText(`● 접수 ${(isRealtime ? m?.orderAcceptTps || 0 : 0).toFixed(1)}/s`, 14, 20)
   ctx.fillStyle = '#8ff5cf'
-  ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 35)
+  ctx.fillText(`● 체결 ${(isRealtime ? m?.executionTps || 0 : 0).toFixed(1)}/s`, 14, 35)
 
   ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillStyle = '#9fb0c2'
