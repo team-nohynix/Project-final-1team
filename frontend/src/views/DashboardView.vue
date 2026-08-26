@@ -157,7 +157,7 @@ const metricCards = computed(() => {
       color: '#ffb84d',
     },
     {
-      label: `전체 처리 p99 (${e2eWin})`,
+      label: `주문 처리 p99 (${e2eWin})`,
       value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
       description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '',
       color: '#20c8e8',
