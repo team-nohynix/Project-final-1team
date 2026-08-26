@@ -317,3 +317,28 @@ func TestApplyDuplicateOrderIDAfterCancelIsIgnored(t *testing.T) {
 		t.Fatalf("Size()=%d, want 1 (중복 노드 없이 정확히 1건)", ob.Size())
 	}
 }
+
+// TestRestoreDuplicateOrderIDIsIgnored — 2026-08-27, Apply의 중복 방어로도 못 막던
+// 나머지 경로를 직접 검증합니다: 스냅샷 자체에 같은 OrderID가 두 번 들어있어도(유령
+// 노드가 이미 한 번 스냅샷에 실렸던 경우를 흉내냄) Restore가 그걸 그대로 두 번
+// 편입시키면 안 됩니다 — insertResting이 멱등해야 이 경로가 막힙니다.
+func TestRestoreDuplicateOrderIDIsIgnored(t *testing.T) {
+	ob := New("KRW-BTC")
+
+	ob.Restore(order("bid1", Buy, "100", "1", 1))
+	// 같은 OrderID, 다른 포인터(실제 스냅샷 역직렬화처럼 매번 새 *Order) — 유령
+	// 노드가 이미 스냅샷에 두 번 저장돼 있었다면 이런 모양으로 들어온다.
+	ob.Restore(order("bid1", Buy, "100", "1", 1))
+
+	if ob.Size() != 1 {
+		t.Fatalf("Size()=%d, want 1 (중복 Restore는 무시돼야 함)", ob.Size())
+	}
+
+	execs := ob.Apply(order("ask1", Sell, "100", "5", 2))
+	if len(execs) != 1 {
+		t.Fatalf("bid1과 딱 1번만 체결돼야 하는데 %d건 (유령 노드가 또 응함)", len(execs))
+	}
+	if !execs[0].Quantity.Equal(d("1")) {
+		t.Errorf("체결 수량 = %s, want 1", execs[0].Quantity)
+	}
+}
