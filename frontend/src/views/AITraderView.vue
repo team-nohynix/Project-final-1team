@@ -1223,7 +1223,7 @@ const resetMatchingEngineBook = async () => {
                  예전처럼 인디터미닛 바로 대체 표시한다. -->
             <template v-if="paperEstimatedTotalSeconds()">
               <div class="progress-info">
-                <span>재생 진행률 </span>
+                <span>재생 진행률</span>
                 <span class="progress-count">{{ paperProgressPercent() }}%<template v-if="paperRemainingDisplay()"> · {{ paperRemainingDisplay() }}</template></span>
               </div>
               <div class="progress-bar-track">
@@ -1713,6 +1713,7 @@ const resetMatchingEngineBook = async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
 }
 .progress-count {

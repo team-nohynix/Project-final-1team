@@ -12,7 +12,6 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"recorder/store"
@@ -33,16 +32,6 @@ const (
 	seriesWindow    = 10 * time.Minute
 	seriesBucket    = time.Minute
 	seriesBucketFmt = "2006-01-02T15:04:00Z" // 분 단위로 잘라 표시(초는 항상 00)
-
-	// mergeSubmittedAt(예전 이름 mergeMaxExecutedAt 시절부터)이 한 번의
-	// IN(...) 쿼리에 담는 최대 주문 ID 개수. MySQL의 플레이스홀더 개수
-	// 제한(65,535)을 밑돌면서도 여유를 크게 남긴 값 — p99Window(5분) 동안의
-	// 체결에 관련된 주문 수가 이 한도를 넘으면 예전엔 그대로 65,535개 한도를
-	// 넘겨 "Error 1390: Prepared statement contains too many placeholders"로
-	// 대시보드 지표 조회 전체가 실패했다(2026-08-25, 초당 240건 넘는
-	// 부하테스트 도중 실제로 5분 창에 6만 건 넘게 쌓여서 재현). 청크로 나눠
-	// 여러 번 조회하면 이 한도와 무관해진다.
-	maxExecutedAtChunkSize = 5000
 
 	// ordersByStatusWindow은 OrdersByStatus 전용 창입니다(seriesWindow과
 	// 별개). 2026-08-21에 "세션 전체 누적처럼 보이게" 24시간으로 늘렸다가
@@ -486,53 +475,66 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	}
 	m.OrdersByStatus = statusByStatus
 
-	// E2E P99(taker 기준, 2026-08-26 재설계): 최근 p99Window 안에 일어난
-	// 체결(execution)마다 GREATEST(매수 접수 시각, 매도 접수 시각) → executed_at
-	// 구간을 표본으로 삼는다 — DashboardMetrics 타입 주석 참고. "체결"을
-	// 표본 단위로 삼으므로(예전처럼 "주문" 단위가 아님) 표본 하나당 관련
-	// 주문이 최대 둘(매수/매도)뿐이라 taker/maker를 섞을 일이 없다.
+	// E2E P99(taker 기준, 2026-08-26 재설계, 같은 날 두 번째 개정): 최근
+	// p99Window 안에 일어난 체결(execution)마다 GREATEST(매수 접수 시각,
+	// 매도 접수 시각) → executed_at 구간을 표본으로 삼는다 — DashboardMetrics
+	// 타입 주석 참고. "체결"을 표본 단위로 삼으므로(예전처럼 "주문" 단위가
+	// 아님) 표본 하나당 관련 주문이 최대 둘(매수/매도)뿐이라 taker/maker를
+	// 섞을 일이 없다.
 	//
-	// execution.executed_at을 시간창으로 직접 거르는 것 자체는 저렴하다
-	// (idx_execution_executed_at, 바로 위 체결 TPS 쿼리와 동일한 컬럼·조건).
-	// 예전 코드가 피했던 문제는 "OR-JOIN"이었지("trade_order o JOIN execution e
-	// ON (e.buy_order_id = o.order_id OR e.sell_order_id = o.order_id)"가
-	// idx_execution_buy_order/idx_execution_sell_order 어느 쪽도 못 타고
-	// execution 전체(500만행+)를 스캔했다, 2026-08-20 EXPLAIN으로
-	// rows:5,063,699 확인) — execution을 시간으로만 거르고, 거기 관련된
-	// 주문들의 submitted_at을 trade_order PK로 별도 배치 조회하면 JOIN 자체가
-	// 없어 그 문제를 재현하지 않는다. window가 있으면(위 TPS와 같은 이유)
-	// 최근 p99Window 대신 그 [From,To) 구간 전체의 체결을 표본으로 삼는다.
+	// **두 번째 개정 이유**: 최초 재설계는 "execution을 시간으로 거른 뒤,
+	// 관련 주문들의 submitted_at을 trade_order PK로 별도 배치(IN 절, 최대
+	// 5000개씩 청크) 조회"하는 2단계 방식이었다 — OR-JOIN("trade_order o
+	// JOIN execution e ON (e.buy_order_id = o.order_id OR e.sell_order_id =
+	// o.order_id)"가 execution 전체(500만행+)를 스캔했던 사고, 2026-08-20
+	// EXPLAIN으로 rows:5,063,699 확인)을 피하려던 것이었다. 그런데 실측 부하
+	// 시험(2026-08-26, 초당 백여 건대 체결)에서 5분 창에 관련 주문이 수만~
+	// 수십만 개까지 쌓이면서, 청크 하나당 왕복 하나씩(최대 5000개/청크) 수십
+	// 번 왕복이 필요해졌고, 그 누적 지연이 recorder-api의 요청 컨텍스트
+	// 타임아웃(CloudFront 오리진 응답 한계)을 넘겨 "context canceled"로
+	// 대시보드 지표 조회 자체가 반복 실패했다(대시보드가 멈춘 것처럼 보였지만
+	// 실제 주문 처리/취소는 정상 진행 중이었음 — DB 직접 조회로 확인).
+	//
+	// 고친 방법: OR가 아니라 buy_order_id/sell_order_id 각각에 대한 별도
+	// INNER JOIN 조건(둘 다 trade_order.order_id PK와의 단순 동등 비교)으로
+	// 바꿔 왕복을 하나로 합쳤다 — OR-JOIN과 달리 이건 각 JOIN이 독립적인 PK
+	// 룩업이라 인덱스를 정상적으로 탄다(2026-08-20 사고의 원인이었던 "OR라서
+	// 인덱스를 못 탄다"는 이 구조엔 해당하지 않음). 한쪽 주문이 아직
+	// trade_order에 안 들어와 있으면(독립 리더 레이스, recorder/store/
+	// apply.go의 ResolveMode가 다루는 것과 같은 상황) INNER JOIN이 그 행을
+	// 자연스럽게 제외한다 — 예전의 수동 skip과 동일한 효과.
 	var execRows *sql.Rows
 	var err error
+	const e2eJoinSelect = `
+		SELECT e.executed_at, ob.submitted_at, os.submitted_at
+		FROM execution e
+		JOIN trade_order ob ON ob.order_id = e.buy_order_id
+		JOIN trade_order os ON os.order_id = e.sell_order_id
+	`
 	if window != nil {
-		execRows, err = q.db.QueryContext(ctx, `
-			SELECT buy_order_id, sell_order_id, executed_at FROM execution
-			WHERE executed_at >= ? AND executed_at < ?
-		`, window.From, window.To)
+		execRows, err = q.db.QueryContext(ctx, e2eJoinSelect+`WHERE e.executed_at >= ? AND e.executed_at < ?`,
+			window.From, window.To)
 	} else {
-		execRows, err = q.db.QueryContext(ctx, `
-			SELECT buy_order_id, sell_order_id, executed_at FROM execution
-			WHERE executed_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
-		`, int(p99Window.Minutes()))
+		// DB 서버 시각 기준(UTC_TIMESTAMP())으로 계산 — 앱 파드 시계와의 편차
+		// 위험을 피하려고 예전과 마찬가지로 SQL 쪽에서 "지금"을 구한다.
+		execRows, err = q.db.QueryContext(ctx, e2eJoinSelect+`WHERE e.executed_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE`,
+			int(p99Window.Minutes()))
 	}
 	if err != nil {
 		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 	}
-	type e2eExecSample struct {
-		buyOrderID, sellOrderID string
-		executedAt              time.Time
-	}
-	var execSamples []e2eExecSample
-	orderIDSet := make(map[string]struct{})
+	var latenciesMs []float64
 	for execRows.Next() {
-		var s e2eExecSample
-		if err := execRows.Scan(&s.buyOrderID, &s.sellOrderID, &s.executedAt); err != nil {
+		var executedAt, buySub, sellSub time.Time
+		if err := execRows.Scan(&executedAt, &buySub, &sellSub); err != nil {
 			execRows.Close()
 			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 		}
-		execSamples = append(execSamples, s)
-		orderIDSet[s.buyOrderID] = struct{}{}
-		orderIDSet[s.sellOrderID] = struct{}{}
+		taker := buySub
+		if sellSub.After(taker) {
+			taker = sellSub
+		}
+		latenciesMs = append(latenciesMs, float64(executedAt.Sub(taker).Microseconds())/1000.0)
 	}
 	if err := execRows.Err(); err != nil {
 		execRows.Close()
@@ -540,32 +542,6 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	}
 	execRows.Close()
 
-	orderIDs := make([]string, 0, len(orderIDSet))
-	for id := range orderIDSet {
-		orderIDs = append(orderIDs, id)
-	}
-	submittedAt := make(map[string]time.Time, len(orderIDs))
-	if err := q.mergeSubmittedAt(ctx, orderIDs, submittedAt); err != nil {
-		return DashboardMetrics{}, err
-	}
-
-	var latenciesMs []float64
-	for _, s := range execSamples {
-		buySub, buyOk := submittedAt[s.buyOrderID]
-		sellSub, sellOk := submittedAt[s.sellOrderID]
-		if !buyOk || !sellOk {
-			// 독립 리더 레이스 등으로 한쪽 주문이 아직 trade_order에 없으면
-			// (recorder/store/apply.go의 ResolveMode가 다루는 것과 같은 상황)
-			// taker를 판별할 기준이 없으니 이 표본은 건너뛴다 — 정합성 검사와
-			// 달리 여기선 표본 하나가 줄어들 뿐이라 심각하지 않다.
-			continue
-		}
-		taker := buySub
-		if sellSub.After(taker) {
-			taker = sellSub
-		}
-		latenciesMs = append(latenciesMs, float64(s.executedAt.Sub(taker).Microseconds())/1000.0)
-	}
 	m.E2EP99Ms = percentile99(latenciesMs)
 	m.E2EP99SampleCount = len(latenciesMs)
 
@@ -582,48 +558,6 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	m.Series = series
 
 	return m, nil
-}
-
-// mergeSubmittedAt은 orderIDs에 해당하는 trade_order.submitted_at을
-// 배치로 조회해 out에 채웁니다. order_id가 PK라 각 청크는 인덱스(PK) 탐색
-// 하나로 저렴합니다 — IN 절 하나에 너무 많은 값을 담지 않도록 예전
-// mergeMaxExecutedAt과 같은 이유로 maxExecutedAtChunkSize씩 나눠 호출합니다.
-func (q *MySQLQuerier) mergeSubmittedAt(ctx context.Context, orderIDs []string, out map[string]time.Time) error {
-	for start := 0; start < len(orderIDs); start += maxExecutedAtChunkSize {
-		end := min(start+maxExecutedAtChunkSize, len(orderIDs))
-		if err := q.mergeSubmittedAtChunk(ctx, orderIDs[start:end], out); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (q *MySQLQuerier) mergeSubmittedAtChunk(ctx context.Context, orderIDs []string, out map[string]time.Time) error {
-	if len(orderIDs) == 0 {
-		return nil
-	}
-	placeholders := strings.Repeat("?,", len(orderIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(orderIDs))
-	for i, id := range orderIDs {
-		args[i] = id
-	}
-	rows, err := q.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT order_id, submitted_at FROM trade_order WHERE order_id IN (%s)`, placeholders,
-	), args...)
-	if err != nil {
-		return fmt.Errorf("E2E 지연시간(submitted_at) 조회 실패: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var t time.Time
-		if err := rows.Scan(&id, &t); err != nil {
-			return fmt.Errorf("E2E 지연시간(submitted_at) 조회 실패: %w", err)
-		}
-		out[id] = t
-	}
-	return rows.Err()
 }
 
 // metricsSeries는 최근 seriesWindow(10분)를 seriesBucket(1분) 단위로 잘라

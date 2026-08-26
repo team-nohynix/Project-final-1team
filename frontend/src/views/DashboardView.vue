@@ -1302,7 +1302,7 @@ onBeforeUnmount(() => {
       <div v-if="autoscalingBars.length" class="autoscaling-bars">
         <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
           <div class="autoscaling-bar-track">
-            <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
+            <div class="autoscaling-bar-value" :class="{ 'is-covered': bar.percent >= 70 }">{{ displayValue(bar.current) }}</div>
             <div class="autoscaling-bar-fill" :class="`bar-${bar.key}`" :style="{ height: bar.percent + '%' }"></div>
           </div>
           <div class="autoscaling-bar-label">{{ bar.label }}<template v-if="bar.maxLabel"> ({{ bar.maxLabel }})</template></div>
@@ -1905,6 +1905,15 @@ onBeforeUnmount(() => {
   font-weight: 700;
   color: #2ed39a;
   z-index: 1;
+  transition: color 0.3s ease;
+}
+
+/* 채움 막대가 숫자 위치까지 차오르면(기본 텍스트 색과 막대 색이 비슷해
+   숫자가 안 보이던 문제, 2026-08-26 실측 제보) 흰색으로 바꿔 대비를
+   유지한다 — 막대 높이(top:8px 기준 텍스트 영역)와 겹치기 시작하는
+   지점을 percent>=70으로 근사했다. */
+.autoscaling-bar-value.is-covered {
+  color: #ffffff;
 }
 
 .autoscaling-bar-track {
