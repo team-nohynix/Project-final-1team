@@ -4,6 +4,7 @@ package orderbook
 
 import (
 	"container/list"
+	"log"
 	"sort"
 
 	"github.com/shopspring/decimal"
@@ -65,15 +66,19 @@ type OrderBook struct {
 	askPrices []decimal.Decimal // 활성 매도가만, 오름차순(낮은 가격이 앞)
 
 	elements map[string]*list.Element // orderID -> 그 주문이 들어있는 리스트 원소 (O(1) 취소)
+
+	// matchCounts — 2026-08-27 임시 진단용(match.go 주석 참고). 원인 확정되면 제거.
+	matchCounts map[string]int
 }
 
 // New는 빈 호가창을 만듭니다.
 func New(market string) *OrderBook {
 	return &OrderBook{
-		Market:    market,
-		bidLevels: make(map[string]*priceLevel),
-		askLevels: make(map[string]*priceLevel),
-		elements:  make(map[string]*list.Element),
+		Market:      market,
+		bidLevels:   make(map[string]*priceLevel),
+		askLevels:   make(map[string]*priceLevel),
+		elements:    make(map[string]*list.Element),
+		matchCounts: make(map[string]int),
 	}
 }
 
@@ -119,6 +124,7 @@ func (ob *OrderBook) levelsFor(side Side) map[string]*priceLevel {
 // 같은 안전망을 갖게 한다 — 이미 있는 OrderID면 조용히 무시.
 func (ob *OrderBook) insertResting(o *Order) {
 	if _, exists := ob.elements[o.OrderID]; exists {
+		log.Printf("[진단] insertResting 중복 방어 발동 (market=%s orderId=%s bookPtr=%p)", ob.Market, o.OrderID, ob)
 		return
 	}
 
