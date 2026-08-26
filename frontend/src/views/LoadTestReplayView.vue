@@ -378,7 +378,17 @@ async function stopReplay() {
   }
 }
 
+// pollLastRun은 setInterval(3초)로 불립니다 — 이 안의 fetchRecorderSummary가
+// DB 부하가 커지면 몇 분씩 걸릴 수 있는데, 가드 없이는 매 3초마다 이전 호출이
+// 안 끝난 채로 새 호출이 또 쌓여서 recorder MySQL에 같은 집계 쿼리가 수십 개
+// 동시에 몰리는 사고로 이어진다(2026-08-26 실측 — SHOW PROCESSLIST로 같은
+// orderSummaryByMarket 쿼리가 40개 넘게 겹쳐 실행 중인 것 확인, 이게
+// "집계 조회 실패 500/504" 원인이었음). DashboardView.vue의
+// refreshInFlight/integrityCheckInFlight와 같은 패턴.
+let pollInFlight = false
 async function pollLastRun() {
+  if (pollInFlight) return
+  pollInFlight = true
   try {
     const res = await fetchLastRun()
     if (!res.found) {
@@ -431,6 +441,8 @@ async function pollLastRun() {
     }
   } catch (e: any) {
     errorMessage.value = e.message || String(e)
+  } finally {
+    pollInFlight = false
   }
 }
 
