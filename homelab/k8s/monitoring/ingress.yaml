@@ -1,0 +1,22 @@
+# monitor2.jhyang.click 전용 host 규칙 — homelab/k8s/apps/frontend.yaml의
+# host 미지정(catch-all) Ingress와 같은 ingress-nginx 클래스/LB IP를 공유하되,
+# ingress-nginx가 host가 명시된 규칙을 우선하므로 monitor2.jhyang.click 요청만
+# Grafana로 간다(나머지는 그대로 frontend로).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: monitor2.jhyang.click
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kube-prometheus-stack-grafana
+                port:
+                  number: 80
