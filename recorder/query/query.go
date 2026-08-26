@@ -34,13 +34,14 @@ const (
 	seriesBucket    = time.Minute
 	seriesBucketFmt = "2006-01-02T15:04:00Z" // 분 단위로 잘라 표시(초는 항상 00)
 
-	// mergeMaxExecutedAt이 한 번의 IN(...) 쿼리에 담는 최대 주문 ID 개수.
-	// MySQL의 플레이스홀더 개수 제한(65,535)을 밑돌면서도 여유를 크게 남긴
-	// 값 — p99Window(5분) 동안 FILLED된 주문 수가 이 한도를 넘으면 예전엔
-	// 그대로 65,535개 한도를 넘겨 "Error 1390: Prepared statement contains
-	// too many placeholders"로 대시보드 지표 조회 전체가 실패했다(2026-08-25,
-	// 초당 240건 넘는 부하테스트 도중 실제로 5분 창에 6만 건 넘게 쌓여서
-	// 재현). 청크로 나눠 여러 번 조회하면 이 한도와 무관해진다.
+	// mergeSubmittedAt(예전 이름 mergeMaxExecutedAt 시절부터)이 한 번의
+	// IN(...) 쿼리에 담는 최대 주문 ID 개수. MySQL의 플레이스홀더 개수
+	// 제한(65,535)을 밑돌면서도 여유를 크게 남긴 값 — p99Window(5분) 동안의
+	// 체결에 관련된 주문 수가 이 한도를 넘으면 예전엔 그대로 65,535개 한도를
+	// 넘겨 "Error 1390: Prepared statement contains too many placeholders"로
+	// 대시보드 지표 조회 전체가 실패했다(2026-08-25, 초당 240건 넘는
+	// 부하테스트 도중 실제로 5분 창에 6만 건 넘게 쌓여서 재현). 청크로 나눠
+	// 여러 번 조회하면 이 한도와 무관해진다.
 	maxExecutedAtChunkSize = 5000
 
 	// ordersByStatusWindow은 OrdersByStatus 전용 창입니다(seriesWindow과
@@ -255,16 +256,19 @@ type MetricsBucket struct {
 // 정의(다소 자의적일 수 있어 명시): OrderAcceptTps/ExecutionTps는 최근
 // tpsWindow(60초) 동안의 접수/체결 건수를 60으로 나눈 순간 평균입니다.
 // PendingOrders는 아직 종결(FILLED/CANCELED)되지 않은 주문 수(ACCEPTED +
-// PARTIALLY_FILLED)의 스냅샷입니다. E2EP99Ms는 "주문 접수 시각 →
-// 그 주문을 완전 체결시킨 마지막 executed_at" 구간을 최근
-// p99WindowMinutes(5분) 안에 FILLED된 주문들에서 표본으로 삼아 계산합니다 —
-// 매수/매도 중 나중에 들어와 체결을 촉발한 쪽(공격적 주문)에게는 실제
-// "시스템 처리 지연"에 가깝지만, 오래 대기하다 체결된 지정가(수동적) 주문
-// 쪽에서 보면 "시장에서 기다린 시간"까지 섞여 들어갈 수 있습니다 — 현재
-// 스키마엔 "매칭 시작/큐 대기" 같은 중간 단계 타임스탬프가 없어 더 정밀하게
-// 나눌 방법이 없습니다(recorder/server.go traceHandler 주석의 5단계 파이프라인
-// 부재와 같은 근본 원인). RunningEnginePods는 ListEngines 결과의 distinct
-// engineInstanceId 수를 그대로 씁니다.
+// PARTIALLY_FILLED)의 스냅샷입니다. E2EP99Ms는 최근 p99WindowMinutes(5분)
+// 안에 일어난 체결(execution)마다 "그 체결을 촉발한 쪽(taker — 매수·매도
+// 주문 중 더 늦게 접수된 쪽)의 접수 시각 → executed_at" 구간을 표본으로
+// 계산합니다(2026-08-26 재설계). taker는 도착하자마자 이미 있던 반대편
+// 주문과 즉시 매칭되므로 이 구간엔 "시장에서 기다린 시간"이 섞이지
+// 않습니다 — 예전엔 FILLED된 "주문" 각각의 자기 접수 시각을 썼는데, 그러면
+// 오래 대기하다 체결된 수동적(maker) 주문의 대기 시간까지 그대로 p99에
+// 섞여 NFR-03(500ms)과 비교가 안 되는 값(실측 100초대)이 나왔습니다. 여전히
+// 완벽한 "매칭 시작/큐 대기" 단계별 지연은 아닙니다(현재 스키마에 그런
+// 중간 타임스탬프가 없음, recorder/server.go traceHandler 주석의 5단계
+// 파이프라인 부재와 같은 근본 원인) — 하지만 시장 대기 시간을 배제한
+// 근사치로는 이전보다 훨씬 낫습니다. RunningEnginePods는 ListEngines
+// 결과의 distinct engineInstanceId 수를 그대로 씁니다.
 type DashboardMetrics struct {
 	OrderAcceptTps    float64 `json:"orderAcceptTps"`
 	ExecutionTps      float64 `json:"executionTps"`
@@ -482,74 +486,85 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	}
 	m.OrdersByStatus = statusByStatus
 
-	// E2E P99: 최근 p99Window 안에 FILLED된 주문마다 (마지막 체결 시각 - 접수
-	// 시각)을 표본 하나로 삼는다. DashboardMetrics 타입 주석 참고 — 완벽한
-	// "시스템 처리 지연"은 아니지만 현재 스키마로 낼 수 있는 최선의 근사치.
+	// E2E P99(taker 기준, 2026-08-26 재설계): 최근 p99Window 안에 일어난
+	// 체결(execution)마다 GREATEST(매수 접수 시각, 매도 접수 시각) → executed_at
+	// 구간을 표본으로 삼는다 — DashboardMetrics 타입 주석 참고. "체결"을
+	// 표본 단위로 삼으므로(예전처럼 "주문" 단위가 아님) 표본 하나당 관련
+	// 주문이 최대 둘(매수/매도)뿐이라 taker/maker를 섞을 일이 없다.
 	//
-	// 원래는 `trade_order o JOIN execution e ON (e.buy_order_id = o.order_id
-	// OR e.sell_order_id = o.order_id)` 한 방 쿼리였다 — OR가 execution의 두
-	// 컬럼에 걸쳐 있어 옵티마이저가 idx_execution_buy_order/
-	// idx_execution_sell_order 어느 쪽도 못 타고 execution 전체(500만행+)를
-	// 매 폴링(10초)마다 스캔했다(2026-08-20, EXPLAIN으로 rows:5,063,699 확인
-	// — pollDashboardMetrics가 DB CPU를 계속 붙잡고 있던 원인). 대신 ①먼저
-	// idx_trade_order_status_submitted로 최근 창의 FILLED 주문만 좁게 골라낸
-	// 뒤 ②execution을 buy_order_id/sell_order_id 각각 자기 인덱스로 따로
-	// 조회해서 Go에서 합친다 — OR-JOIN 자체를 없애 최근 창 크기에만 비례하게
-	// 만든다(schema.sql의 idx_trade_order_status_submitted 주석 참고).
-	// window가 있으면(위 TPS와 같은 이유) 최근 p99Window 대신 그 [From,To)
-	// 구간 전체에서 FILLED된 주문을 표본으로 삼는다 — idx_trade_order_status_submitted
-	// (status, submitted_at) 인덱스는 절대 구간 조건에도 그대로 쓰인다.
-	var orderRows *sql.Rows
+	// execution.executed_at을 시간창으로 직접 거르는 것 자체는 저렴하다
+	// (idx_execution_executed_at, 바로 위 체결 TPS 쿼리와 동일한 컬럼·조건).
+	// 예전 코드가 피했던 문제는 "OR-JOIN"이었지("trade_order o JOIN execution e
+	// ON (e.buy_order_id = o.order_id OR e.sell_order_id = o.order_id)"가
+	// idx_execution_buy_order/idx_execution_sell_order 어느 쪽도 못 타고
+	// execution 전체(500만행+)를 스캔했다, 2026-08-20 EXPLAIN으로
+	// rows:5,063,699 확인) — execution을 시간으로만 거르고, 거기 관련된
+	// 주문들의 submitted_at을 trade_order PK로 별도 배치 조회하면 JOIN 자체가
+	// 없어 그 문제를 재현하지 않는다. window가 있으면(위 TPS와 같은 이유)
+	// 최근 p99Window 대신 그 [From,To) 구간 전체의 체결을 표본으로 삼는다.
+	var execRows *sql.Rows
 	var err error
 	if window != nil {
-		orderRows, err = q.db.QueryContext(ctx, `
-			SELECT order_id, submitted_at FROM trade_order
-			WHERE status = 'FILLED' AND submitted_at >= ? AND submitted_at < ?
+		execRows, err = q.db.QueryContext(ctx, `
+			SELECT buy_order_id, sell_order_id, executed_at FROM execution
+			WHERE executed_at >= ? AND executed_at < ?
 		`, window.From, window.To)
 	} else {
-		orderRows, err = q.db.QueryContext(ctx, `
-			SELECT order_id, submitted_at FROM trade_order
-			WHERE status = 'FILLED' AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
+		execRows, err = q.db.QueryContext(ctx, `
+			SELECT buy_order_id, sell_order_id, executed_at FROM execution
+			WHERE executed_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
 		`, int(p99Window.Minutes()))
 	}
 	if err != nil {
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 	}
-	submittedAt := make(map[string]time.Time)
-	var orderIDs []string
-	for orderRows.Next() {
-		var id string
-		var t time.Time
-		if err := orderRows.Scan(&id, &t); err != nil {
-			orderRows.Close()
-			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
+	type e2eExecSample struct {
+		buyOrderID, sellOrderID string
+		executedAt              time.Time
+	}
+	var execSamples []e2eExecSample
+	orderIDSet := make(map[string]struct{})
+	for execRows.Next() {
+		var s e2eExecSample
+		if err := execRows.Scan(&s.buyOrderID, &s.sellOrderID, &s.executedAt); err != nil {
+			execRows.Close()
+			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 		}
-		submittedAt[id] = t
+		execSamples = append(execSamples, s)
+		orderIDSet[s.buyOrderID] = struct{}{}
+		orderIDSet[s.sellOrderID] = struct{}{}
+	}
+	if err := execRows.Err(); err != nil {
+		execRows.Close()
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
+	}
+	execRows.Close()
+
+	orderIDs := make([]string, 0, len(orderIDSet))
+	for id := range orderIDSet {
 		orderIDs = append(orderIDs, id)
 	}
-	if err := orderRows.Err(); err != nil {
-		orderRows.Close()
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
-	}
-	orderRows.Close()
-
-	maxExecutedAt := make(map[string]time.Time, len(orderIDs))
-	if len(orderIDs) > 0 {
-		if err := q.mergeMaxExecutedAt(ctx, "buy_order_id", orderIDs, maxExecutedAt); err != nil {
-			return DashboardMetrics{}, err
-		}
-		if err := q.mergeMaxExecutedAt(ctx, "sell_order_id", orderIDs, maxExecutedAt); err != nil {
-			return DashboardMetrics{}, err
-		}
+	submittedAt := make(map[string]time.Time, len(orderIDs))
+	if err := q.mergeSubmittedAt(ctx, orderIDs, submittedAt); err != nil {
+		return DashboardMetrics{}, err
 	}
 
 	var latenciesMs []float64
-	for _, id := range orderIDs {
-		executedAt, ok := maxExecutedAt[id]
-		if !ok {
+	for _, s := range execSamples {
+		buySub, buyOk := submittedAt[s.buyOrderID]
+		sellSub, sellOk := submittedAt[s.sellOrderID]
+		if !buyOk || !sellOk {
+			// 독립 리더 레이스 등으로 한쪽 주문이 아직 trade_order에 없으면
+			// (recorder/store/apply.go의 ResolveMode가 다루는 것과 같은 상황)
+			// taker를 판별할 기준이 없으니 이 표본은 건너뛴다 — 정합성 검사와
+			// 달리 여기선 표본 하나가 줄어들 뿐이라 심각하지 않다.
 			continue
 		}
-		latenciesMs = append(latenciesMs, float64(executedAt.Sub(submittedAt[id]).Microseconds())/1000.0)
+		taker := buySub
+		if sellSub.After(taker) {
+			taker = sellSub
+		}
+		latenciesMs = append(latenciesMs, float64(s.executedAt.Sub(taker).Microseconds())/1000.0)
 	}
 	m.E2EP99Ms = percentile99(latenciesMs)
 	m.E2EP99SampleCount = len(latenciesMs)
@@ -569,24 +584,24 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	return m, nil
 }
 
-// mergeMaxExecutedAt은 column(buy_order_id 또는 sell_order_id)이 orderIDs에
-// 속하는 execution 행들의 executed_at을 조회해 out에 주문별 최댓값으로
-// 병합합니다. buy_order_id/sell_order_id를 OR 하나로 묶지 않고 이렇게 따로
-// 호출해야 각자의 단일 컬럼 인덱스(idx_execution_buy_order/
-// idx_execution_sell_order)를 탈 수 있습니다 — DashboardMetrics 주석 참고.
-// column은 이 파일 안에서 "buy_order_id"/"sell_order_id" 리터럴로만 호출되므로
-// SQL 인젝션 경로가 아닙니다.
-func (q *MySQLQuerier) mergeMaxExecutedAt(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
+// mergeSubmittedAt은 orderIDs에 해당하는 trade_order.submitted_at을
+// 배치로 조회해 out에 채웁니다. order_id가 PK라 각 청크는 인덱스(PK) 탐색
+// 하나로 저렴합니다 — IN 절 하나에 너무 많은 값을 담지 않도록 예전
+// mergeMaxExecutedAt과 같은 이유로 maxExecutedAtChunkSize씩 나눠 호출합니다.
+func (q *MySQLQuerier) mergeSubmittedAt(ctx context.Context, orderIDs []string, out map[string]time.Time) error {
 	for start := 0; start < len(orderIDs); start += maxExecutedAtChunkSize {
 		end := min(start+maxExecutedAtChunkSize, len(orderIDs))
-		if err := q.mergeMaxExecutedAtChunk(ctx, column, orderIDs[start:end], out); err != nil {
+		if err := q.mergeSubmittedAtChunk(ctx, orderIDs[start:end], out); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (q *MySQLQuerier) mergeMaxExecutedAtChunk(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
+func (q *MySQLQuerier) mergeSubmittedAtChunk(ctx context.Context, orderIDs []string, out map[string]time.Time) error {
+	if len(orderIDs) == 0 {
+		return nil
+	}
 	placeholders := strings.Repeat("?,", len(orderIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, len(orderIDs))
@@ -594,21 +609,19 @@ func (q *MySQLQuerier) mergeMaxExecutedAtChunk(ctx context.Context, column strin
 		args[i] = id
 	}
 	rows, err := q.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT %s, executed_at FROM execution WHERE %s IN (%s)`, column, column, placeholders,
+		`SELECT order_id, submitted_at FROM trade_order WHERE order_id IN (%s)`, placeholders,
 	), args...)
 	if err != nil {
-		return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
+		return fmt.Errorf("E2E 지연시간(submitted_at) 조회 실패: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id string
 		var t time.Time
 		if err := rows.Scan(&id, &t); err != nil {
-			return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
+			return fmt.Errorf("E2E 지연시간(submitted_at) 조회 실패: %w", err)
 		}
-		if cur, ok := out[id]; !ok || t.After(cur) {
-			out[id] = t
-		}
+		out[id] = t
 	}
 	return rows.Err()
 }
