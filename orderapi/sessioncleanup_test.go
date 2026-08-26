@@ -23,6 +23,16 @@ func withFastCleanupRetry(t *testing.T) {
 	t.Cleanup(func() { cleanupFetchRetryDelay = original })
 }
 
+// withFastCleanupSweep는 cleanupSweepDelay(sessioncleanup.go)를 테스트
+// 동안만 짧게 낮춥니다 — 여러 스윕 패스를 거치는 테스트가 실제로 30초씩
+// 기다리지 않게 합니다.
+func withFastCleanupSweep(t *testing.T) {
+	t.Helper()
+	original := cleanupSweepDelay
+	cleanupSweepDelay = time.Millisecond
+	t.Cleanup(func() { cleanupSweepDelay = original })
+}
+
 func resetCleanupAllStatus(t *testing.T) {
 	t.Helper()
 	cleanupAllMu.Lock()
@@ -85,10 +95,18 @@ func TestCleanupUnresolvedOrdersSkipsZeroStartedAt(t *testing.T) {
 // "이 세션 몫만"에서 "전체 미종결"로 넓어진 걸 확인합니다 — mode/from/to
 // 쿼리 파라미터 없이 GET /v1/orders/unresolved/all을 부르는지가 핵심.
 func TestCleanupUnresolvedOrdersPublishesCancelForEach(t *testing.T) {
+	withFastCleanupSweep(t)
 	var gotPath, gotQuery string
+	served := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
+		if served {
+			// 다음 스윕 패스에서는 잔류 주문이 없어 수렴한다.
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: nil})
+			return
+		}
+		served = true
 		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{
 			{OrderID: "ord_1", Market: "KRW-BTC"},
 			{OrderID: "ord_2", Market: "KRW-ETH"},
@@ -159,7 +177,14 @@ func TestCleanupUnresolvedOrdersSkipsAndLeavesNoteWhenMatchingLagging(t *testing
 // TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen은 랙 확인 자체가
 // 실패해도(Redis 순간 장애 등) 정리를 계속 진행하는지 확인합니다.
 func TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen(t *testing.T) {
+	withFastCleanupSweep(t)
+	served := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if served {
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: nil})
+			return
+		}
+		served = true
 		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
 	}))
 	defer srv.Close()
@@ -178,6 +203,7 @@ func TestCleanupUnresolvedOrdersLagCheckErrorFailsOpen(t *testing.T) {
 // 세 번째(cleanupFetchMaxAttempts)에 성공하면 그 결과를 그대로 써야 합니다.
 func TestCleanupUnresolvedOrdersRetriesTransientFailure(t *testing.T) {
 	withFastCleanupRetry(t)
+	withFastCleanupSweep(t)
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -185,18 +211,78 @@ func TestCleanupUnresolvedOrdersRetriesTransientFailure(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+		if calls == cleanupFetchMaxAttempts {
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+			return
+		}
+		// 다음 스윕 패스: 이미 취소된 주문이 반영되어 수렴한다.
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: nil})
 	}))
 	defer srv.Close()
 
 	pub := &fakePublisher{}
 	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
 
-	if calls != cleanupFetchMaxAttempts {
-		t.Errorf("recorder 호출 횟수 = %d, want %d", calls, cleanupFetchMaxAttempts)
+	if calls != cleanupFetchMaxAttempts+1 {
+		t.Errorf("recorder 호출 횟수 = %d, want %d (재시도 끝 성공 + 수렴 확인 1회)", calls, cleanupFetchMaxAttempts+1)
 	}
 	if pub.cancelCalls != 1 {
 		t.Errorf("cancelCalls = %d, want 1 (재시도 끝에 성공한 결과가 반영돼야 함)", pub.cancelCalls)
+	}
+}
+
+// TestCleanupUnresolvedOrdersSweepsMultiplePassesForStragglers는 2026-08-26
+// 추가 — 첫 스냅샷에서 못 잡은 주문(recorder 컨슈머 랙으로 뒤늦게 반영되는
+// "잔류" 주문, 실측: 2건→269건→284건 반복)이 다음 스윕 패스에서 잡히는지
+// 확인합니다. 이게 이번에 자동화한 핵심 동작입니다.
+func TestCleanupUnresolvedOrdersSweepsMultiplePassesForStragglers(t *testing.T) {
+	withFastCleanupSweep(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+		case 2:
+			// recorder 컨슈머 랙으로 뒤늦게 trade_order에 반영된 잔류 주문.
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_2", Market: "KRW-ETH"}}})
+		default:
+			json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: nil})
+		}
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, &fakeSessionStore{}, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
+
+	if calls != 3 {
+		t.Errorf("recorder 호출 횟수 = %d, want 3 (스윕 2회 + 수렴 확인 1회)", calls)
+	}
+	if pub.cancelCalls != 2 {
+		t.Errorf("cancelCalls = %d, want 2 (두 스윕에 걸쳐 각각 1건씩 잡아야 함)", pub.cancelCalls)
+	}
+}
+
+// TestCleanupUnresolvedOrdersLeavesNoteWhenSweepsExhausted는 2026-08-26 추가
+// — 최대 스윕 횟수(cleanupSweepMaxPasses)를 다 써도 미종결 주문이 계속
+// 남아있으면(비정상적으로 큰 랙 등) "실행 결과" 화면에 수동 확인이
+// 필요하다는 안내를 남기는지 확인합니다.
+func TestCleanupUnresolvedOrdersLeavesNoteWhenSweepsExhausted(t *testing.T) {
+	withFastCleanupSweep(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(unresolvedOrdersResponse{Orders: []unresolvedOrder{{OrderID: "ord_1", Market: "KRW-BTC"}}})
+	}))
+	defer srv.Close()
+
+	pub := &fakePublisher{}
+	store := &fakeSessionStore{}
+	cleanupUnresolvedOrders(context.Background(), srv.Client(), srv.URL, pub, store, &fakeChecker{}, "run_1", time.Now().Add(-time.Minute))
+
+	if pub.cancelCalls != cleanupSweepMaxPasses {
+		t.Errorf("cancelCalls = %d, want %d (매 패스마다 취소 발행)", pub.cancelCalls, cleanupSweepMaxPasses)
+	}
+	if store.lastNoteRunID != "run_1" || store.lastNote == "" {
+		t.Errorf("실행 결과 메시지에 안내가 안 남음: runId=%q, note=%q", store.lastNoteRunID, store.lastNote)
 	}
 }
 

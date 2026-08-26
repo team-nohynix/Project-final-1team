@@ -14,6 +14,11 @@
 # = 2000, recorder/main.go)의 절반 — 백프레셔가 실제로 걸려서 orderapi가 429를
 # 뱉기 전에 먼저 스케일 아웃을 시도해보려는 것. matching-engine의 500과 마찬가지로
 # 실측 부하 시험 전까지는 근거 없는 시작값이다.
+# 2026-08-26: 스케일다운 속도 개선 요청 — minReplicaCount=1(>0)이라 위
+# cooldownPeriod는 사실 KEDA가 무시한다(matching-engine-scaledobject.yaml의
+# 2026-08-20 설명과 동일 — kubectl apply 시 "only relevant when
+# minReplicaCount = 0" 경고로 확인됨). 실제 스케일다운 속도는 K8s HPA 기본
+# stabilization window(300초)가 결정하므로 이걸 60초로 단축한다.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -26,6 +31,11 @@ spec:
   maxReplicaCount: 10
   pollingInterval: 15
   cooldownPeriod: 60
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
   triggers:
     - type: prometheus
       metadata:

@@ -63,4 +63,7 @@ spec:
     cpu: "160" # c6i.large(2 vCPU) 최대 20대 상당 — 매칭엔진 상한(마켓 20개)과 정합
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
-    consolidateAfter: 5m
+    # 2026-08-26: 5m -> 2m (스케일다운 체감 속도 개선 요청). HPA 스태빌라이제이션
+    # 윈도우 단축(matching-engine/recorder ScaledObject 참고)과 합쳐져, 부하가
+    # 빠진 뒤 파드가 줄고 나서 이 노드가 실제로 비워지기까지 걸리는 시간이 줄어든다.
+    consolidateAfter: 2m

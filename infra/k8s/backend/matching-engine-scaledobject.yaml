@@ -51,6 +51,11 @@
 # threshold=20000은 위 lag=500/recorder=1000과 같은 이유로 실측 전 잠정값 — 인스턴스당
 # 2Gi/2867Mi(matching-engine-deployment.yaml) 한도 안에서 실제로 안전한 상한이 얼마인지
 # 아직 측정 안 됨. 다음 부하테스트에서 book_size 대비 실제 메모리 사용량을 관찰해 조정.
+# 2026-08-26: 스케일다운 속도 개선 요청 — minReplicaCount=2(>0)라 위 cooldownPeriod
+# 관련 설명대로 KEDA cooldownPeriod가 아니라 K8s HPA 기본 스케일다운 stabilization
+# window(300초/5분)가 실제 속도를 결정한다. minReplicaCount=2 바닥이 "혼자 다
+# 받다가 OOMKilled"(위 2026-08-20 사고) 재발을 이미 막아주므로, 굳이 5분씩 안전
+# 마진을 둘 필요가 줄었다고 판단해 60초로 단축한다.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -61,6 +66,11 @@ spec:
     name: matching-engine
   minReplicaCount: 2
   maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
   triggers:
     - type: prometheus
       metadata:

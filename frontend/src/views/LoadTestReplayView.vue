@@ -522,7 +522,6 @@ function goToResults() {
 
         <div class="actions">
           <button class="btn-primary" :disabled="isStarting || isPolling || !canStartReplay" @click="onStart">재생 시작</button>
-          <div v-if="isPolling" style="margin-top:8px;color:#cfe6ff">이미 실행 중입니다 — 재생이 종료될 때까지 기다려주세요.</div>
           <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
           <button
             class="btn-stop"
@@ -538,6 +537,12 @@ function goToResults() {
           <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
           <p v-if="precheckMessage" class="success">{{ precheckMessage }}</p>
           <p v-if="startMessage" class="info">{{ startMessage }}</p>
+          <!-- "이미 실행 중" 문구는 방금 사용자 본인이 시작을 눌러도(그 순간
+               isPolling이 true가 됨) 똑같이 떴다 — "이미"라는 단어가 마치
+               사용자 모르는 다른 실행이 진작부터 돌고 있었던 것처럼 읽혀
+               혼란을 줬다(2026-08-26). 실제 의미는 "지금 재생 중이니 버튼이
+               비활성화됐다"는 안내일 뿐이라 표현만 바꾼다. -->
+          <p v-if="isPolling" class="info">재생이 진행 중입니다 — 종료될 때까지 기다려주세요.</p>
         </div>
       </section>
 
@@ -565,8 +570,8 @@ function goToResults() {
               <div class="preview-main">총 {{ preview.totalOrders.toLocaleString() }}건 재생 예정 · {{ preview.marketsWithRecords }}/{{ preview.marketsTotal }}개 마켓</div>
             </div>
             <div class="preview-line" style="margin-top:8px">
-              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</span>
-              <span class="preview-value"> {{ estimatedDurationDisplay }}</span>
+              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×): </span>
+              <span class="preview-value">{{ estimatedDurationDisplay }}</span>
             </div>
           </div>
 
@@ -592,7 +597,7 @@ function goToResults() {
 
         <div v-if="runInfo?.status === 'IN_PROGRESS' && preview?.totalOrders" class="replay-progress">
           <div class="progress-info">
-            <span>재생 진행률</span>
+            <span>재생 진행률 </span>
             <span class="progress-count">
               {{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)<template v-if="replayRemainingDisplay"> · {{ replayRemainingDisplay }}</template>
             </span>

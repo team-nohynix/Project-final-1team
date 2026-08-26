@@ -42,4 +42,5 @@ spec:
              # 실제로 한 번에 여러 대가 뜨는 워크로드가 아니라 여유만 확보하는 목적
   disruption:
     consolidationPolicy: WhenEmptyOrUnderutilized
-    consolidateAfter: 5m
+    # 2026-08-26: 5m -> 2m (스케일다운 체감 속도 개선 요청, nodepool-backend.yaml과 동일 이유).
+    consolidateAfter: 2m

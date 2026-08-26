@@ -190,9 +190,18 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 		// 둘 다 기본값(COMPLETED)으로 취급합니다. 세션 반납 자체를 막을 만큼
 		// 중요한 값이 아닙니다.
 		json.NewDecoder(r.Body).Decode(&req)
+		// 2026-08-26 버그 수정: FAILED만 확인하고 STOPPED을 빠뜨려서, 사용자가
+		// "중지" 버튼으로 직접 멈춘 실행(trader/replayengine이 status="STOPPED"로
+		// 보고)도 전부 COMPLETED로 저장되고 있었다 — "실행 결과" 화면에서
+		// Message는 "사용자 요청으로 정지됨"인데 배지는 "정상 종료"로 뜨는
+		// 불일치로 발견됨(Message는 req.Message를 그대로 통과시키니 맞았지만,
+		// Status는 이 분기에서 걸러지지 않아 기본값 COMPLETED로 굳어졌다).
 		outcome := session.RunOutcome{Status: session.RunStatusCompleted, Message: req.Message}
-		if req.Status == session.RunStatusFailed {
+		switch req.Status {
+		case session.RunStatusFailed:
 			outcome.Status = session.RunStatusFailed
+		case session.RunStatusStopped:
+			outcome.Status = session.RunStatusStopped
 		}
 
 		record, finalized, err := store.Release(r.Context(), sessionID, outcome)

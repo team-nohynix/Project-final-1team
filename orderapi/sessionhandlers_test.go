@@ -348,6 +348,27 @@ func TestReleaseSessionFailedOutcome(t *testing.T) {
 	}
 }
 
+// TestReleaseSessionStoppedOutcome은 2026-08-26 버그 수정을 검증합니다 —
+// FAILED만 확인하고 STOPPED을 안 걸러서, 사용자가 "중지"로 직접 멈춘
+// 실행(trader/replayengine이 status="STOPPED"로 보고)도 전부 COMPLETED로
+// 저장되던 문제(실행 결과 화면에서 배지는 "정상 종료", 메시지는 "사용자
+// 요청으로 정지됨"으로 서로 어긋나 보였음).
+func TestReleaseSessionStoppedOutcome(t *testing.T) {
+	store := &fakeSessionStore{}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/sess_1", strings.NewReader(`{"status":"STOPPED","message":"사용자 요청으로 정지됨"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if store.lastOutcome.Status != session.RunStatusStopped || store.lastOutcome.Message != "사용자 요청으로 정지됨" {
+		t.Errorf("outcome = %+v, want Status=%q", store.lastOutcome, session.RunStatusStopped)
+	}
+}
+
 func TestLastRunHandlerFound(t *testing.T) {
 	started := time.Date(2026, 8, 12, 9, 0, 0, 0, time.UTC)
 	ended := started.Add(3 * time.Minute)

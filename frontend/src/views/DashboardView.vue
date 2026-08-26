@@ -1301,8 +1301,8 @@ onBeforeUnmount(() => {
       </h4>
       <div v-if="autoscalingBars.length" class="autoscaling-bars">
         <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
-          <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
           <div class="autoscaling-bar-track">
+            <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
             <div class="autoscaling-bar-fill" :class="`bar-${bar.key}`" :style="{ height: bar.percent + '%' }"></div>
           </div>
           <div class="autoscaling-bar-label">{{ bar.label }}<template v-if="bar.maxLabel"> ({{ bar.maxLabel }})</template></div>
@@ -1896,12 +1896,19 @@ onBeforeUnmount(() => {
 }
 
 .autoscaling-bar-value {
-  font-size: 20px;
+  position: absolute;
+  top: 8px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 18px;
   font-weight: 700;
   color: #2ed39a;
+  z-index: 1;
 }
 
 .autoscaling-bar-track {
+  position: relative;
   width: 100%;
   height: 110px;
   background: #0d1b2a;
