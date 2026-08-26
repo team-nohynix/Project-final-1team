@@ -58,11 +58,33 @@ const (
 // 다시 복구). 여러 파티션(마켓)의 고루틴이 동시에 이 맵을 건드릴 수 있어 mu로 보호하지만,
 // 같은 마켓의 Apply는 항상 그 마켓을 담당하는 고루틴 하나에서만 순차 호출되므로
 // engine.Engine 자체의 동시성 무보호 전제는 그대로 유지됩니다.
+//
+// **marketLock — 2026-08-27, 정합성 검사에서 실제로 잡힌 "중복 체결"(한 주문의
+// 체결 수량 합이 원 수량을 초과) 사고 대응.** gen.Start의 계약(consumer.go 주석
+// 참고)은 "이 인스턴스 자신의 재가입은 자신의 Release/Handoff가 끝나야 일어난다"만
+// 보장합니다 — 리밸런스 코디네이터가 그 재가입(JoinGroup)을 기다려줄지는 Kafka의
+// rebalance timeout(kafka-go 기본값, 이 코드베이스는 명시적으로 설정 안 함) 안에
+// 이 인스턴스가 Handoff를 끝내고 다시 합류하느냐에 달려 있습니다. 오늘 이 마켓이
+// 0→10개로 급격히 스케일아웃하며 리밸런스가 연달아 일어난 구간에서, 어느 인스턴스의
+// Handoff(Redis 왕복)가 그 타임아웃을 넘기면 코디네이터가 그 인스턴스를 기다리지
+// 않고 다음 세대를 확정할 수 있고, 그러면 새 담당자가 옛 담당자의 마지막 체결이
+// 반영되기 전 스냅샷으로 Recover해 같은 주문을 다시 매칭 — 실측 44건의 "중복 체결"과
+// 시점이 정확히 일치합니다. Kafka의 리밸런스 타이밍에 기대는 대신, 마켓 소유권
+// 자체를 Redis 락으로 명시적으로 직렬화합니다 — Acquire는 락을 얻어야 스냅샷을
+// 읽고, Release는 Handoff까지 끝난 뒤에만 락을 놓으므로, 코디네이터가 무엇을
+// 하든 두 인스턴스가 동시에 같은 마켓을 매칭할 수 없습니다.
+const (
+	marketLockTTL        = 15 * time.Second
+	marketLockRetryDelay = 100 * time.Millisecond
+	marketLockMaxWait    = 10 * time.Second
+)
+
 type marketRegistry struct {
 	mu               sync.Mutex
 	engines          map[string]*engine.Engine
 	producer         engine.ExecutionPublisher
 	store            engine.SnapshotStore
+	redisClient      *redis.Client
 	snapshotEvery    int
 	snapshotInterval time.Duration
 
@@ -73,11 +95,12 @@ type marketRegistry struct {
 	instanceID  string
 }
 
-func newMarketRegistry(producer engine.ExecutionPublisher, store engine.SnapshotStore, assignments *kafkaclient.AssignmentProducer, instanceID string) *marketRegistry {
+func newMarketRegistry(producer engine.ExecutionPublisher, store engine.SnapshotStore, redisClient *redis.Client, assignments *kafkaclient.AssignmentProducer, instanceID string) *marketRegistry {
 	return &marketRegistry{
 		engines:          make(map[string]*engine.Engine),
 		producer:         producer,
 		store:            store,
+		redisClient:      redisClient,
 		snapshotEvery:    snapshotEveryEvents,
 		snapshotInterval: snapshotInterval,
 		assignments:      assignments,
@@ -85,10 +108,62 @@ func newMarketRegistry(producer engine.ExecutionPublisher, store engine.Snapshot
 	}
 }
 
+func marketLockKey(market string) string {
+	return "matching:market-lock:" + market
+}
+
+// releaseLockScript는 "내가 아직 이 락의 주인일 때만 지운다"를 원자적으로 합니다 —
+// TTL이 만료돼 다른 인스턴스가 이미 새로 잡은 락을 실수로 지우면 안 되므로 GET+DEL을
+// Lua로 묶습니다(표준 Redis 분산 락 해제 패턴).
+var releaseLockScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		return redis.call("DEL", KEYS[1])
+	end
+	return 0
+`)
+
+// acquireMarketLock은 이 마켓의 소유권을 Redis 락으로 직렬화합니다 — 이전 담당자가
+// 아직 락을 들고 있으면(Handoff 진행 중이거나, 리밸런스 타임아웃을 넘겨 코디네이터는
+// 이미 다음 세대로 넘어갔지만 실제 정리는 아직 안 끝난 경우) 짧게 재시도하며
+// 기다립니다. marketLockMaxWait를 넘기면 포기하고 에러를 돌려주는데, 호출부
+// (consumePartition)는 이미 "이번 세대엔 이 마켓을 못 맡는다"를 로그만 남기고
+// 넘어가는 안전한 경로를 갖고 있습니다(다음 리밸런스에서 다시 시도됨) — 무한정
+// 기다리다 이 goroutine이 멈춰있는 것보다 낫습니다.
+func (r *marketRegistry) acquireMarketLock(ctx context.Context, market string) error {
+	deadline := time.Now().Add(marketLockMaxWait)
+	for {
+		ok, err := r.redisClient.SetNX(ctx, marketLockKey(market), r.instanceID, marketLockTTL).Result()
+		if err != nil {
+			return fmt.Errorf("마켓 락 획득 실패 (market=%s): %w", market, err)
+		}
+		if ok {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("마켓 락 획득 타임아웃 (market=%s, %v 대기)", market, marketLockMaxWait)
+		}
+		select {
+		case <-time.After(marketLockRetryDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (r *marketRegistry) releaseMarketLock(ctx context.Context, market string) {
+	if err := releaseLockScript.Run(ctx, r.redisClient, []string{marketLockKey(market)}, r.instanceID).Err(); err != nil && err != redis.Nil {
+		log.Printf("마켓 락 해제 실패 (market=%s): %v — TTL(%v) 후 자동 만료됨", market, err, marketLockTTL)
+	}
+}
+
 func (r *marketRegistry) Acquire(ctx context.Context, market string) (int64, error) {
+	if err := r.acquireMarketLock(ctx, market); err != nil {
+		return 0, err
+	}
 	e := engine.New(market, r.producer, r.store, r.snapshotEvery, r.snapshotInterval)
 	resumeFrom, err := e.Recover(ctx)
 	if err != nil {
+		r.releaseMarketLock(ctx, market)
 		return 0, fmt.Errorf("복구 실패: %w", err)
 	}
 
@@ -122,8 +197,13 @@ func (r *marketRegistry) Release(ctx context.Context, market string) error {
 		return nil
 	}
 	if err := e.Handoff(ctx); err != nil {
+		// 락은 일부러 안 놓습니다 — Handoff가 실패했다는 건 확정 저장이 안 됐다는
+		// 뜻이라, 지금 놓으면 다음 인수자가 이 마켓의 마지막 체결이 반영 안 된
+		// 스냅샷으로 Recover해 바로 이 기능이 막으려는 그 사고(중복 체결)가
+		// 재현됩니다. TTL(marketLockTTL)이 지나면 자동으로 풀립니다.
 		return err
 	}
+	r.releaseMarketLock(ctx, market)
 	if err := r.assignments.PublishReleased(ctx, market, r.instanceID); err != nil {
 		log.Printf("반납 기록 이벤트 발행 실패 (market=%s): %v", market, err)
 	}
@@ -191,7 +271,7 @@ func main() {
 	}
 	balancer := rebalance.NewLoadAwareBalancer(tracker, TargetMarkets)
 
-	registry := newMarketRegistry(producer, store, assignments, instanceID)
+	registry := newMarketRegistry(producer, store, redisClient, assignments, instanceID)
 
 	consumer, err := kafkaclient.NewGroupConsumer(ctx, cfg.KafkaBroker, consumerGroupID, cfg.OrdersTopic, balancer, TargetMarkets, registry, cfg.KafkaUseIAMAuth)
 	if err != nil {
