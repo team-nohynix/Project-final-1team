@@ -675,6 +675,30 @@ function formatElapsed(startedAt) {
   return h > 0 ? `${h}시간 ${m}분 ${s}초` : m > 0 ? `${m}분 ${s}초` : `${s}초`
 }
 
+// "최신" 배지(맨 왼쪽 카드에만) 대신, 카드마다 각자의 기준 시각으로부터
+// "N분 전"을 보여준다(2026-08-26 요청) — flex-wrap으로 줄바꿈돼도 항상
+// 정확하고, 얼마나 오래됐는지까지 한눈에 보인다. nowTick(1초 틱)에 의존해
+// formatElapsed와 같은 방식으로 계속 갱신된다.
+function formatAgo(iso) {
+  if (!iso) return ''
+  const ms = nowTick.value - new Date(iso).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return '방금 전'
+  const totalMin = Math.floor(totalSec / 60)
+  if (totalMin < 60) return `${totalMin}분 전`
+  const totalHour = Math.floor(totalMin / 60)
+  if (totalHour < 24) return `${totalHour}시간 전`
+  const totalDay = Math.floor(totalHour / 24)
+  return `${totalDay}일 전`
+}
+
+// 카드의 "기준 시각" — 진행 중이면 시작 시각(경과 시간과 같은 기준), 끝난
+// 실행이면 종료 시각(없으면 시작 시각으로 대체) 기준으로 "N분 전"을 잰다.
+function cardAgoRef(card) {
+  return card.inProgress ? card.startedAt : (card.endedAt || card.startedAt)
+}
+
 function formatKST(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
@@ -1211,7 +1235,7 @@ onBeforeUnmount(() => {
           <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
             {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
           </span>
-          <span v-if="i === 0" class="run-badge-latest">최신</span>
+          <span v-if="formatAgo(cardAgoRef(card))" class="run-badge-latest">{{ formatAgo(cardAgoRef(card)) }}</span>
           <div class="run-status-text">
             <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
             <span v-if="card.speed"><strong>{{ card.speed }}배속</strong></span>
