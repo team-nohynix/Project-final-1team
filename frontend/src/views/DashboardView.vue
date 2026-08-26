@@ -1214,9 +1214,12 @@ onBeforeUnmount(() => {
           <span v-if="i === 0" class="run-badge-latest">최신</span>
           <div class="run-status-text">
             <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
-            <span v-if="card.speed">{{ card.speed }}배속</span>
+            <span v-if="card.speed"><strong>{{ card.speed }}배속</strong></span>
             <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ formatElapsed(card.startedAt) }}</span>
-            <span v-else>{{ formatKST(card.startedAt) }} ~ {{ formatKST(card.endedAt) }}</span>
+            <template v-else>
+              <span>{{ formatKST(card.startedAt) }} ~</span>
+              <span>{{ formatKST(card.endedAt) }}</span>
+            </template>
             <span v-if="card.message" class="run-message">{{ card.message }}</span>
           </div>
         </div>
