@@ -136,7 +136,7 @@ func main() {
 	mux.HandleFunc("GET /v1/orders/summary", orderSummaryHandler(querier))
 	mux.HandleFunc("GET /v1/orders/unresolved", unresolvedOrdersHandler(querier))
 	mux.HandleFunc("GET /v1/orders/unresolved/all", allUnresolvedOrdersHandler(querier))
-	mux.HandleFunc("GET /v1/orders/integrity", integrityCheckHandler(querier))
+	mux.HandleFunc("GET /v1/orders/integrity", integrityCheckHandler(querier, redisClient))
 
 	mux.Handle("GET /metrics", promhttp.Handler())
 	go func() {

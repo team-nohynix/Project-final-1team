@@ -321,7 +321,7 @@ func TestIntegrityCheckHandler(t *testing.T) {
 	t.Run("missing mode", func(t *testing.T) {
 		q := &fakeQuerier{}
 		w := httptest.NewRecorder()
-		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?from=2026-08-13T00:00:00Z", nil))
+		integrityCheckHandler(q, unreachableRedisClient())(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?from=2026-08-13T00:00:00Z", nil))
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -337,7 +337,7 @@ func TestIntegrityCheckHandler(t *testing.T) {
 		}}
 		w := httptest.NewRecorder()
 		url := "/v1/orders/integrity?mode=REPLAY&from=2026-08-13T00:00:00Z&to=2026-08-13T01:00:00Z"
-		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, url, nil))
+		integrityCheckHandler(q, unreachableRedisClient())(w, httptest.NewRequest(http.MethodGet, url, nil))
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -357,7 +357,7 @@ func TestIntegrityCheckHandler(t *testing.T) {
 	t.Run("query error", func(t *testing.T) {
 		q := &fakeQuerier{integrityErr: context.DeadlineExceeded}
 		w := httptest.NewRecorder()
-		integrityCheckHandler(q)(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
+		integrityCheckHandler(q, unreachableRedisClient())(w, httptest.NewRequest(http.MethodGet, "/v1/orders/integrity?mode=PAPER_TRADING&from=2026-08-13T00:00:00Z", nil))
 
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)

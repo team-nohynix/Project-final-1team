@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -233,24 +235,115 @@ func allUnresolvedOrdersHandler(q query.Querier) http.HandlerFunc {
 	}
 }
 
+// integrityCache* — 2026-08-26 추가. IntegrityCheck 쿼리 3개는 FORCE INDEX +
+// 병렬 실행(query.go 참고)을 적용해도 여전히 수백만 행짜리 range 스캔이라
+// 부하가 크면 수십 초씩 걸릴 수 있는데, CloudFront 오리진 응답 기본 한계
+// (30초, infra에 별도 설정 없음)를 넘기면 브라우저엔 502/504로 보인다
+// (실측 재현). dashboardMetricsCacheKey(metrics.go)와 달리 이 결과는 "지금
+// 이 순간"이 아니라 "이미 끝난 실행의 [from,to) 구간" 기준이라 — 그 구간
+// 데이터는 더 안 바뀌므로 한 번 계산한 값을 길게(30분) 캐시해도 안전하다.
+const (
+	integrityCacheTTL   = 30 * time.Minute
+	integrityLockTTL    = 40 * time.Second
+	integrityWaitBudget = 20 * time.Second // CloudFront 30초 예산 안에서 여유를 남긴 상한
+	integrityPollEvery  = 500 * time.Millisecond
+)
+
+func integrityCacheKey(mode string, from, to time.Time) string {
+	return fmt.Sprintf("integrity-check:%s:%s:%s", mode, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
+}
+
 // integrityCheckHandler는 GET /v1/orders/integrity?mode=...&from=...&to=...를
 // 처리합니다 — "시스템 종합 현황" 대시보드의 "데이터 정합성 검사" 패널
 // (2026-08-24) 지원. 파라미터 규칙은 orderSummaryHandler와 동일합니다.
-func integrityCheckHandler(q query.Querier) http.HandlerFunc {
+//
+// 캐시 히트가 아니면, Redis SETNX로 이 (mode,from,to) 구간에 대해 딱 하나의
+// 요청만 실제 계산을 맡습니다(여러 레플리카/여러 브라우저 탭이 동시에 같은
+// 무거운 쿼리를 또 쏘는 걸 방지 — 오늘 낮 recorder MySQL에 같은 집계
+// 쿼리가 40개 넘게 몰렸던 사고와 같은 유형). 계산은 context.Background()로
+// 돌려서 이 요청의 클라이언트가 먼저 포기해도 끝까지 마치고 캐시에
+// 남깁니다(reset-matching-engine-book과 같은 이유) — 그래서 이번 응답이
+// integrityWaitBudget 안에 못 끝나면 202 COMPUTING을 돌려주고, 다음
+// 폴링(프론트 60초 주기)에서는 캐시 히트로 즉시 응답됩니다.
+func integrityCheckHandler(q query.Querier, redisClient *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mode, from, to, ok := parseModeFromTo(w, r)
 		if !ok {
 			return
 		}
 
-		result, err := q.IntegrityCheck(r.Context(), mode, from, to)
+		cacheKey := integrityCacheKey(mode, from, to)
+		if body, err := redisClient.Get(r.Context(), cacheKey).Bytes(); err == nil {
+			var cached query.IntegrityCheck
+			if jsonErr := json.Unmarshal(body, &cached); jsonErr != nil {
+				log.Printf("정합성 검사 캐시 파싱 실패, 라이브 계산으로 폴백: %v", jsonErr)
+			} else {
+				writeJSON(w, http.StatusOK, cached)
+				return
+			}
+		} else if err != redis.Nil {
+			log.Printf("정합성 검사 캐시 조회 실패, 라이브 계산으로 폴백: %v", err)
+		}
+
+		lockKey := cacheKey + ":lock"
+		isLeader, err := redisClient.SetNX(r.Context(), lockKey, "1", integrityLockTTL).Result()
 		if err != nil {
-			log.Printf("데이터 정합성 검사 실패 (mode=%s): %v", mode, err)
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "데이터 정합성 검사에 실패했습니다.")
+			log.Printf("정합성 검사 락 확인 실패(경고 없이 이번 요청이 직접 계산): %v", err)
+			isLeader = true
+		}
+
+		if !isLeader {
+			// 다른 요청(다른 레플리카 포함)이 이미 이 구간을 계산 중 —
+			// 중복 계산 대신 캐시가 채워지길 잠깐 기다린다.
+			writeIntegrityAwaitCache(w, r, redisClient, cacheKey)
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+
+		resultCh := make(chan query.IntegrityCheck, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			result, err := q.IntegrityCheck(context.Background(), mode, from, to)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if body, jsonErr := json.Marshal(result); jsonErr == nil {
+				if setErr := redisClient.Set(context.Background(), cacheKey, body, integrityCacheTTL).Err(); setErr != nil {
+					log.Printf("정합성 검사 캐시 저장 실패(이번 응답 자체는 정상): %v", setErr)
+				}
+			}
+			resultCh <- result
+		}()
+
+		select {
+		case result := <-resultCh:
+			writeJSON(w, http.StatusOK, result)
+		case err := <-errCh:
+			log.Printf("데이터 정합성 검사 실패 (mode=%s): %v", mode, err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "데이터 정합성 검사에 실패했습니다.")
+		case <-time.After(integrityWaitBudget):
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "COMPUTING"})
+		}
 	}
+}
+
+// writeIntegrityAwaitCache는 다른 요청이 이미 계산 중일 때, 이번 요청이
+// 중복 계산 없이 그 결과가 캐시에 올라오길 짧게 폴링합니다.
+func writeIntegrityAwaitCache(w http.ResponseWriter, r *http.Request, redisClient *redis.Client, cacheKey string) {
+	deadline := time.Now().Add(integrityWaitBudget)
+	for time.Now().Before(deadline) {
+		time.Sleep(integrityPollEvery)
+		body, err := redisClient.Get(r.Context(), cacheKey).Bytes()
+		if err != nil {
+			continue
+		}
+		var cached query.IntegrityCheck
+		if jsonErr := json.Unmarshal(body, &cached); jsonErr == nil {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "COMPUTING"})
 }
 
 // parseModeFromTo는 orderSummaryHandler/unresolvedOrdersHandler가 공유하는

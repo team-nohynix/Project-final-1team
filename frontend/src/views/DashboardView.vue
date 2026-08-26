@@ -454,6 +454,18 @@ async function fetchIntegrityCheck() {
   const summary = await summaryRes.json()
   const integrity = await integrityRes.json()
 
+  // recorder가 202 COMPUTING을 줄 수 있습니다(2026-08-26 추가) — 정합성
+  // 검사 쿼리가 무거워서(수백만 행 range 스캔) 이번 요청 안에 못 끝내면
+  // 백그라운드로 계속 계산하면서 "아직 없음"을 알려주는 응답입니다. 이걸
+  // integrity.duplicateExecutions 등을 ?? 0으로 그냥 채우면 "이상 없음"처럼
+  // 잘못 보이므로, COMPUTING이면 명시적으로 대기 상태로 표시합니다 — 다음
+  // 폴링(60초 뒤)에서 캐시가 채워지면 정상 값이 옵니다.
+  if (integrity.status === 'COMPUTING') {
+    integrityData.value = null
+    integrityNote.value = '정합성 검사를 계산 중입니다 — 잠시 후 다시 표시됩니다.'
+    return
+  }
+
   // 오래된 실행(이 필드가 생기기 전 기록)이라 date가 없으면 "주문 유실"만
   // 표시를 못 하고 나머지 세 지표는 그대로 보여줍니다.
   let orderLoss = null
