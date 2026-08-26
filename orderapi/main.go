@@ -69,12 +69,24 @@ func main() {
 	}
 	defer execConsumer.Close()
 	go func() {
-		err := execConsumer.Run(context.Background(), func(ctx context.Context, ev kafkaclient.ExecutionEvent) error {
-			store.ApplyFill(ev.BuyOrderID, ev.Quantity)
-			store.ApplyFill(ev.SellOrderID, ev.Quantity)
-			return nil
-		})
-		log.Fatalf("executions 컨슈머 종료: %v", err)
+		// Run이 에러로 끝나도(예: MSK가 idle 커넥션을 끊어서 오프셋 커밋이
+		// "use of closed network connection"으로 실패하는 경우, 2026-08-27
+		// 프로덕션에서 정확히 2시간마다 재현 확인됨) 이건 컨슈머 하나의
+		// 일시적 네트워크 문제일 뿐입니다. 예전엔 여기서 log.Fatalf로 프로세스
+		// 전체를 죽였는데, orderapi는 세션 상태를 인메모리로 들고 단일
+		// 인스턴스로만 도는 구조라(위 주석 참고) 재시작되는 짧은 시간 동안
+		// 주문 접수/취소/세션 조회까지 전부 503이 나는 진짜 장애로 번졌습니다.
+		// FetchMessage/CommitMessages는 다음 호출에서 알아서 재연결하므로
+		// Run을 다시 부르기만 하면 복구됩니다.
+		for {
+			err := execConsumer.Run(context.Background(), func(ctx context.Context, ev kafkaclient.ExecutionEvent) error {
+				store.ApplyFill(ev.BuyOrderID, ev.Quantity)
+				store.ApplyFill(ev.SellOrderID, ev.Quantity)
+				return nil
+			})
+			log.Printf("executions 컨슈머 종료, 재연결 후 재시작: %v", err)
+			time.Sleep(2 * time.Second)
+		}
 	}()
 
 	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
