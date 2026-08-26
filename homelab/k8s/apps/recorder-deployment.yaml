@@ -21,6 +21,14 @@ spec:
         app: recorder
     spec:
       serviceAccountName: sa-recorder
+      # backend-deployment.yaml과 같은 이유(2026-08-26).
+      initContainers:
+        - name: fix-archive-perms
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 10001:10001 /app/records"]
+          volumeMounts:
+            - name: archive
+              mountPath: /app/records
       containers:
         - name: recorder
           image: truss-recorder:latest

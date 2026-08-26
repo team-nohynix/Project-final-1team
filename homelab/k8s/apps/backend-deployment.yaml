@@ -19,6 +19,18 @@ spec:
         app: backend
     spec:
       serviceAccountName: sa-collector
+      # hostPath 볼륨은 Docker named volume과 달리 이미지의 기존 디렉터리
+      # 소유권을 상속하지 않는다 — kubelet이 DirectoryOrCreate로 처음 만들 때
+      # root 소유로 생성되어 appuser(10001)가 mkdir/쓰기를 못 한다(2026-08-26
+      # 실측 — "mkdir data/KRW-XRP: permission denied"). 매번 손으로 chown하는
+      # 대신 initContainer가 매 파드 시작마다 보장하게 한다.
+      initContainers:
+        - name: fix-data-perms
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 10001:10001 /app/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
       containers:
         - name: backend
           image: truss-backend:latest

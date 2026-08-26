@@ -245,3 +245,4 @@ infra/dist/
 # 홈서버 배포 비밀값/키 (절대 커밋 금지)
 homelab/.env
 .ssh-keys/
+homelab/k8s/monitoring/values.local.yaml

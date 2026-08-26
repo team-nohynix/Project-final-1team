@@ -1,0 +1,34 @@
+# kube-prometheus-stack Helm values — kubeadm 이전(2026-08-26) 이후 Prometheus+
+# Grafana+kube-state-metrics+node-exporter를 손으로 하나씩 만드는 대신 이
+# 검증된 차트로 한 번에 설치. Grafana 설정(익명 접근, 캔버스 패널 인라인 JS
+# 허용)은 Docker Compose 시절 homelab/docker-compose.yml의 grafana 서비스와
+# 동일 — team1-overview.json 대시보드가 그대로 요구하는 설정.
+grafana:
+  adminPassword: "__GRAFANA_ADMIN_PASSWORD__"
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+    security:
+      allow_embedding: true
+    panels:
+      disable_sanitize_html: true
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+
+prometheus:
+  prometheusSpec:
+    additionalScrapeConfigsSecret:
+      enabled: true
+      name: additional-scrape-configs
+      key: extra.yaml
+    retention: 7d
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+alertmanager:
+  enabled: false

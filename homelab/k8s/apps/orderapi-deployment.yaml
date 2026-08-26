@@ -24,6 +24,15 @@ spec:
         app: orderapi
     spec:
       serviceAccountName: sa-ingest-api
+      # backend-deployment.yaml과 같은 이유(2026-08-26) — hostPath는 Docker named
+      # volume과 달리 이미지 소유권을 상속하지 않아 매번 initContainer로 chown.
+      initContainers:
+        - name: fix-orders-perms
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 10001:10001 /app/orders"]
+          volumeMounts:
+            - name: order-records
+              mountPath: /app/orders
       containers:
         - name: orderapi
           image: truss-orderapi:latest

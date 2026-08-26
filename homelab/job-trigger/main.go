@@ -109,6 +109,18 @@ func orderRecordsVolume() (corev1.Volume, corev1.VolumeMount) {
 	return vol, mount
 }
 
+// orderRecordsPermFixContainer는 hostPath가 Docker named volume과 달리 이미지의
+// 소유권을 상속하지 않는 문제(2026-08-26 실측, homelab/k8s/apps/*-deployment.yaml
+// 주석 참고)를 trader/replayengine Job에도 동일하게 막는다.
+func orderRecordsPermFixContainer(mount corev1.VolumeMount) corev1.Container {
+	return corev1.Container{
+		Name:         "fix-orders-perms",
+		Image:        "busybox:1.36",
+		Command:      []string{"sh", "-c", "chown -R 10001:10001 " + mount.MountPath},
+		VolumeMounts: []corev1.VolumeMount{mount},
+	}
+}
+
 // runAITraderJob은 infra/lambda/job-trigger/index.py의 _build_ai_trader_job과
 // 같은 구성(ai-trader-config ConfigMap, sa-ai-trader ServiceAccount, 리소스
 // 한도)을 client-go로 재현합니다.
@@ -125,6 +137,7 @@ func runAITraderJob(ctx context.Context, clientset *kubernetes.Clientset, req jo
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "sa-ai-trader",
 					RestartPolicy:      corev1.RestartPolicyNever,
+					InitContainers:     []corev1.Container{orderRecordsPermFixContainer(mount)},
 					Containers: []corev1.Container{
 						{
 							Name:            "ai-trader",
@@ -195,6 +208,7 @@ func runReplayJob(ctx context.Context, clientset *kubernetes.Clientset, req jobR
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "sa-replay-engine",
 					RestartPolicy:      corev1.RestartPolicyNever,
+					InitContainers:     []corev1.Container{orderRecordsPermFixContainer(mount)},
 					Containers: []corev1.Container{
 						{
 							Name:            "replay-engine",
