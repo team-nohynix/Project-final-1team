@@ -98,6 +98,24 @@
 - **"미체결" 항목은 이 화면에 안 씀** — 팀 결정으로 접수/체결만 보여주기로 함. `GET /v1/orders/summary`의 `unfilled` 필드 자체는 그대로 있으니(AI 트레이더 결과 화면 등 다른 곳에서 씀) 이 화면에서만 그 필드를 안 쓰면 된다 — 백엔드가 따로 응답을 바꾸지 않음.
 - 실제 로컬 환경에서 20개 마켓 중 일부만 기록 있는 경우의 합산/최댓값 계산, 마켓 조회 실패가 전체 요청을 막지 않는 것, 두 번째 실행이 시작되는 순간 `previous-run`이 정확히 그 이전 실행으로 갱신되는 것까지 확인함.
 
+### 3.7 하루 중 시간 구간 선택 — `fromTs`/`toTs` (2026-08-25, `ai-trader`까지 확장)
+
+"항상 하루(00:00~24:00) 전체를 재생/생성한다"를 "원하는 시간대만" 골라서 돌릴 수 있게 하는 기능. `POST /v1/jobs`(4.2 참고)의 `fromTs`/`toTs` 필드(둘 다 Unix ms, 선택)로 쓴다 — 이번 세션 전엔 `replay`(리플레이 엔진) 전용이었는데, 2026-08-25에 `ai-trader`(트레이더/페이퍼 트레이딩)도 지원하도록 확장했다. 두 잡타입 모두 필드 이름·의미·단위가 완전히 같다.
+
+```json
+{ "jobType": "ai-trader", "date": "2026-08-25", "speed": 60, "fromTs": 1787616000000, "toTs": 1787637600000 }
+```
+```json
+{ "jobType": "replay", "date": "2026-08-25", "speed": 100, "shardCount": 2, "fromTs": 1787616000000, "toTs": 1787637600000 }
+```
+(위 두 값은 `2026-08-25T00:00:00Z`~`06:00:00Z`, 즉 KST로 그날 09:00~15:00에 해당.)
+
+**동작 방식이 둘 다 똑같다** — 시세 수집기(backend)든 트레이더가 남긴 주문 기록 파일이든, 원본은 항상 "그날 하루 전체" 단위로만 존재한다(부분 구간을 따로 저장/조회하는 기능이 없음). 그래서 `trader`/`replayengine` 둘 다 **하루치를 통째로 받아온 뒤, 그 프로세스 자신이 클라이언트 사이드에서 `[fromTs, toTs]` 구간만 걸러내고 재생**한다(`trader/replay.filterEventRange`, `replayengine`의 `filterRange` — 이름만 다르고 로직은 동일). 즉 이 필드를 좁혀도 시세 수집기/S3에서 받아오는 데이터 양 자체는 줄지 않는다 — 줄어드는 건 실제로 재생/생성에 쓰는 이벤트 수와 그만큼의 실행 시간이다.
+
+**하루 경계는 KST로 통일돼 있다(2026-08-26).** 이 절을 처음 쓸 때는 `trader`/`replayengine`이 `date`를 UTC 캘린더 하루로 해석해서, 시세 수집기(`backend`)의 KST 하루 경계(`docs`의 "Date boundaries are KST" 규칙)와 서로 달랐다 — `fromTs`/`toTs`를 어느 기준으로 계산해야 하는지 헷갈리기 쉽고, 잘못 계산하면 에러 없이 "필터링 결과 0건"으로 조용히 실패하는 함정이 있었다. 지금은 `trader`/`orderapi`(replay-preview)/`replayengine` 셋 다 `date`를 **KST 캘린더 하루**로 통일해서 해석하므로(`time.ParseInLocation("2006-01-02", date, kst)`), 시세 수집기와 정확히 같은 하루 경계를 쓴다 — `fromTs`/`toTs`는 그냥 KST 기준으로 원하는 시각을 Unix ms로 변환해서 넣으면 된다, 별도로 UTC로 다시 계산할 필요 없음.
+
+**⚠️ "부하 시나리오 미리보기"(3.6, `GET /v1/jobs/replay-preview`)는 아직 이 구간을 반영하지 못한다 — 알려진 갭.** 이 엔드포인트는 `fromTs`/`toTs` 파라미터를 아예 받지 않고, 항상 그날 기록 파일 전체 기준으로 `totalOrders`/`maxEventSpanSeconds`를 계산한다(`orderapi/replaypreview.go`). 그래서 사용자가 프론트에서 시간 구간을 좁혀도, 미리보기 화면의 "총 재생 예정 건수"/"예상 소요 시간"은 여전히 하루 전체 기준 값으로 뜬다 — 실제 재생은 구간대로 줄어드는데 미리보기 숫자만 그대로라 서로 안 맞게 보일 수 있다. 미리보기까지 구간을 반영하려면 `replayPreviewHandler`가 `fromTs`/`toTs` 쿼리 파라미터를 받아 필터링 후 계산하도록 백엔드를 추가로 고쳐야 한다(아직 안 함).
+
 ## 4. 사용 예시 (실제 요청/응답)
 
 ### 4.1 호가창 조회 — `GET /v1/markets/{market}/orderbook`
@@ -179,12 +197,12 @@ AI 트레이더를 띄울 때는 `jobType`만 바꾸면 된다(샤드 개념 없
 | `speed` | `-speed` | 적용 | 적용 | **60** | 0 이하면 400 `INVALID_SPEED` |
 | `orderBucket` | `-order-bucket` | 적용 | 적용 | `""`(로컬 `./orders`) | 별도 검증 없음 — S3 버킷이 아직 준비 전이라 사실상 항상 기본값(로컬) 사용 |
 | `shardCount` | `-shard-count` | **무시됨** | 적용 | **1** | 1 미만이면 400 `INVALID_SHARD_COUNT`. `ai-trader`는 애초에 샤딩 개념이 없어서 이 필드를 보내도 무시된다(`_build_ai_trader_job`이 아예 안 읽음) |
-| `fromTs` | `-from-ts` | 무시됨 | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. `ai-trader`는 무시됨(FR-27 구간 지정은 재생 전용) |
-| `toTs` | `-to-ts` | 무시됨 | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. `ai-trader`는 무시됨 |
+| `fromTs` | `-from-ts` | **적용(2026-08-25부터)** | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. 3.7 참고 |
+| `toTs` | `-to-ts` | **적용(2026-08-25부터)** | 적용 | 0(구간 제한 없음, Unix ms) | 별도 검증 없음. 3.7 참고 |
 | (요청 필드 없음) | `-shard-index` | - | 자동 | - | 프론트가 정할 수 없음 — K8s Indexed Job이 파드마다 넣어주는 `JOB_COMPLETION_INDEX`를 그대로 씀 |
 | (요청 필드 없음) | `-run-id` | - | 자동 | - | 프론트가 정할 수 없음 — Lambda가 SQS `messageId` 기반으로 만든 K8s Job 이름을 그대로 씀(그 Job의 파드 전부가 공유) |
 
-**로컬에서 CLI로 직접 돌릴 때도 기본값은 같다** — `go run . -date=2026-08-11`만 줘도 `-speed=60`, `-order-bucket=""`(로컬 디렉터리), `replayengine`이면 추가로 `-shard-count=1`/`-shard-index=0`/`-run-id=""`(단독 실행)/`-from-ts=0`/`-to-ts=0`(구간 제한 없음)이 그대로 적용된다.
+**로컬에서 CLI로 직접 돌릴 때도 기본값은 같다** — `go run . -date=2026-08-11`만 줘도 `-speed=60`, `-order-bucket=""`(로컬 디렉터리), `-from-ts=0`/`-to-ts=0`(구간 제한 없음, `trader`/`replayengine` 둘 다), `replayengine`이면 추가로 `-shard-count=1`/`-shard-index=0`/`-run-id=""`(단독 실행)이 그대로 적용된다.
 
 ### 4.3 트레이스 조회 — `GET /v1/trace/{orderId}` (2026-08-12 신설, `recorder`)
 

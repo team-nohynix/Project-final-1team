@@ -16,6 +16,11 @@ import (
 	"replayengine/session"
 )
 
+// kst는 한국 표준시(UTC+9)입니다 — backend/upbit.KST와 같은 이유로
+// time.LoadLocation("Asia/Seoul") 대신 FixedZone을 씁니다: 한국은 DST가 없어
+// 오프셋이 항상 고정이고, tzdata 없는 최소 컨테이너 이미지에서도 안전합니다.
+var kst = time.FixedZone("KST", 9*60*60)
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -43,14 +48,17 @@ func run() (err error) {
 		return fmt.Errorf("-shard-index(%d)는 0 이상 -shard-count(%d) 미만이어야 합니다", *shardIndex, *shardCount)
 	}
 
-	// trader/main.go와 동일하게 UTC 캘린더 일 기준으로 해석합니다 — trader가 기록
-	// 파일을 쓸 때 이 방식으로 start/end를 계산했으므로, 여기서도 똑같이 계산해야
-	// 같은 objectKey(=같은 파일 경로)를 가리킵니다.
-	start, err := time.Parse("2006-01-02", *date)
+	// trader/main.go와 동일하게 KST 캘린더 일 기준으로 해석합니다(2026-08-26,
+	// UTC 기준에서 변경 — 시세 수집기(backend)의 KST 하루 경계와 트레이더/리플레이
+	// 엔진의 UTC 하루 경계가 서로 달라서, 프론트가 -from-ts/-to-ts로 시간 구간을
+	// 고를 때 어느 기준으로 계산해야 하는지 헷갈리기 쉬웠던 문제를 아예 없앤다 —
+	// 전부 KST로 통일). trader가 기록 파일을 쓸 때 이 방식으로 start/end를
+	// 계산하므로, 여기서도 똑같이 계산해야 같은 objectKey(=같은 파일 경로)를
+	// 가리킵니다.
+	start, err := time.ParseInLocation("2006-01-02", *date, kst)
 	if err != nil {
 		return fmt.Errorf("-date 형식이 올바르지 않습니다: %w", err)
 	}
-	start = start.UTC()
 	end := start.Add(24 * time.Hour)
 
 	cfg := LoadConfig()
