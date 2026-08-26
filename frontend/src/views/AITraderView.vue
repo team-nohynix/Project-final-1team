@@ -469,29 +469,22 @@ const runEndedAt = ref<string | null>(null)
 // run speed observed from last-run (backend may include `speed` in last-run response)
 const runSpeed = ref<number | null>(null)
 
-// 진행률/남은 시간 표시용(2026-08-26 요청) — 페이퍼 트레이딩도 사실 그 날짜
-// 하루치 시세를 배속 재생하는 것이라(트레이더 -date 인자, 리플레이와 같은
-// 구조) LoadTestReplayView.vue의 "예상 소요 시간"과 같은 방식으로 전체
-// 예상 시간을 낼 수 있다 — replay-preview가 그 날짜의 maxEventSpanSeconds를
-// 준다. 다만 이 프리뷰는 date만 받고 fromTs/toTs(시간 범위 좁히기)는 반영
-// 못 하므로, 시작/종료 시각을 좁혀서 실행하면 추정치가 실제보다 길게
-// 나온다 — 어디까지나 근사치.
-const paperPreview = ref<{ maxEventSpanSeconds: number } | null>(null)
-
-async function fetchPaperPreview(date: string) {
-  if (!date) {
-    paperPreview.value = null
-    return
-  }
-  try {
-    const res = await fetch(`/order-api/v1/jobs/replay-preview?date=${encodeURIComponent(date)}`)
-    if (!res.ok) return
-    paperPreview.value = await res.json()
-  } catch (e) {
-    // 진행률 계산용 보조 데이터라 실패해도 조용히 넘어간다 — 진행바는
-    // 그냥 퍼센트 없이(인디터미닛으로) 표시된다.
-  }
-}
+// 진행률/남은 시간 표시용(2026-08-26 요청). 처음엔 LoadTestReplayView.vue의
+// "예상 소요 시간"처럼 GET .../replay-preview(maxEventSpanSeconds)를 재사용
+//했는데, 이 엔드포인트는 그 날짜에 **과거 트레이더 실행이 이미 남겨둔 주문
+// 기록**(order-records 버킷, orderapi/replaypreview.go의 storage.Load)을
+// 읽는 것이었다 — 리플레이(FR-18, "기록된 주문을 다시 재생")를 위해 만든
+// 것이라 방향이 반대다. 그래서 그 날짜의 첫 페이퍼 트레이딩 실행에서는
+// (미리 볼 과거 기록이 없으니) totalOrders=0으로 나와 남은 시간이 계속
+// 안 보이는 버그가 있었다(실측). 대신 trader/main.go 자체를 근거로 쓴다 —
+// `-date`로 받은 날짜를 KST 캘린더 하루(00:00~24:00, 86400초) 그대로
+// 배속 재생하는 구조라(`end := start.Add(24 * time.Hour)`), 그 날의 실제
+// 시세/주문 기록과 무관하게 항상 86400초/배속이 총 소요 시간이다 — API
+// 호출 없이 결정적으로 계산 가능하다. 다만 시작/종료 시각(startTime/
+// endTime)으로 좁혀서 실행한 경우는 반영하지 못해 추정치가 실제보다 길게
+// 나온다 — 어디까지나 근사치(LoadTestReplayView의 예상 소요 시간과 같은
+// 수준의 근사).
+const SECONDS_PER_KST_DAY = 24 * 60 * 60
 
 function formatSecondsToHMS(secTotal: number) {
   if (!Number.isFinite(secTotal) || secTotal <= 0) return '0초'
@@ -507,10 +500,8 @@ function formatSecondsToHMS(secTotal: number) {
 }
 
 function paperEstimatedTotalSeconds(): number {
-  const span = paperPreview.value?.maxEventSpanSeconds
   const speedVal = runSpeed.value || Number(speed.value) || 1
-  if (!span || !Number.isFinite(span) || span <= 0) return 0
-  return span / speedVal
+  return SECONDS_PER_KST_DAY / speedVal
 }
 
 function paperProgressPercent(): number {
@@ -846,8 +837,6 @@ const startPaperTrading = async () => {
       }
     }
 
-    fetchPaperPreview(selectedDate.value)
-
     const payload: any = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
     const from = startTime.value ? toKstMs(startTime.value) : 0
     const to = endTime.value ? toKstMs(endTime.value) : 0
@@ -948,7 +937,6 @@ onMounted(async () => {
       storedRunId.value = stored.storedRunId ?? storedRunId.value
       // If execution was running when saved, resume polling to refresh status/results
       if (executionStatus.value === 'running') {
-        fetchPaperPreview(selectedDate.value)
         try {
           // poll once immediately to resume live updates
           await pollLastRun()
