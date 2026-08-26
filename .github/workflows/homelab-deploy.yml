@@ -1,0 +1,69 @@
+name: Homelab Deploy
+
+# jhyang 브랜치 전용 — 홈서버(truss-vm)에 등록한 self-hosted runner(label: homelab)
+# 에서 직접 돈다. AWS의 prod-deploy.yml과 달리 ECR 푸시/OIDC가 필요 없다 —
+# 러너 자신이 곧 배포 대상 VM이라 로컬에서 docker build → containerd import →
+# kubectl apply로 끝난다(2026-08-26, kubeadm 이전 이후 신설).
+#
+# prod-deploy.yml처럼 변경 경로만 골라 부분 배포하는 대신 매번 전부 다시
+# build+import+apply한다 — 단일 VM이라 빌드가 몇 초~1분 수준이고, 부분 배포의
+# 엣지케이스(매니페스트만 바뀌고 이미지는 그대로일 때 등)를 신경 쓰는 비용이
+# 이 규모에서는 안 맞는다고 판단.
+
+on:
+  push:
+    branches: [jhyang]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, homelab]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 이미지 빌드
+        run: |
+          set -e
+          docker build -t truss-backend:latest backend
+          docker build -t truss-orderapi:latest orderapi
+          docker build -t truss-matching:latest matching
+          docker build -t truss-recorder:latest recorder
+          docker build -t truss-trader:latest trader
+          docker build -t truss-replayengine:latest replayengine
+          docker build -t truss-job-trigger:latest homelab/job-trigger
+          docker build -t truss-nginx:latest -f homelab/nginx/Dockerfile .
+
+      - name: containerd로 임포트
+        run: |
+          set -e
+          for img in truss-backend truss-orderapi truss-matching truss-recorder \
+                     truss-trader truss-replayengine truss-job-trigger truss-nginx; do
+            docker save "$img:latest" | sudo ctr -n k8s.io images import -
+          done
+
+      - name: K8s 매니페스트 적용
+        run: |
+          set -e
+          kubectl apply -f homelab/k8s/apps/backend-deployment.yaml
+          kubectl apply -f homelab/k8s/apps/orderapi-deployment.yaml
+          kubectl apply -f homelab/k8s/apps/matching-engine-deployment.yaml
+          kubectl apply -f homelab/k8s/apps/recorder-deployment.yaml
+          kubectl apply -f homelab/k8s/apps/frontend.yaml
+          kubectl apply -f homelab/k8s/apps/scaledobjects.yaml
+          kubectl apply -f homelab/k8s/job-trigger/rbac.yaml
+          kubectl apply -f homelab/k8s/job-trigger/job-trigger.yaml
+
+      - name: 롤아웃 재시작 (이미지 태그가 고정 latest라 재적용만으로는 새 이미지를 안 집음)
+        run: |
+          set -e
+          kubectl rollout restart deployment/backend -n collector
+          for d in orderapi matching-engine recorder frontend; do
+            kubectl rollout restart deployment/$d -n backend
+          done
+          kubectl rollout restart deployment/job-trigger -n ai-trader
+
+          kubectl rollout status deployment/backend -n collector --timeout=120s
+          for d in orderapi matching-engine recorder frontend; do
+            kubectl rollout status deployment/$d -n backend --timeout=120s
+          done
+          kubectl rollout status deployment/job-trigger -n ai-trader --timeout=120s
