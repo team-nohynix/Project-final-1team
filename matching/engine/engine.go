@@ -188,7 +188,20 @@ func (e *Engine) BookSize() int {
 // 뒤에만 이 이벤트의 offset을 "안전하게 처리됨"으로 기록합니다 — 발행 확인 전에 먼저
 // 기록해두면, 그 사이 크래시가 나면 다음 복구 시 이 체결이 재생되지 않고 영원히
 // 사라집니다(스냅샷 체크포인트 설계, FR-08).
+//
+// **offset 단조성 가드 — 2026-08-27, 정합성 검사 "중복 체결" 사고 대응(두 번째
+// 방어선).** orderbook.Apply 자체도 같은 OrderID가 이미 호가창에 있으면 무시하지만,
+// 그건 "그 주문이 아직 미체결로 남아있는 동안" 재전달된 경우만 잡는다 — 이미 전량
+// 체결/취소돼 호가창에서 빠진 뒤에 같은 이벤트가 재전달되면 그 체크로는 못 잡고
+// 완전히 새 주문처럼 다시 매칭돼버린다. 이 마켓은 파티션 하나를 고루틴 하나가
+// 순차 소비하므로(consumer.go 참고) offset은 항상 엄격한 전순서다 — 정상 상황이면
+// ev.Offset은 항상 e.lastOffset+1이어야 하고, 그보다 작거나 같으면 무조건 이미
+// 처리된(=재전달된) 이벤트다. NEW/CANCEL 둘 다 여기서 한 번에 막는다.
 func (e *Engine) Apply(ctx context.Context, ev OrderEvent) error {
+	if ev.Offset <= e.lastOffset {
+		return nil
+	}
+
 	switch ev.Type {
 	case EventNew:
 		o := &orderbook.Order{OrderID: ev.OrderID, Market: ev.Market, Side: ev.Side, Price: ev.Price, Quantity: ev.Quantity, Offset: ev.Offset}
