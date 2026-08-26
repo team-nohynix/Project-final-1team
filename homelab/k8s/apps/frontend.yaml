@@ -1,0 +1,66 @@
+# 프론트(Vue SPA) + nginx 라우팅 — homelab/nginx/Dockerfile·nginx.conf를 그대로
+# 빌드해 K8s Deployment로 띄운다. AWS의 S3+CloudFront 역할, Docker Compose의
+# nginx 서비스 역할과 동일 — kubeadm 이전(2026-08-26) 이후 앞단이 ingress-nginx로
+# 바뀌었을 뿐, 내부 라우팅(/order-api,/recorder-api,/v1)은 이 nginx.conf가 계속 처리.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: backend
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: truss-nginx:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: backend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: backend
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
