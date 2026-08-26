@@ -222,7 +222,13 @@ function loadFromSession() {
     const ri = sessionStorage.getItem(SS_KEYS.runInfo)
     if (ri) {
       const parsed = JSON.parse(ri)
-      if (parsed) runInfo.value = parsed
+      // 종료 상태(COMPLETED/FAILED/STOPPED)는 복원 안 함 — 새로 접속했는데
+      // 예전에 끝난 실행의 "중지됨"/"완료" 배지가 그대로 남아 있어서 마치
+      // 방금 뭔가 실행한 것처럼 보이는 문제(2026-08-26 제보). 아래
+      // onMounted의 재개 로직도 IN_PROGRESS만 신경 쓰므로, 종료 상태를
+      // 복원해도 실제로 쓰이는 곳이 이 상태 카드 표시뿐이었다 — 과거 결과는
+      // "결과 자세히 보기"(test-results)에서 정식으로 봐야 한다.
+      if (parsed && parsed.status === 'IN_PROGRESS') runInfo.value = parsed
     }
     const sr = sessionStorage.getItem(SS_PREFIX + 'stopRequested')
     if (sr) stopRequested.value = JSON.parse(sr)
