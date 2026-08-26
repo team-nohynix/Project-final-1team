@@ -174,7 +174,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("Kafka Dialer 생성 실패 (강제 초기화용): %v", err)
 		}
-		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", resetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
+		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", startResetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
+		mux.HandleFunc("GET /v1/admin/reset-matching-engine-book/status", resetMatchingEngineBookStatusHandler())
 		log.Printf("K8s 연동 활성화 — POST /v1/admin/reset-matching-engine-book 사용 가능 (namespace=%s, deployment=%s)", matchingEngineNamespace, matchingEngineDeploymentName)
 	}
 

@@ -43,14 +43,37 @@ async function resetSystemState() {
       throw new Error(`미종결 주문 정리 요청 실패 (${cleanupRes.status})`)
     }
 
-    resetMessage.value = '매칭엔진 호가창 리셋 중... (파드 롤아웃 재시작 포함, 최대 수십 초 소요)'
-    const bookRes = await fetch('/order-api/v1/admin/reset-matching-engine-book?force=true', { method: 'POST' })
-    if (!bookRes.ok) {
-      const body = await bookRes.text().catch(() => '')
-      throw new Error(`매칭엔진 호가창 리셋 실패 (${bookRes.status}) ${body}`)
+    resetMessage.value = '매칭엔진 호가창 리셋 요청 중...'
+    // 2026-08-26: 이 요청 자체가 응답을 기다리던 옛 버전은, 매칭엔진이
+    // 여러 레플리카로 떠 있을 때(부하테스트 중, 이 버튼이 가장 필요한
+    // 상황) 롤아웃 완료 대기가 CloudFront 오리진 응답 한계를 넘겨 브라우저가
+    // "실패"로 표시하는 문제가 있었다(서버 쪽은 실제로 항상 끝까지 완료되고
+    // 있었음, orderapi/adminreset.go 참고) — 이제 서버가 즉시 202를 반환하고
+    // 백그라운드에서 진행하므로, 여기서 GET .../status를 폴링해 실제 완료를
+    // 기다린다.
+    const startRes = await fetch('/order-api/v1/admin/reset-matching-engine-book?force=true', { method: 'POST' })
+    if (startRes.status !== 202 && startRes.status !== 409) {
+      const body = await startRes.text().catch(() => '')
+      throw new Error(`매칭엔진 호가창 리셋 요청 실패 (${startRes.status}) ${body}`)
     }
 
-    resetMessage.value = '초기화 완료 — 미종결 주문 정리와 호가창 리셋을 요청했습니다.'
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      const statusRes = await fetch('/order-api/v1/admin/reset-matching-engine-book/status')
+      if (!statusRes.ok) continue
+      const status = await statusRes.json()
+      if (status.status === 'IN_PROGRESS') {
+        resetMessage.value = `매칭엔진 호가창 리셋 중... (${status.step || '진행 중'})`
+        continue
+      }
+      if (status.status === 'FAILED') {
+        throw new Error(status.message || '매칭엔진 호가창 리셋 실패')
+      }
+      // COMPLETED — resetInFlight/타이머 정리는 finally에서 공통으로 처리한다.
+      resetMessage.value = '초기화 완료 — 미종결 주문 정리와 호가창 리셋을 마쳤습니다.'
+      return
+    }
+    throw new Error('매칭엔진 호가창 리셋 상태 확인이 시간 초과됐습니다 — 서버에서는 계속 진행 중일 수 있습니다.')
   } catch (e) {
     resetMessage.value = `초기화 실패: ${e.message || e}`
   } finally {
