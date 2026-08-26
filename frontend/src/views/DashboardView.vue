@@ -1232,10 +1232,12 @@ onBeforeUnmount(() => {
           class="run-status-row"
           :class="{ 'run-active': card.inProgress }"
         >
-          <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
-            {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
-          </span>
-          <span v-if="formatAgo(cardAgoRef(card))" class="run-badge-latest">{{ formatAgo(cardAgoRef(card)) }}</span>
+          <div class="run-badge-col">
+            <span v-if="formatAgo(cardAgoRef(card))" class="run-badge-latest">{{ formatAgo(cardAgoRef(card)) }}</span>
+            <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
+              {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
+            </span>
+          </div>
           <div class="run-status-text">
             <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
             <span v-if="card.speed"><strong>{{ card.speed }}배속</strong></span>
@@ -1493,6 +1495,13 @@ onBeforeUnmount(() => {
 .run-status-row.run-active {
   background: rgba(46, 211, 154, 0.14);
   border-color: rgba(46, 211, 154, 0.5);
+}
+
+.run-badge-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
 .run-badge {
