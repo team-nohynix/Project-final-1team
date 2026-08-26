@@ -791,6 +791,17 @@ const flowNodesDef = [
 ]
 const FLOW_SVC_COLOR = { orderapi: '#4a90ff', matching: '#ffb84d', recorder: '#33e6a8' }
 const FLOW_SCALE_RANGE = { matching: { min: 2, max: 10 }, recorder: { min: 1, max: 10 } }
+// FLOW_LAG_KEYS — orderapi GET /v1/cluster-metrics의 matchingLag/recorderLag
+// 필드와 KEDA 임계치(각 ScaledObject의 threshold) 매핑. orderapi/Kafka 토픽
+// 노드는 컨슈머가 아니라 랙 개념이 없어 여기 없다.
+const FLOW_LAG_KEYS = {
+  matching: { field: 'matchingLag', threshold: 500 },
+  recorder: { field: 'recorderLag', threshold: 1000 },
+}
+function flowFormatLag(v) {
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k'
+  return String(v)
+}
 const FLOW_BRANCH_START = 0.388
 const FLOW_BRANCH_END = 0.424
 const FLOW_MERGE_START = 0.813
@@ -1094,7 +1105,10 @@ function drawFlowFrame() {
     // 상향) — 통로가 가장 얇을 때도 라벨이 읽히고, 가장 두꺼울 때도 박스가
     // 통로를 넘어설 만큼 과하게 커지지 않게.
     const bandHalfPx = flowBandHalfFrac(nd.x, nd.lane, scale) * h
-    const bh = Math.min(Math.max(bandHalfPx * 1.25, 44), 64)
+    // 랙 뱃지가 붙는 노드(matching/recorder)는 3번째 텍스트 줄이 들어가므로
+    // 최소 높이를 12px 더 준다(2026-08-26) — 나머지 노드는 기존 44px 그대로.
+    const minBh = FLOW_LAG_KEYS[nd.key] ? 56 : 44
+    const bh = Math.min(Math.max(bandHalfPx * 1.25, minBh), 64)
     const drawCx = Math.min(Math.max(nx, bw / 2 + 4), w - bw / 2 - 4)
     const bx = drawCx - bw / 2
     const by = ny - bh / 2
@@ -1112,6 +1126,19 @@ function drawFlowFrame() {
     ctx.fillStyle = '#7f93a8'
     ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
     ctx.fillText(nd.sub, drawCx, ny + 11)
+
+    // 컨슈머 랙 뱃지(2026-08-26 추가) — 그라파나 원본엔 있었지만 처음 이식할
+    // 때(8/24) 소스 데이터가 없어 뺐던 것. matching-engine/recorder만 Kafka
+    // 컨슈머라 랙이 의미 있다 — KEDA가 스케일 트리거로 쓰는 것과 같은 임계치
+    // (matching-engine-scaledobject.yaml=500, recorder-scaledobject.yaml=1000)를
+    // 넘으면 빨간색으로 경고한다.
+    const lagInfo = FLOW_LAG_KEYS[nd.key]
+    if (lagInfo) {
+      const lagVal = clusterMetrics.value?.[lagInfo.field] ?? 0
+      ctx.fillStyle = lagVal >= lagInfo.threshold ? '#ff8a8a' : '#5fb8e0'
+      ctx.font = '600 9px -apple-system, BlinkMacSystemFont, sans-serif'
+      ctx.fillText(`랙 ${flowFormatLag(lagVal)}`, drawCx, ny + 23)
+    }
   }
 
   // "레플리카: 매칭 X · 기록기 Y"는 아래 "클러스터 현황" 패널에 이미 있는
