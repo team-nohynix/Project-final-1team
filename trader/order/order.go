@@ -28,6 +28,20 @@ type Order struct {
 	IdempotencyKey string
 }
 
+// quantityDecimals는 Quantity를 문자열로 만들 때 쓰는 고정 소수 자릿수입니다 —
+// matching/orderbook.normalizePrice의 .Truncate(8), recorder 스키마의
+// DECIMAL(24,8)과 맞춘 값입니다(2026-08-26). 원래 Quantity는 RoundToTick 없이
+// strconv.FormatFloat(..., -1, 64)(최단 왕복 표현)로 그대로 문자열화했는데,
+// 이게 봇의 float64 연산 결과에 따라 8자리보다 긴 소수(예: 15자리)를 만들어낼
+// 수 있었습니다 — Price에 대해 이미 문서화된 것과 정확히 같은 부류의 문제
+// ("strconv.FormatFloat의 최단 표현 모드는 634.00000000001 같은 부동소수점
+// 잡음을 만든다")인데 Quantity 쪽만 안 고쳐져 있었습니다. 그 결과 부분체결마다
+// DB의 DECIMAL(24,8) 컬럼에 독립적으로 반올림되면서, 부분체결 수량의 합이
+// 원래 주문 수량과 최대 1.19(satoshi 단위 다수)까지 어긋나는 "초과체결" 정합성
+// 오류가 실측으로 확인됐습니다(2026-08-26). 8자리로 고정해 애초에 8자리를
+// 넘는 값이 나가지 않게 막습니다.
+const quantityDecimals = 8
+
 // NewOrder는 한 마켓의 Decision을 Order로 변환합니다. 가격은 RoundToTick으로 마켓 호가
 // 단위의 배수로 스냅합니다 — 그래야 나중에 실제 주문 API에 붙였을 때 INVALID_PRICE_UNIT으로
 // 거부되지 않습니다(봇은 스프레드 계산 등으로 임의의 실수 가격을 만들어내므로 이 보정이 필요).
@@ -37,7 +51,7 @@ func NewOrder(market string, d bot.Decision) Order {
 		Market:         market,
 		Side:           d.Side,
 		Price:          strconv.FormatFloat(price, 'f', decimals, 64),
-		Quantity:       strconv.FormatFloat(d.Quantity, 'f', -1, 64),
+		Quantity:       strconv.FormatFloat(d.Quantity, 'f', quantityDecimals, 64),
 		TS:             time.Now().UnixMilli(),
 		IdempotencyKey: newIdempotencyKey(),
 	}

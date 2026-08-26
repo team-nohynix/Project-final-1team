@@ -424,7 +424,14 @@ func (s *MySQLStore) ApplyExecutionsBatch(ctx context.Context, execs []Execution
 			if i > 0 {
 				sb.WriteString(",")
 			}
-			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())")
+			// UTC_TIMESTAMP()(인자 없음)는 밀리초를 아예 버리고 초 단위로
+			// 저장합니다 — executed_at 컬럼 자체는 DATETIME(3)인데 소스 값이
+			// 이미 .000으로 잘려서 들어오니, 같은 초 안에 접수된 submitted_at
+			// (orderapi가 밀리초까지 찍음)보다 실제로는 나중인 체결이 숫자
+			// 비교에서 더 이르게 보이는 "순서 역전" 오탐이 실측으로 확인됐습니다
+			// (2026-08-26, 실 DB 위반 행 20건 전부 이 패턴과 일치). UTC_TIMESTAMP(3)로
+			// 밀리초까지 유지해서 고칩니다.
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))")
 			args = append(args, execID, in.Market, in.BuyOrderID, in.SellOrderID, in.Price, in.Quantity, nullIfEmpty(mode))
 
 			results[i] = ExecutionResult{
