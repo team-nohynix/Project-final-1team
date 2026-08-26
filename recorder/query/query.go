@@ -838,15 +838,25 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 
 	var c IntegrityCheck
 
-	// 중복 체결: 한 주문(매수 또는 매도)에 대해 체결된 수량 합이 원래 주문
-	// 수량을 넘는 경우.
+	// **FORCE INDEX 3개 전부 — 2026-08-26 실측 성능 버그 수정.** orderSummaryByMarket
+	// 이 2026-08-24에 겪은 것과 정확히 같은 문제: mode+executed_at(또는
+	// mode+submitted_at)으로 좁혀지는 이 조건들에 맞는 인덱스가 이미 있는데도
+	// (idx_execution_executed_at, idx_trade_order_mode_submitted), 테이블이
+	// 오늘 대형 부하테스트로 급격히 커지면서(execution 400만행+, trade_order
+	// 500만행+) 옵티마이저 통계가 낡아 EXPLAIN 결과 셋 다 key=NULL(전체
+	// 테이블 스캔, type=ALL)을 골랐다 — 실측으로 20분짜리 리플레이 구간 하나
+	// 조회에 90초+ 걸려 CloudFront 타임아웃(502/504)까지 재현됨. FORCE INDEX로
+	// 강제하면 type=range로 바뀌어 즉시 응답한다(실측 확인). ANALYZE TABLE로
+	// 통계만 갱신해도 일시적으로는 고쳐지지만, 부하테스트가 반복돼 테이블이
+	// 계속 급격히 커지는 이 프로젝트 특성상 통계가 금방 다시 낡으므로
+	// FORCE INDEX가 더 안정적이다.
 	if err := q.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM (
 			SELECT f.order_id FROM (
-				SELECT buy_order_id AS order_id, quantity FROM execution
+				SELECT buy_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
 				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
 				UNION ALL
-				SELECT sell_order_id AS order_id, quantity FROM execution
+				SELECT sell_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
 				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
 			) f
 			JOIN trade_order o ON o.order_id = f.order_id
@@ -868,7 +878,7 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 	// NULL과의 비교는 항상 FALSE라 그 execution은 이 조건으로는 안 걸립니다
 	// (주문 유실은 별개 지표에서 다룸).
 	if err := q.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM execution e
+		SELECT COUNT(*) FROM execution e FORCE INDEX (idx_execution_executed_at)
 		LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
 		LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
 		WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
@@ -882,7 +892,7 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 		SELECT
 			COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
-		FROM trade_order
+		FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
 		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
 	`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled); err != nil {
 		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", err)
