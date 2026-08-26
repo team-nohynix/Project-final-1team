@@ -1205,10 +1205,8 @@ onBeforeUnmount(() => {
           </p>
         </article>
       </div>
-    </section>
 
-    <section class="panel order-status-panel">
-      <h3>주문 처리 현황</h3>
+      <h4 class="order-status-subtitle">주문 처리 현황</h4>
       <p class="cluster-note">최근 10분간 접수된 주문의 상태별 건수입니다.</p>
       <div class="stat-grid stat-grid-4">
         <div v-for="card in orderStatusCards" :key="card.label">
@@ -1739,15 +1737,19 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.order-status-panel,
 .cluster-panel {
   margin-top: 18px;
 }
 
-.order-status-panel h3,
 .cluster-panel h3 {
   margin: 0;
   font-size: 16px;
+}
+
+.order-status-subtitle {
+  margin: 24px 0 0;
+  font-size: 13px;
+  color: #9fb0c2;
 }
 
 .cluster-note {
