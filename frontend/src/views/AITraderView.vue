@@ -20,6 +20,14 @@ const formatDateYYYYMMDD = (date: Date) => {
 }
 const todayDate = formatDateYYYYMMDD(new Date())
 
+// 접수/체결/미체결 등 큰 숫자를 천 단위 콤마로 표시 (DashboardView.vue의
+// displayValue와 같은 목적)
+const formatNumber = (v: unknown) => {
+  if (v === null || v === undefined) return '-'
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toLocaleString('ko-KR') : String(v)
+}
+
 // UI messages
 const infoMessage = ref('')
 const errorMessage = ref('')
@@ -1160,18 +1168,24 @@ const resetMatchingEngineBook = async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
+            <!-- 목표 주문 수가 없어 시세 수집처럼 "N/전체" 퍼센트로는 못 보여준다
+                 (트레이딩 세션은 정지할 때까지 계속 도는 워크로드) — 대신 진행
+                 중임을 보여주는 인디터미닛 바를 시세 수집과 같은 트랙 스타일로 둔다. -->
+            <div class="progress-bar-track indeterminate">
+              <div class="progress-bar-fill-indeterminate"></div>
+            </div>
             <div v-if="typedPaperTradingResult">
               <div v-if="typedPaperTradingResult" class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1195,9 +1209,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1215,17 +1229,18 @@ const resetMatchingEngineBook = async () => {
 
           <template v-else-if="executionStatus === 'success'">
             <div v-if="typedPaperTradingResult">
+              <div class="result-title result-title-success">페이퍼 트레이딩 완료</div>
               <div class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1249,9 +1264,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1265,15 +1280,15 @@ const resetMatchingEngineBook = async () => {
               <div class="result-title result-title-stopped">페이퍼 트레이딩 중지됨</div>
               <div class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1297,9 +1312,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1513,6 +1528,9 @@ const resetMatchingEngineBook = async () => {
 .result-title-error {
   color: #ff6b6b;
 }
+.result-title-success {
+  color: #2ed39a;
+}
 .result-desc {
   color: #9fb0c2;
   font-size: 13px;
@@ -1652,6 +1670,28 @@ const resetMatchingEngineBook = async () => {
   background: #3f86ff;
   border-radius: 999px;
   transition: width 0.4s ease;
+}
+
+/* 시세 수집 진행바(N/전체)와 달리, 페이퍼 트레이딩은 정지할 때까지 계속
+   도는 워크로드라 "전체" 개념이 없다 — 대신 계속 움직이는 인디터미닛
+   바로 "멈추지 않고 진행 중"임을 보여준다. */
+.progress-bar-track.indeterminate {
+  margin: 4px 0 12px;
+}
+.progress-bar-fill-indeterminate {
+  height: 100%;
+  width: 40%;
+  background: #3f86ff;
+  border-radius: 999px;
+  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
 }
 
 /* Result stats */

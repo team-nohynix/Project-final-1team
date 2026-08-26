@@ -61,6 +61,42 @@ async function fetchClusterMetrics() {
   const res = await fetch('/order-api/v1/cluster-metrics')
   if (!res.ok) throw new Error(`클러스터 지표 조회 실패: ${res.status}`)
   clusterMetrics.value = await res.json()
+  recordClusterHistory(clusterMetrics.value)
+}
+
+// 클러스터 현황 수치(활성 노드 수 등)는 절대값만으론 "지금 늘고 있는지 줄고
+// 있는지" 알기 어렵다 — pendingOrdersTrend(위)와 같은 이유. 다만 클러스터는
+// 폴링 주기(10초)가 짧아 "직전 폴링 대비"로는 노이즈가 너무 커서, 실제로
+// "1분 전 대비"를 보여주려면 스냅샷 이력을 따로 들고 있어야 한다.
+const CLUSTER_HISTORY_MAX_AGE_MS = 90000
+const clusterMetricsHistory = ref([])
+
+function recordClusterHistory(c) {
+  if (!c) return
+  const now = Date.now()
+  clusterMetricsHistory.value = [...clusterMetricsHistory.value, { t: now, c }].filter(
+    (e) => now - e.t <= CLUSTER_HISTORY_MAX_AGE_MS
+  )
+}
+
+// 이력 중 "1분 전 시점에 가장 가까웠던" 스냅샷을 찾는다 — 정확히 60000ms 전
+// 샘플이 없을 수 있으니(폴링 10초 간격 기준 오차는 최대 ±10초), 60초 이전
+// 중 가장 최신인 것을 쓴다. 아직 1분치 이력이 안 쌓였으면 null.
+function clusterSnapshotOneMinAgo() {
+  const target = Date.now() - 60000
+  let candidate = null
+  for (const e of clusterMetricsHistory.value) {
+    if (e.t <= target) candidate = e
+  }
+  return candidate ? candidate.c : null
+}
+
+function clusterDeltaText(current, previous) {
+  if (current === null || current === undefined || previous === null || previous === undefined) return ''
+  const delta = current - previous
+  if (delta === 0) return '1분 전과 동일'
+  const arrow = delta > 0 ? '▲' : '▼'
+  return `${arrow}${displayValue(Math.abs(delta))} (1분 전 대비)`
 }
 
 const displayValue = (v, digits = 0) => {
@@ -306,21 +342,40 @@ const orderStatusCards = computed(() => {
 // 노드 수/backend 전체 실행 Pod/오토스케일링(/최대)/파드 재시작 누적.
 const clusterCards = computed(() => {
   const c = clusterMetrics.value
+  const prev = clusterSnapshotOneMinAgo()
   return [
-    { label: '활성 노드 수', value: c ? displayValue(c.activeNodes) : '--' },
-    { label: '실행 중인 Pod (backend 전체)', value: c ? displayValue(c.runningPodsBackend) : '--' },
+    {
+      label: '활성 노드 수',
+      value: c ? displayValue(c.activeNodes) : '--',
+      delta: c ? clusterDeltaText(c.activeNodes, prev?.activeNodes ?? null) : '',
+    },
+    {
+      label: '실행 중인 Pod (backend 전체)',
+      value: c ? displayValue(c.runningPodsBackend) : '--',
+      delta: c ? clusterDeltaText(c.runningPodsBackend, prev?.runningPodsBackend ?? null) : '',
+    },
     {
       label: '매칭엔진 레플리카',
       value: c ? `${displayValue(c.autoscaling.matching.current)} / ${displayValue(c.autoscaling.matching.max)}` : '--',
+      delta: c ? clusterDeltaText(c.autoscaling.matching.current, prev?.autoscaling?.matching?.current ?? null) : '',
     },
     {
       label: '기록기 레플리카',
       value: c ? `${displayValue(c.autoscaling.recorder.current)} / ${displayValue(c.autoscaling.recorder.max)}` : '--',
+      delta: c ? clusterDeltaText(c.autoscaling.recorder.current, prev?.autoscaling?.recorder?.current ?? null) : '',
     },
-    { label: 'Karpenter 노드', value: c ? displayValue(c.autoscaling.karpenterNodes) : '--' },
+    {
+      label: 'Karpenter 노드',
+      value: c ? displayValue(c.autoscaling.karpenterNodes) : '--',
+      delta: c ? clusterDeltaText(c.autoscaling.karpenterNodes, prev?.autoscaling?.karpenterNodes ?? null) : '',
+    },
     // 원래 "주문 처리 현황"에 있었던 카드 — 내부 구현 디테일(매칭엔진 메모리
     // 오더북 크기)이라 여기 엔지니어용 섹션으로 옮겼습니다(2026-08-25).
-    { label: '매칭엔진 호가창 잔량', value: c ? displayValue(c.matchingBookSize) : '--' },
+    {
+      label: '매칭엔진 호가창 잔량',
+      value: c ? displayValue(c.matchingBookSize) : '--',
+      delta: c ? clusterDeltaText(c.matchingBookSize, prev?.matchingBookSize ?? null) : '',
+    },
   ]
 })
 const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
@@ -1099,7 +1154,7 @@ onBeforeUnmount(() => {
             {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
           </span>
           <div class="run-status-text">
-            <strong>{{ i === 0 ? card.owner : `${i + 1}번째 전: ${card.owner}` }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
+            <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
             <span v-if="card.speed">{{ card.speed }}배속</span>
             <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ formatElapsed(card.startedAt) }}</span>
             <span v-else>{{ formatKST(card.startedAt) }} ~ {{ formatKST(card.endedAt) }}</span>
@@ -1149,6 +1204,7 @@ onBeforeUnmount(() => {
         <div v-for="card in clusterCards" :key="card.label">
           <span>{{ card.label }}</span>
           <strong>{{ card.value }}</strong>
+          <em v-if="card.delta" class="cluster-delta">{{ card.delta }}</em>
         </div>
       </div>
       <div v-if="podRestartRows.length" class="restart-table">
@@ -1668,6 +1724,12 @@ onBeforeUnmount(() => {
   margin: 6px 0 0;
   color: #8ea2b8;
   font-size: 12px;
+}
+
+.cluster-delta {
+  font-style: normal;
+  font-size: 11px;
+  color: #9fb0c2;
 }
 
 .stat-grid {
