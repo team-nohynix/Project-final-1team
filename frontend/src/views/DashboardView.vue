@@ -363,7 +363,6 @@ const clusterCards = computed(() => {
     },
   ]
 })
-const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
 
 // 오토스케일링 현황 — 예전엔 clusterCards 안에 "N / max" 텍스트로만 있던 걸
 // 막대그래프로 바꿨다(2026-08-26 요청). matching/recorder는 KEDA
@@ -1229,26 +1228,14 @@ onBeforeUnmount(() => {
           <em v-if="card.delta" class="cluster-delta">{{ card.delta }}</em>
         </div>
       </div>
-      <div v-if="podRestartRows.length" class="restart-table">
-        <div class="restart-row restart-header">
-          <span>파드 재시작 누적</span>
-          <span>횟수</span>
-        </div>
-        <div v-for="row in podRestartRows" :key="row.pod" class="restart-row">
-          <span>{{ row.pod }}</span>
-          <span>{{ row.restarts }}</span>
-        </div>
-      </div>
-    </section>
 
-    <section class="panel autoscaling-panel">
-      <h3>
+      <h4 class="autoscaling-subtitle">
         오토스케일링 현황 (KEDA 레플리카 수 / 최대)
         <span
           class="info-icon"
           title="matching-engine/recorder는 KEDA ScaledObject의 실제 min/max 기준입니다. Karpenter 노드는 KEDA처럼 선언된 상한이 없어(NodePool의 CPU 예산으로 상한을 표현) 막대 눈금만 matching-engine의 max를 빌려 쓰고, 'max' 수치는 표기하지 않습니다."
         >ⓘ</span>
-      </h3>
+      </h4>
       <div v-if="autoscalingBars.length" class="autoscaling-bars">
         <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
           <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
@@ -1792,10 +1779,13 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(3, 1fr);
 }
 
-.autoscaling-panel h3 {
+.autoscaling-subtitle {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin: 24px 0 0;
+  font-size: 13px;
+  color: #9fb0c2;
 }
 
 .info-icon {
@@ -1878,32 +1868,4 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.restart-table {
-  margin-top: 18px;
-  border-top: 1px solid #20344b;
-  padding-top: 14px;
-}
-
-.restart-row {
-  display: flex;
-  padding: 8px 0;
-  justify-content: space-between;
-  font-size: 13px;
-  border-bottom: 1px solid #16283b;
-}
-
-.restart-row:last-child {
-  border-bottom: 0;
-}
-
-.restart-header {
-  color: #8ea2b8;
-  font-size: 12px;
-  border-bottom: 1px solid #20344b;
-}
-
-.restart-row:not(.restart-header) span:last-child {
-  color: #ffb84d;
-  font-variant-numeric: tabular-nums;
-}
 </style>
