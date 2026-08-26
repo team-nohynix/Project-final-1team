@@ -34,10 +34,10 @@ data "aws_iam_policy_document" "github_actions_assume" {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/main",
-        "repo:KimDJ7105/Project-final-1team:ref:refs/heads/prod",
-        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/main",
-        "repo:KimDJ7105@101383021/Project-final-1team@1314526744:ref:refs/heads/prod",
+        "repo:team-nohynix/Project-final-1team:ref:refs/heads/main",
+        "repo:team-nohynix/Project-final-1team:ref:refs/heads/prod",
+        "repo:team-nohynix@321210135/Project-final-1team@1314526744:ref:refs/heads/main",
+        "repo:team-nohynix@321210135/Project-final-1team@1314526744:ref:refs/heads/prod",
       ]
     }
   }
