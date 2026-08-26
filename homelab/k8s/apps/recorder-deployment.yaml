@@ -1,0 +1,103 @@
+# infra/k8s/backend/recorder-deployment.yaml을 홈서버용으로 이식(2026-08-26) —
+# DATABASE_URL은 mysql-secret 대신 recorder 전용 Secret(recorder-db-secret,
+# 아래 kubectl create secret 참고)에 완성된 DSN을 담아 그대로 주입.
+# ARCHIVE_BUCKET을 안 채워서 로컬 아카이브 폴백 사용(2026-08-25 홈서버 WORKDIR
+# 버그 수정 이후 정상 동작 확인됨) — 전용 hostPath에 저장.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recorder
+  namespace: backend
+  labels:
+    app: recorder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recorder
+  template:
+    metadata:
+      labels:
+        app: recorder
+    spec:
+      serviceAccountName: sa-recorder
+      containers:
+        - name: recorder
+          image: truss-recorder:latest
+          imagePullPolicy: Never
+          env:
+            - name: PORT
+              value: "8082"
+            - name: KAFKA_BROKER
+              value: "kafka.data.svc.cluster.local:9092"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "false"
+            - name: REDIS_ADDR
+              value: "redis.data.svc.cluster.local:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: recorder-db-secret
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: archive
+              mountPath: /app/records
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1500Mi
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8082
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: archive
+          hostPath:
+            path: /var/lib/truss/recorder-archive
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recorder
+  namespace: backend
+spec:
+  selector:
+    app: recorder
+  ports:
+    - port: 8082
+      targetPort: 8082
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recorder-metrics
+  namespace: backend
+  labels:
+    app: recorder
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: recorder
+  ports:
+    - name: metrics
+      port: 8082
+      targetPort: 8082

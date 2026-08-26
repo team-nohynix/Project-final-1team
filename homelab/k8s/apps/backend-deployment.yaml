@@ -1,0 +1,57 @@
+# infra/k8s/collector/backend-deployment.yaml을 홈서버용으로 이식(2026-08-26) —
+# APP_ENV=dev로 로컬 스토리지 폴백(S3_BUCKET 불필요, backend/Dockerfile의
+# WORKDIR 수정 이후 정상 동작 확인됨).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: collector
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: sa-collector
+      containers:
+        - name: backend
+          image: truss-backend:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: "dev"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/truss/collector-data
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: collector
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080

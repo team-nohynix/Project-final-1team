@@ -1,25 +1,28 @@
-// job-trigger는 홈서버(2026-08-25 AWS→Proxmox 이전)에서 SQS+Lambda 경로
-// (infra/lambda/job-trigger/index.py)를 대체합니다 — orderapi가 SQS 대신
-// 이 서비스에 POST /v1/jobs로 직접 요청을 보내고(orderapi/jobtrigger.HTTPPublisher),
-// 여기서는 K8s Job을 만드는 대신 `docker run`으로 trader/replayengine
-// 컨테이너를 직접 실행합니다. Docker 소켓을 마운트해서 "형제 컨테이너"를
-// 띄우는 방식(Docker-outside-of-Docker)이라, job-trigger 자신도 컨테이너로
-// 돌지만 호스트의 Docker 데몬에 직접 명령합니다.
-//
-// Lambda 원본의 _build_ai_trader_job/_build_replay_job과 최대한 같은 인자
-// 구성을 유지합니다 — 리소스 제한(OOM 방지, Lambda 주석 참고)은 docker run의
-// --memory/--cpus로 그대로 옮깁니다.
+// job-trigger는 kubeadm 이전(2026-08-26) 이후, K8s Job 생성 방식을 원래
+// 설계(infra/lambda/job-trigger/index.py가 AWS Lambda에서 하던 일)대로 되돌린
+// 것입니다 — Docker Compose 시절의 docker-run 우회(homelab/job-trigger/main.go
+// git 이력 참고)는 K8s 자체가 없어서 어쩔 수 없이 썼던 임시방편이었고, 진짜
+// K8s가 생겼으니 client-go로 in-cluster API를 불러 진짜 batch/v1 Job을
+// 만드는 원래 방식이 더 간단합니다 — completionMode: Indexed가
+// JOB_COMPLETION_INDEX를 자동 주입해줘서, replay의 -shard-index를 직접
+// 계산해 넘기던 반복문도 필요 없어졌습니다.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 	"strconv"
 	"time"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type jobRequest struct {
@@ -32,24 +35,21 @@ type jobRequest struct {
 	ToTS        *int64   `json:"toTs,omitempty"`
 }
 
+// orderRecordsHostPath는 trader/replayengine이 orderapi와 같은 주문 기록을
+// 공유하기 위한 hostPath — 단일 노드 클러스터라 PVC(RWX 미지원) 대신
+// 이 경로를 그대로 마운트하면 여러 파드가 동시에 같은 디렉터리에 쓸 수
+// 있다(homelab/k8s/apps/orderapi-deployment.yaml과 동일 경로).
+const orderRecordsHostPath = "/var/lib/truss/order-records"
+
 func main() {
-	dockerNetwork := getenv("DOCKER_NETWORK", "homelab_default")
-	// trader/replayengine이 로컬로 기록하는 주문 기록(orderstore.NewLocalFileStorage
-	// ("orders"))을 orderapi의 GET /v1/jobs/replay-preview가 읽는 것과 같은
-	// 위치에 쓰게 하려면 orderapi의 orderapi-data 볼륨을 여기도 마운트해야 한다
-	// (2026-08-26) — AWS에서는 trader/orderapi가 같은 S3 버킷을 썼던 것의
-	// 대체. 이걸 안 붙이면 trader가 --rm으로 종료되는 순간 기록이 통째로
-	// 사라져서 재생 미리보기가 항상 "기록된 주문이 없음"으로 나온다.
-	orderRecordsVolume := getenv("ORDER_RECORDS_VOLUME", "homelab_orderapi-data")
-	backendURL := getenv("BACKEND_URL", "http://backend:8080")
-	orderapiURL := getenv("ORDERAPI_URL", "http://orderapi:8081")
-	bedrockRegion := getenv("BEDROCK_REGION", "ap-northeast-2")
-	bedrockModelID := getenv("BEDROCK_MODEL_ID", "apac.anthropic.claude-3-haiku-20240307-v1:0")
-	// Bedrock(AI 트레이더 LLM)은 홈서버로 이전할 수 없는 유일한 관리형 서비스라
-	// (계획 문서 참고) 인터넷으로 계속 호출합니다 — IRSA가 없으므로 대신
-	// Bedrock InvokeModel 전용 최소권한 액세스 키를 씁니다.
-	awsAccessKeyID := os.Getenv("BEDROCK_AWS_ACCESS_KEY_ID")
-	awsSecretAccessKey := os.Getenv("BEDROCK_AWS_SECRET_ACCESS_KEY")
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("in-cluster config 획득 실패: %v", err)
+	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Fatalf("k8s 클라이언트 생성 실패: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/jobs", func(w http.ResponseWriter, r *http.Request) {
@@ -62,15 +62,15 @@ func main() {
 		var err error
 		switch req.JobType {
 		case "ai-trader":
-			err = runAITrader(req, dockerNetwork, orderRecordsVolume, backendURL, orderapiURL, bedrockRegion, bedrockModelID, awsAccessKeyID, awsSecretAccessKey)
+			err = runAITraderJob(r.Context(), clientset, req)
 		case "replay":
-			err = runReplay(req, dockerNetwork, orderRecordsVolume, orderapiURL)
+			err = runReplayJob(r.Context(), clientset, req)
 		default:
 			http.Error(w, `{"errorCode":"INVALID_JOB_TYPE","message":"jobType은 ai-trader 또는 replay만 가능합니다."}`, http.StatusBadRequest)
 			return
 		}
 		if err != nil {
-			log.Printf("Job 실행 실패 (jobType=%s): %v", req.JobType, err)
+			log.Printf("Job 생성 실패 (jobType=%s): %v", req.JobType, err)
 			http.Error(w, fmt.Sprintf(`{"errorCode":"INTERNAL_ERROR","message":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
@@ -80,15 +80,8 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	log.Printf("job-trigger 시작 :9000 (network=%s, backend=%s, orderapi=%s)", dockerNetwork, backendURL, orderapiURL)
+	log.Printf("job-trigger 시작 :9000 (K8s Job 생성 방식)")
 	log.Fatal(http.ListenAndServe(":9000", mux))
-}
-
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func baseArgs(req jobRequest) []string {
@@ -102,75 +95,137 @@ func baseArgs(req jobRequest) []string {
 	return args
 }
 
-// runAITrader는 job-trigger Lambda의 _build_ai_trader_job과 같은 리소스
-// 한도(1Gi 요청/2Gi 한도, 2026-08-25 OOM 사고 대응)를 docker run으로 재현합니다.
-func runAITrader(req jobRequest, network, orderRecordsVolume, backendURL, orderapiURL, bedrockRegion, bedrockModelID, accessKeyID, secretAccessKey string) error {
+func orderRecordsVolume() (corev1.Volume, corev1.VolumeMount) {
+	vol := corev1.Volume{
+		Name: "order-records",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: orderRecordsHostPath,
+				Type: func() *corev1.HostPathType { t := corev1.HostPathDirectoryOrCreate; return &t }(),
+			},
+		},
+	}
+	mount := corev1.VolumeMount{Name: "order-records", MountPath: "/app/orders"}
+	return vol, mount
+}
+
+// runAITraderJob은 infra/lambda/job-trigger/index.py의 _build_ai_trader_job과
+// 같은 구성(ai-trader-config ConfigMap, sa-ai-trader ServiceAccount, 리소스
+// 한도)을 client-go로 재현합니다.
+func runAITraderJob(ctx context.Context, clientset *kubernetes.Clientset, req jobRequest) error {
 	name := "ai-trader-" + time.Now().Format("20060102-150405")
-	args := []string{
-		"run", "-d", "--rm",
-		"--name", name,
-		"--network", network,
-		"--memory=2g", "--cpus=1",
-		"-v", orderRecordsVolume + ":/app/orders",
-		"-e", "BACKEND_URL=" + backendURL,
-		"-e", "ORDERAPI_URL=" + orderapiURL,
-		"-e", "BEDROCK_REGION=" + bedrockRegion,
-		"-e", "BEDROCK_MODEL_ID=" + bedrockModelID,
+	vol, mount := orderRecordsVolume()
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ai-trader"},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            ptrInt32(0),
+			TTLSecondsAfterFinished: ptrInt32(3600),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "sa-ai-trader",
+					RestartPolicy:      corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:            "ai-trader",
+							Image:           "truss-trader:latest",
+							ImagePullPolicy: corev1.PullNever,
+							Args:            baseArgs(req),
+							EnvFrom: []corev1.EnvFromSource{
+								{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "ai-trader-config"}}},
+								{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "bedrock-credentials"}, Optional: ptrBool(true)}},
+							},
+							VolumeMounts: []corev1.VolumeMount{mount},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{vol},
+				},
+			},
+		},
 	}
-	if accessKeyID != "" {
-		args = append(args, "-e", "AWS_ACCESS_KEY_ID="+accessKeyID, "-e", "AWS_SECRET_ACCESS_KEY="+secretAccessKey, "-e", "AWS_REGION="+bedrockRegion)
-	}
-	args = append(args, "truss-trader:latest")
-	args = append(args, baseArgs(req)...)
-	return runDocker(args)
+
+	_, err := clientset.BatchV1().Jobs("ai-trader").Create(ctx, job, metav1.CreateOptions{})
+	return err
 }
 
-// runReplay는 K8s Indexed Job(completions=shardCount, JOB_COMPLETION_INDEX
-// 자동 주입)을 shardCount번의 개별 docker run으로 재현합니다 — 각 컨테이너에
-// -shard-index를 직접 넘겨서 K8s가 자동으로 채워주던 것을 대신합니다.
-func runReplay(req jobRequest, network, orderRecordsVolume, orderapiURL string) error {
-	shardCount := 1
+// runReplayJob은 _build_replay_job과 같은 구성 — completionMode: Indexed로
+// K8s가 파드마다 JOB_COMPLETION_INDEX를 자동 주입하게 해서, replayengine의
+// -shard-index를 그 값으로 그대로 채운다(별도 반복문 불필요, Compose 시절과
+// 다른 점).
+func runReplayJob(ctx context.Context, clientset *kubernetes.Clientset, req jobRequest) error {
+	shardCount := int32(1)
 	if req.ShardCount != nil && *req.ShardCount > 0 {
-		shardCount = *req.ShardCount
+		shardCount = int32(*req.ShardCount)
 	}
-	runID := "replay-" + time.Now().Format("20060102-150405")
+	name := "replay-" + time.Now().Format("20060102-150405")
+	vol, mount := orderRecordsVolume()
 
-	for i := 0; i < shardCount; i++ {
-		name := fmt.Sprintf("%s-%d", runID, i)
-		args := []string{
-			"run", "-d", "--rm",
-			"--name", name,
-			"--network", network,
-			"--memory=2g", "--cpus=1",
-			"-v", orderRecordsVolume + ":/app/orders",
-			"-e", "ORDERAPI_URL=" + orderapiURL,
-			"truss-replayengine:latest",
-		}
-		args = append(args, baseArgs(req)...)
-		args = append(args,
-			"-run-id="+runID,
-			"-shard-index="+strconv.Itoa(i),
-			"-shard-count="+strconv.Itoa(shardCount),
-		)
-		if req.FromTS != nil {
-			args = append(args, "-from-ts="+strconv.FormatInt(*req.FromTS, 10))
-		}
-		if req.ToTS != nil {
-			args = append(args, "-to-ts="+strconv.FormatInt(*req.ToTS, 10))
-		}
-		if err := runDocker(args); err != nil {
-			return fmt.Errorf("샤드 %d/%d 실행 실패: %w", i, shardCount, err)
-		}
+	args := append(baseArgs(req),
+		"-run-id="+name,
+		"-shard-index=$(JOB_COMPLETION_INDEX)",
+		"-shard-count="+strconv.Itoa(int(shardCount)),
+	)
+	if req.FromTS != nil {
+		args = append(args, "-from-ts="+strconv.FormatInt(*req.FromTS, 10))
 	}
-	return nil
+	if req.ToTS != nil {
+		args = append(args, "-to-ts="+strconv.FormatInt(*req.ToTS, 10))
+	}
+
+	completionMode := batchv1.IndexedCompletion
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "replay"},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            ptrInt32(0),
+			TTLSecondsAfterFinished: ptrInt32(3600),
+			Completions:             ptrInt32(shardCount),
+			Parallelism:             ptrInt32(shardCount),
+			CompletionMode:          &completionMode,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "sa-replay-engine",
+					RestartPolicy:      corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:            "replay-engine",
+							Image:           "truss-replayengine:latest",
+							ImagePullPolicy: corev1.PullNever,
+							Args:            args,
+							EnvFrom: []corev1.EnvFromSource{
+								{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "replay-config"}}},
+							},
+							VolumeMounts: []corev1.VolumeMount{mount},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{vol},
+				},
+			},
+		},
+	}
+
+	_, err := clientset.BatchV1().Jobs("replay").Create(ctx, job, metav1.CreateOptions{})
+	return err
 }
 
-func runDocker(args []string) error {
-	cmd := exec.Command("docker", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker %v 실패: %w (output=%s)", args, err, out)
-	}
-	log.Printf("컨테이너 시작: %s", out)
-	return nil
-}
+func ptrInt32(v int32) *int32 { return &v }
+func ptrBool(v bool) *bool    { return &v }

@@ -1,0 +1,56 @@
+# infra/k8s/job-trigger-rbac.yaml을 이식 — Role 규칙은 그대로(create-only,
+# ai-trader/replay 네임스페이스 한정), subject만 IAM 그룹(team1-job-trigger-lambda)
+# 대신 job-trigger 자신의 ServiceAccount로 바꿨다(2026-08-26).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-creator
+  namespace: ai-trader
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-trigger-can-create-jobs
+  namespace: ai-trader
+subjects:
+  - kind: ServiceAccount
+    name: job-trigger
+    namespace: ai-trader
+roleRef:
+  kind: Role
+  name: job-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-creator
+  namespace: replay
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-trigger-can-create-jobs
+  namespace: replay
+subjects:
+  - kind: ServiceAccount
+    name: job-trigger
+    namespace: ai-trader
+roleRef:
+  kind: Role
+  name: job-creator
+  apiGroup: rbac.authorization.k8s.io

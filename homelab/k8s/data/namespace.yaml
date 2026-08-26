@@ -1,0 +1,6 @@
+# MySQL/Kafka/Redis 전용 네임스페이스 — AWS에서는 관리형 서비스(RDS/MSK/ElastiCache)라
+# infra/k8s/*에 없었다. 홈서버는 이 셋도 파드로 직접 띄운다(2026-08-26, kubeadm 이전).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data

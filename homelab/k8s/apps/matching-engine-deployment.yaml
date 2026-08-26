@@ -1,0 +1,78 @@
+# infra/k8s/backend/matching-engine-deployment.yaml을 홈서버용으로 이식(2026-08-26) —
+# 이식 방식은 orderapi-deployment.yaml과 동일. resources는 AWS 쪽 백로그 사고 이력이
+# 그대로 유효하므로 넉넉한 값(2Gi/2.8Gi)을 유지 — 단일 노드(8vCPU/24GB) 안에서
+# KEDA가 replica를 늘릴 여지를 남기려고 limit은 AWS보다 살짝 낮춘다(설계결정 7 참고).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matching-engine
+  namespace: backend
+  labels:
+    app: matching-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: matching-engine
+  template:
+    metadata:
+      labels:
+        app: matching-engine
+    spec:
+      serviceAccountName: sa-matching-engine
+      containers:
+        - name: matching-engine
+          image: truss-matching:latest
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BROKER
+              value: "kafka.data.svc.cluster.local:9092"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "false"
+            - name: REDIS_ADDR
+              value: "redis.data.svc.cluster.local:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+          ports:
+            - name: metrics
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1500Mi
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matching-engine-metrics
+  namespace: backend
+  labels:
+    app: matching-engine
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: matching-engine
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090

@@ -1,0 +1,111 @@
+# infra/k8s/backend/orderapi-deployment.yaml을 홈서버용으로 이식(2026-08-26) —
+# ECR 이미지→로컬 이미지, IAM 인증/TLS→false, 하드코딩된 AWS 엔드포인트→클러스터
+# 내부 Service DNS, nodeSelector/toleration(Karpenter 전용)→제거, IRSA 불필요.
+# JOB_TRIGGER_QUEUE_URL(SQS) 대신 JOB_TRIGGER_URL(같은 클러스터 안 job-trigger
+# Service)을 쓴다 — orderapi/jobtrigger.HTTPPublisher가 SQS보다 우선순위.
+# ORDER_RECORDS_BUCKET을 안 채워서 로컬 스토리지 폴백 사용 — orderapi-orders
+# hostPath를 trader/replayengine과 공유(homelab/k8s/README 참고, RWX PVC 대신
+# 단일 노드 hostPath로 우회).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orderapi
+  namespace: backend
+  labels:
+    app: orderapi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orderapi
+  template:
+    metadata:
+      labels:
+        app: orderapi
+    spec:
+      serviceAccountName: sa-ingest-api
+      containers:
+        - name: orderapi
+          image: truss-orderapi:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8081
+          env:
+            - name: PORT
+              value: "8081"
+            - name: KAFKA_BROKER
+              value: "kafka.data.svc.cluster.local:9092"
+            - name: KAFKA_USE_IAM_AUTH
+              value: "false"
+            - name: REDIS_ADDR
+              value: "redis.data.svc.cluster.local:6379"
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+            - name: JOB_TRIGGER_URL
+              value: "http://job-trigger.ai-trader.svc.cluster.local:9000/v1/jobs"
+            - name: RECORDER_URL
+              value: "http://recorder:8082"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.monitoring.svc.cluster.local:9090"
+          volumeMounts:
+            - name: order-records
+              mountPath: /app/orders
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /v1/markets/KRW-BTC/orderbook
+              port: 8081
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /v1/markets/KRW-BTC/orderbook
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: order-records
+          hostPath:
+            path: /var/lib/truss/order-records
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderapi
+  namespace: backend
+spec:
+  selector:
+    app: orderapi
+  ports:
+    - port: 8081
+      targetPort: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderapi-metrics
+  namespace: backend
+  labels:
+    app: orderapi
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8081"
+    prometheus.io/path: /metrics
+spec:
+  selector:
+    app: orderapi
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: 8081
