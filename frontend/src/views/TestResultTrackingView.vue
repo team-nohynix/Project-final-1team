@@ -33,9 +33,13 @@ function toKST(iso?: string) {
   if (!iso) return '--'
   try {
     const d = new Date(iso)
-    const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${kst.getFullYear()}-${pad(kst.getMonth() + 1)}-${pad(kst.getDate())} ${pad(kst.getHours())}:${pad(kst.getMinutes())}:${pad(kst.getSeconds())}`
+    if (Number.isNaN(d.getTime())) return iso
+    // 예전엔 getTime()+9시간 후 로컬 getHours() 등으로 다시 읽었는데, 뷰어의
+    // 브라우저 시간대가 이미 KST면 9시간이 두 번 더해져 표시된다(2026-08-26
+    // 실측 — 사용자가 이 드롭다운에서 시간이 안 맞는다고 지적). 항상
+    // Asia/Seoul로 강제 변환해야 뷰어 로컬 설정과 무관하게 정확하다.
+    // sv-SE 로케일은 "YYYY-MM-DD HH:MM:SS" 형식을 그대로 내려주는 흔한 트릭.
+    return d.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false })
   } catch (e) {
     return iso
   }

@@ -11,13 +11,10 @@ const speed = ref(60)
 const startTime = ref('') // HH:MM, 비어있으면 제한 없음
 const endTime = ref('')   // HH:MM, 비어있으면 제한 없음
 
-// 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
-const formatDateYYYYMMDD = (date: Date) => {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
+// 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지. 로컬 getFullYear/getMonth/
+// getDate는 뷰어의 브라우저 시간대를 그대로 쓰므로, 이 앱의 "오늘"은 항상
+// 업비트 거래소 기준인 KST여야 한다(뷰어가 다른 시간대에서 접속해도 동일).
+const formatDateYYYYMMDD = (date: Date) => date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' })
 const todayDate = formatDateYYYYMMDD(new Date())
 
 // 접수/체결/미체결 등 큰 숫자를 천 단위 콤마로 표시 (DashboardView.vue의
@@ -201,8 +198,10 @@ const collectionRangeDisplay = computed(() => {
   try {
     const d = new Date(`${date}T00:00:00+09:00`)
     const next = new Date(d.getTime() + 24 * 60 * 60 * 1000)
-    const pad = (n) => String(n).padStart(2, '0')
-    const fmt = (dt) => `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+    // d/next 자체는 정확한 순간(instant)이지만, 로컬 getFullYear() 등으로
+    // 읽으면 뷰어 브라우저 시간대가 KST가 아닐 때 엉뚱한 시각이 나온다 —
+    // 항상 Asia/Seoul로 강제 변환한다.
+    const fmt = (dt) => dt.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false }).slice(0, 16)
     return `${fmt(d)} ~ ${fmt(next)} KST`
   } catch (e) {
     return '-'
@@ -484,15 +483,13 @@ const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
   try {
     const t = new Date(iso)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const year = t.getUTCFullYear()
-    const month = pad(t.getUTCMonth() + 1)
-    const day = pad(t.getUTCDate())
-    const kst = new Date(t.getTime() + 9 * 60 * 60 * 1000)
-    const hh = pad(kst.getUTCHours())
-    const mm = pad(kst.getUTCMinutes())
-    const ss = pad(kst.getUTCSeconds())
-    return `${year}-${month}-${day} ${hh}:${mm}:${ss} KST`
+    if (Number.isNaN(t.getTime())) return iso
+    // 예전엔 연/월/일은 원본 UTC 필드에서, 시/분/초만 +9시간 보정해서 따로
+    // 합쳤다 — 자정(KST) 전후로 날짜와 시각이 서로 다른 날을 가리키는 롤오버
+    // 버그가 있었다(예: UTC 15:30 = KST 00:30인데 날짜는 UTC 기준 그대로
+    // 표시됨). Asia/Seoul로 한 번에 변환하면 날짜·시각이 항상 같은 순간
+    // 기준으로 맞아떨어진다.
+    return t.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false }) + ' KST'
   } catch (e) {
     return iso
   }

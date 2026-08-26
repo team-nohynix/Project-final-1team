@@ -645,12 +645,6 @@ async function pollIntegrityCheck() {
 }
 
 // ---- 실행 상태 (페이퍼 트레이딩 / 리플레이) ----
-const RUN_STATUS_LABELS = {
-  IN_PROGRESS: '실행 중',
-  COMPLETED: '완료',
-  STOPPED: '중지됨',
-  FAILED: '실패',
-}
 const RUN_OWNER_LABELS = {
   trader: '페이퍼 트레이딩',
   replayengine: '리플레이(주문 재생)',
@@ -731,26 +725,25 @@ const recentRunCards = computed(() => {
       // SIGKILL돼 반납 코드가 아예 못 돔, 2026-08-25 실측)는 뜻입니다.
       // "실행 중"이라고 보여주면 사실과 다르므로 별도 상태로 구분합니다.
       const zombie = i > 0 && s.record.status === 'IN_PROGRESS'
-      const status = zombie ? '미종료 (비정상 종료 추정)' : RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
       const inProgress = !zombie && s.record.status === 'IN_PROGRESS'
-      // 정상/비정상 종료 여부 + 비정상이면 원인(사용자가 중지 버튼을 눌렀는지,
-      // 오류로 끊겼는지)까지 구분해서 보여준다(2026-08-26 요청). 아직 실행
-      // 중(inProgress)이면 결론이 안 났으니 비워둔다. STOPPED은 이 프로젝트에서
-      // 항상 사용자의 "중지" 버튼(POST .../stop)을 통해서만 나오는 상태라
-      // "사용자 중단"으로 단정할 수 있다 — FAILED는 그 외의 오류 종료.
-      let outcome = ''
-      if (!inProgress) {
-        if (zombie) outcome = '비정상 종료 — 오류로 추정 (정상 반납 없이 응답 끊김)'
-        else if (s.record.status === 'COMPLETED') outcome = '정상 종료'
-        else if (s.record.status === 'STOPPED') outcome = '비정상 종료 — 사용자 중단'
-        else if (s.record.status === 'FAILED') outcome = '비정상 종료 — 오류'
-      }
+      // 왼쪽 배지 — "완료/실패/중지됨" 같은 원래 상태명 대신, 정상 종료인지
+      // 아니면 왜 비정상 종료됐는지(사용자가 중지했는지, 오류였는지)를 바로
+      // 보여준다(2026-08-26 요청). STOPPED은 이 프로젝트에서 항상 사용자의
+      // "중지" 버튼(POST .../stop)을 통해서만 나오는 상태라 "사용자 중지"로
+      // 단정할 수 있다 — FAILED는 그 외의 오류 종료, zombie는 정상 반납 없이
+      // 응답이 끊긴 경우라 오류로 추정만 가능.
+      let status
+      if (inProgress) status = '실행 중'
+      else if (zombie) status = '오류 추정 종료'
+      else if (s.record.status === 'COMPLETED') status = '정상 종료'
+      else if (s.record.status === 'STOPPED') status = '사용자 중지'
+      else if (s.record.status === 'FAILED') status = '오류로 종료'
+      else status = s.record.status || '-'
       return {
         inProgress,
         zombie,
         owner,
         status,
-        outcome,
         startedAt: s.record.startedAt,
         endedAt: s.record.endedAt,
         message: s.record.message,
@@ -1235,11 +1228,11 @@ onBeforeUnmount(() => {
           <div class="run-badge-col">
             <span v-if="formatAgo(cardAgoRef(card))" class="run-badge-latest">{{ formatAgo(cardAgoRef(card)) }}</span>
             <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
-              {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
+              {{ card.status }}
             </span>
           </div>
           <div class="run-status-text">
-            <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
+            <strong>{{ card.owner }}</strong>
             <span v-if="card.speed"><strong>{{ card.speed }}배속</strong></span>
             <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ formatElapsed(card.startedAt) }}</span>
             <template v-else>
