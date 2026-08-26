@@ -8,15 +8,22 @@ const scenarioName = ref(defaultScenarioName)
 const selectedDate = ref('') // YYYY-MM-DD — 백엔드가 이 날짜의 KST 00:00~다음 날 KST 00:00 구간을 수집
 // 재생 배속 옵션 (프론트에서 선택만 제공)
 const speed = ref(60)
+const startTime = ref('') // HH:MM, 비어있으면 제한 없음
+const endTime = ref('')   // HH:MM, 비어있으면 제한 없음
 
-// 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지
-const formatDateYYYYMMDD = (date: Date) => {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
-}
+// 날짜 입력의 상한값 (오늘) — 미래 날짜 선택 방지. 로컬 getFullYear/getMonth/
+// getDate는 뷰어의 브라우저 시간대를 그대로 쓰므로, 이 앱의 "오늘"은 항상
+// 업비트 거래소 기준인 KST여야 한다(뷰어가 다른 시간대에서 접속해도 동일).
+const formatDateYYYYMMDD = (date: Date) => date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' })
 const todayDate = formatDateYYYYMMDD(new Date())
+
+// 접수/체결/미체결 등 큰 숫자를 천 단위 콤마로 표시 (DashboardView.vue의
+// displayValue와 같은 목적)
+const formatNumber = (v: unknown) => {
+  if (v === null || v === undefined) return '-'
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toLocaleString('ko-KR') : String(v)
+}
 
 // UI messages
 const infoMessage = ref('')
@@ -76,6 +83,8 @@ function saveStateToSession() {
       scenarioName: scenarioName.value,
       selectedDate: selectedDate.value,
       speed: speed.value,
+      startTime: startTime.value,
+      endTime: endTime.value,
       // collection
       collectJobId: collectJobId.value,
       collectionStatus: collectionStatus.value,
@@ -189,8 +198,10 @@ const collectionRangeDisplay = computed(() => {
   try {
     const d = new Date(`${date}T00:00:00+09:00`)
     const next = new Date(d.getTime() + 24 * 60 * 60 * 1000)
-    const pad = (n) => String(n).padStart(2, '0')
-    const fmt = (dt) => `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+    // d/next 자체는 정확한 순간(instant)이지만, 로컬 getFullYear() 등으로
+    // 읽으면 뷰어 브라우저 시간대가 KST가 아닐 때 엉뚱한 시각이 나온다 —
+    // 항상 Asia/Seoul로 강제 변환한다.
+    const fmt = (dt) => dt.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false }).slice(0, 16)
     return `${fmt(d)} ~ ${fmt(next)} KST`
   } catch (e) {
     return '-'
@@ -472,15 +483,13 @@ const formatRFC3339ToKST = (iso: string | null) => {
   if (!iso) return '-'
   try {
     const t = new Date(iso)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const year = t.getUTCFullYear()
-    const month = pad(t.getUTCMonth() + 1)
-    const day = pad(t.getUTCDate())
-    const kst = new Date(t.getTime() + 9 * 60 * 60 * 1000)
-    const hh = pad(kst.getUTCHours())
-    const mm = pad(kst.getUTCMinutes())
-    const ss = pad(kst.getUTCSeconds())
-    return `${year}-${month}-${day} ${hh}:${mm}:${ss} KST`
+    if (Number.isNaN(t.getTime())) return iso
+    // 예전엔 연/월/일은 원본 UTC 필드에서, 시/분/초만 +9시간 보정해서 따로
+    // 합쳤다 — 자정(KST) 전후로 날짜와 시각이 서로 다른 날을 가리키는 롤오버
+    // 버그가 있었다(예: UTC 15:30 = KST 00:30인데 날짜는 UTC 기준 그대로
+    // 표시됨). Asia/Seoul로 한 번에 변환하면 날짜·시각이 항상 같은 순간
+    // 기준으로 맞아떨어진다.
+    return t.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false }) + ' KST'
   } catch (e) {
     return iso
   }
@@ -767,7 +776,21 @@ const startPaperTrading = async () => {
     awaitingNewRun.value = true
     saveStateToSession()
 
-    const payload = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
+    const toKstMs = (timeStr: string) => {
+      if (!selectedDate.value || !timeStr) return 0
+      // Build an explicit KST time string and get epoch ms
+      try {
+        return new Date(`${selectedDate.value}T${timeStr}:00+09:00`).getTime()
+      } catch (e) {
+        return 0
+      }
+    }
+
+    const payload: any = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
+    const from = startTime.value ? toKstMs(startTime.value) : 0
+    const to = endTime.value ? toKstMs(endTime.value) : 0
+    if (from) payload.fromTs = from
+    if (to) payload.toTs = to
     const res = await fetch('/order-api/v1/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     })
@@ -847,6 +870,8 @@ onMounted(async () => {
       selectedDate.value = stored.selectedDate ?? selectedDate.value
       // removed totalOrders/generationTime from restore
       speed.value = stored.speed ?? speed.value
+      startTime.value = stored.startTime ?? startTime.value
+      endTime.value = stored.endTime ?? endTime.value
 
       // Execution state
       executionStatus.value = stored.executionStatus ?? executionStatus.value
@@ -992,6 +1017,16 @@ const resetMatchingEngineBook = async () => {
         </div>
 
         <div class="form-field">
+          <label>시간 범위 (선택)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="time" v-model="startTime" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+            <span style="color:#9fb0c2">~</span>
+            <input type="time" v-model="endTime" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+          </div>
+          <p class="date-hint">비워두면 하루 전체를 재생합니다. 지정하면 그 시간대 주문만 재생합니다. (KST)</p>
+        </div>
+
+        <div class="form-field">
           <label>재생 배속 (속도)</label>
           <div class="speed-slider-row">
             <input
@@ -1130,18 +1165,24 @@ const resetMatchingEngineBook = async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
+            <!-- 목표 주문 수가 없어 시세 수집처럼 "N/전체" 퍼센트로는 못 보여준다
+                 (트레이딩 세션은 정지할 때까지 계속 도는 워크로드) — 대신 진행
+                 중임을 보여주는 인디터미닛 바를 시세 수집과 같은 트랙 스타일로 둔다. -->
+            <div class="progress-bar-track indeterminate">
+              <div class="progress-bar-fill-indeterminate"></div>
+            </div>
             <div v-if="typedPaperTradingResult">
               <div v-if="typedPaperTradingResult" class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1165,9 +1206,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1185,17 +1226,18 @@ const resetMatchingEngineBook = async () => {
 
           <template v-else-if="executionStatus === 'success'">
             <div v-if="typedPaperTradingResult">
+              <div class="result-title result-title-success">페이퍼 트레이딩 완료</div>
               <div class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1219,9 +1261,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1235,15 +1277,15 @@ const resetMatchingEngineBook = async () => {
               <div class="result-title result-title-stopped">페이퍼 트레이딩 중지됨</div>
               <div class="result-stats">
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.accepted }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.accepted) }}</div>
                   <div class="stat-label">접수</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.filled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.filled) }}</div>
                   <div class="stat-label">체결</div>
                 </div>
                 <div class="stat">
-                  <div class="stat-value">{{ typedPaperTradingResult.unfilled }}</div>
+                  <div class="stat-value">{{ formatNumber(typedPaperTradingResult.unfilled) }}</div>
                   <div class="stat-label">미체결</div>
                 </div>
               </div>
@@ -1267,9 +1309,9 @@ const resetMatchingEngineBook = async () => {
                   <tbody>
                     <tr v-for="m in typedPaperTradingResult.byMarket" :key="m.market">
                       <td style="text-align:left">{{ m.market }}</td>
-                      <td style="text-align:right">{{ m.accepted }}</td>
-                      <td style="text-align:right">{{ m.filled }}</td>
-                      <td style="text-align:right">{{ m.unfilled }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.accepted) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.filled) }}</td>
+                      <td style="text-align:right">{{ formatNumber(m.unfilled) }}</td>
                       <td style="text-align:right">{{ marketFillRate(m) }}%</td>
                     </tr>
                   </tbody>
@@ -1483,6 +1525,9 @@ const resetMatchingEngineBook = async () => {
 .result-title-error {
   color: #ff6b6b;
 }
+.result-title-success {
+  color: #2ed39a;
+}
 .result-desc {
   color: #9fb0c2;
   font-size: 13px;
@@ -1624,6 +1669,28 @@ const resetMatchingEngineBook = async () => {
   transition: width 0.4s ease;
 }
 
+/* 시세 수집 진행바(N/전체)와 달리, 페이퍼 트레이딩은 정지할 때까지 계속
+   도는 워크로드라 "전체" 개념이 없다 — 대신 계속 움직이는 인디터미닛
+   바로 "멈추지 않고 진행 중"임을 보여준다. */
+.progress-bar-track.indeterminate {
+  margin: 4px 0 12px;
+}
+.progress-bar-fill-indeterminate {
+  height: 100%;
+  width: 40%;
+  background: #3f86ff;
+  border-radius: 999px;
+  animation: progress-indeterminate-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-indeterminate-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
 /* Result stats */
 .result-stats {
   display: flex;
@@ -1753,6 +1820,11 @@ const resetMatchingEngineBook = async () => {
   }
 }
 input.date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+}
+
+input.time-input::-webkit-calendar-picker-indicator {
   filter: invert(1);
   cursor: pointer;
 }

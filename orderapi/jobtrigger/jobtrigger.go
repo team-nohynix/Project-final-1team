@@ -21,17 +21,19 @@ import (
 // Request는 POST /v1/jobs의 요청 본문이자, 그대로 SQS 메시지 바디로 발행되는
 // 값입니다 — Lambda가 이 JSON을 그대로 파싱해 K8s Job manifest를 만듭니다.
 // 필드는 trader/replayengine의 CLI 플래그와 1:1로 대응합니다
-// (docs/deployment-env-vars.md 참고). ShardCount/FromTS/ToTS는 replay 전용이지만
-// jobType으로 구분하는 쪽(Lambda)이 무시하면 되므로 여기서 jobType별로 필드를
-// 나누지 않습니다 — 이 struct 하나가 두 잡타입의 상위집합입니다.
+// (docs/deployment-env-vars.md 참고). ShardCount는 replay 전용(ai-trader는 샤딩
+// 개념 자체가 없음)이지만, FromTS/ToTS(FR-27 구간 지정)는 2026-08-25부터
+// ai-trader(trader)도 지원합니다(trader/replay.filterEventRange 참고) — 둘 다
+// jobType으로 구분하는 쪽(Lambda의 _base_args)이 처리하므로 여기서 jobType별로
+// 필드를 나누지 않습니다 — 이 struct 하나가 두 잡타입의 상위집합입니다.
 type Request struct {
 	JobType     string   `json:"jobType"` // "ai-trader" | "replay"
 	Date        string   `json:"date"`    // YYYY-MM-DD
 	Speed       *float64 `json:"speed,omitempty"`
 	OrderBucket string   `json:"orderBucket,omitempty"`
 	ShardCount  *int     `json:"shardCount,omitempty"` // replay 전용, 1 이상
-	FromTS      *int64   `json:"fromTs,omitempty"`     // replay 전용, Unix ms
-	ToTS        *int64   `json:"toTs,omitempty"`       // replay 전용, Unix ms
+	FromTS      *int64   `json:"fromTs,omitempty"`     // ai-trader/replay 공통, Unix ms
+	ToTS        *int64   `json:"toTs,omitempty"`       // ai-trader/replay 공통, Unix ms
 }
 
 // ValidateRequest는 순수 검증 로직입니다(테스트 용이성을 위해 SQS 발행과 분리).

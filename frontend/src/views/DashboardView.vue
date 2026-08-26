@@ -34,7 +34,13 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 //   차이로 프론트에서 직접 계산합니다 — replayengine은 429 등 Submit 실패를
 //   재시도 없이 스킵하므로(FR-18 재현성 유지 목적), 이 차이가 곧 스킵된 주문
 //   수입니다(recorder DB 조회가 필요 없음).
-const POLL_INTERVAL_MS = 10000
+// 2026-08-26: "실시간 처리 흐름" 캔버스를 제외한 나머지 데이터는 1초로
+// 새로고침한다. 이 값은 recorder GET /v1/metrics/dashboard의 Redis 캐시
+// 갱신 주기(10초, recorder/metrics.go)보다 짧아서 매 틱마다 항상 새로운
+// 값을 받는 건 아니지만(캐시가 갱신되기 전엔 같은 값이 반복됨), 그 자체는
+// Redis 캐시 조회라 가볍다 — 무거운 데이터 정합성 검사만 별도 주기로 뺐다
+// (INTEGRITY_POLL_INTERVAL_MS 주석 참고).
+const POLL_INTERVAL_MS = 1000
 
 const metrics = ref(null)
 const systemStatus = ref(null)
@@ -61,6 +67,42 @@ async function fetchClusterMetrics() {
   const res = await fetch('/order-api/v1/cluster-metrics')
   if (!res.ok) throw new Error(`클러스터 지표 조회 실패: ${res.status}`)
   clusterMetrics.value = await res.json()
+  recordClusterHistory(clusterMetrics.value)
+}
+
+// 클러스터 현황 수치(활성 노드 수 등)는 절대값만으론 "지금 늘고 있는지 줄고
+// 있는지" 알기 어렵다 — pendingOrdersTrend(위)와 같은 이유. 다만 클러스터는
+// 폴링 주기(10초)가 짧아 "직전 폴링 대비"로는 노이즈가 너무 커서, 실제로
+// "1분 전 대비"를 보여주려면 스냅샷 이력을 따로 들고 있어야 한다.
+const CLUSTER_HISTORY_MAX_AGE_MS = 90000
+const clusterMetricsHistory = ref([])
+
+function recordClusterHistory(c) {
+  if (!c) return
+  const now = Date.now()
+  clusterMetricsHistory.value = [...clusterMetricsHistory.value, { t: now, c }].filter(
+    (e) => now - e.t <= CLUSTER_HISTORY_MAX_AGE_MS
+  )
+}
+
+// 이력 중 "1분 전 시점에 가장 가까웠던" 스냅샷을 찾는다 — 정확히 60000ms 전
+// 샘플이 없을 수 있으니(폴링 10초 간격 기준 오차는 최대 ±10초), 60초 이전
+// 중 가장 최신인 것을 쓴다. 아직 1분치 이력이 안 쌓였으면 null.
+function clusterSnapshotOneMinAgo() {
+  const target = Date.now() - 60000
+  let candidate = null
+  for (const e of clusterMetricsHistory.value) {
+    if (e.t <= target) candidate = e
+  }
+  return candidate ? candidate.c : null
+}
+
+function clusterDeltaText(current, previous) {
+  if (current === null || current === undefined || previous === null || previous === undefined) return ''
+  const delta = current - previous
+  if (delta === 0) return '1분 전과 동일'
+  const arrow = delta > 0 ? '▲' : '▼'
+  return `${arrow}${displayValue(Math.abs(delta))} (1분 전 대비)`
 }
 
 const displayValue = (v, digits = 0) => {
@@ -306,24 +348,72 @@ const orderStatusCards = computed(() => {
 // 노드 수/backend 전체 실행 Pod/오토스케일링(/최대)/파드 재시작 누적.
 const clusterCards = computed(() => {
   const c = clusterMetrics.value
+  const prev = clusterSnapshotOneMinAgo()
   return [
-    { label: '활성 노드 수', value: c ? displayValue(c.activeNodes) : '--' },
-    { label: '실행 중인 Pod (backend 전체)', value: c ? displayValue(c.runningPodsBackend) : '--' },
     {
-      label: '매칭엔진 레플리카',
-      value: c ? `${displayValue(c.autoscaling.matching.current)} / ${displayValue(c.autoscaling.matching.max)}` : '--',
+      label: '활성 노드 수',
+      value: c ? displayValue(c.activeNodes) : '--',
+      delta: c ? clusterDeltaText(c.activeNodes, prev?.activeNodes ?? null) : '',
     },
     {
-      label: '기록기 레플리카',
-      value: c ? `${displayValue(c.autoscaling.recorder.current)} / ${displayValue(c.autoscaling.recorder.max)}` : '--',
+      label: '실행 중인 Pod',
+      value: c ? displayValue(c.runningPodsBackend) : '--',
+      delta: c ? clusterDeltaText(c.runningPodsBackend, prev?.runningPodsBackend ?? null) : '',
     },
-    { label: 'Karpenter 노드', value: c ? displayValue(c.autoscaling.karpenterNodes) : '--' },
     // 원래 "주문 처리 현황"에 있었던 카드 — 내부 구현 디테일(매칭엔진 메모리
     // 오더북 크기)이라 여기 엔지니어용 섹션으로 옮겼습니다(2026-08-25).
-    { label: '매칭엔진 호가창 잔량', value: c ? displayValue(c.matchingBookSize) : '--' },
+    {
+      label: '매칭엔진 호가창 잔량',
+      value: c ? displayValue(c.matchingBookSize) : '--',
+      delta: c ? clusterDeltaText(c.matchingBookSize, prev?.matchingBookSize ?? null) : '',
+    },
   ]
 })
-const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
+
+// 오토스케일링 현황 — 예전엔 clusterCards 안에 "N / max" 텍스트로만 있던 걸
+// 막대그래프로 바꿨다(2026-08-26 요청). matching/recorder는 KEDA
+// ScaledObject의 실제 min/max가 있어 current/max 비율이 그대로 막대 높이가
+// 되지만, Karpenter 노드 수는 API에 대응하는 "max" 값 자체가 없다(Karpenter는
+// KEDA처럼 레플리카 상한을 선언하는 게 아니라 NodePool의 CPU 총량 예산으로
+// 상한을 표현하므로 — infra/k8s/karpenter/nodepool-backend.yaml 참고). 그래서
+// Karpenter 막대는 "max N"을 사칭하지 않고, matching의 max(레플리카 1개당
+// 노드 1대에 가깝게 튜닝돼 있음)를 시각적 눈금으로만 빌려 쓴다 — 실제 상한
+// 표기가 아니므로 라벨에 "(max ...)"를 붙이지 않는다.
+const autoscalingBars = computed(() => {
+  const c = clusterMetrics.value
+  if (!c) return []
+  const prev = clusterSnapshotOneMinAgo()
+  const matchingMax = c.autoscaling.matching.max || 1
+  const recorderMax = c.autoscaling.recorder.max || 1
+  const karpenterScale = matchingMax || 1
+  const pct = (current, max) => Math.max(4, Math.min(100, Math.round((current / max) * 100)))
+  return [
+    {
+      key: 'matching',
+      label: 'matching-engine',
+      maxLabel: `max ${displayValue(matchingMax)}`,
+      current: c.autoscaling.matching.current,
+      percent: pct(c.autoscaling.matching.current, matchingMax),
+      delta: clusterDeltaText(c.autoscaling.matching.current, prev?.autoscaling?.matching?.current ?? null),
+    },
+    {
+      key: 'recorder',
+      label: 'recorder',
+      maxLabel: `max ${displayValue(recorderMax)}`,
+      current: c.autoscaling.recorder.current,
+      percent: pct(c.autoscaling.recorder.current, recorderMax),
+      delta: clusterDeltaText(c.autoscaling.recorder.current, prev?.autoscaling?.recorder?.current ?? null),
+    },
+    {
+      key: 'karpenter',
+      label: 'Karpenter 노드',
+      maxLabel: '',
+      current: c.autoscaling.karpenterNodes,
+      percent: pct(c.autoscaling.karpenterNodes, karpenterScale),
+      delta: clusterDeltaText(c.autoscaling.karpenterNodes, prev?.autoscaling?.karpenterNodes ?? null),
+    },
+  ]
+})
 
 async function fetchIntegrityCheck() {
   const lastRunRes = await fetch('/order-api/v1/sessions/last-run')
@@ -494,7 +584,14 @@ async function fetchPreviousRun2() {
   previousRun2Found.value = true
 }
 
+// refresh()가 1초마다 도는 것과 별개로, 한 번의 호출이 1초보다 오래 걸리면
+// (네트워크 지연 등) 다음 타이머 틱과 겹쳐 요청이 계속 쌓일 수 있다 — 이전
+// 호출이 아직 진행 중이면 이번 틱은 건너뛴다.
+let refreshInFlight = false
+
 async function refresh() {
+  if (refreshInFlight) return
+  refreshInFlight = true
   try {
     await Promise.all([
       fetchDashboardMetrics(),
@@ -518,25 +615,36 @@ async function refresh() {
     // 값은 마지막으로 성공한 결과를 그대로 유지하고, 에러만 알려준다 —
     // 잠깐의 네트워크 실패로 화면이 전부 '--'로 깜빡이지 않게.
     loadError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    refreshInFlight = false
   }
+}
 
-  // 정합성 검사는 별도 에러 상태로 분리 — 이게 실패해도 위 지표/상태
-  // 패널까지 같이 흔들리면 안 됩니다.
+// 데이터 정합성 검사(GET /v1/orders/integrity)는 recorder/query.go가 Redis
+// 캐시 없이 매번 MySQL을 직접 훑는 무거운 쿼리다 — 실측 16.7초(2026-08-26,
+// REPLAY 1시간 구간 기준). 위 refresh()와 같은 주기로 돌리면(예전엔 10초)
+// 쿼리 자체가 그보다 오래 걸려 다음 호출과 계속 겹쳐 쌓이면서 RDS에 상시
+// 부하를 준다 — 과거 RDS CPU 포화 사고와 같은 패턴. 게다가 이 지표는 "가장
+// 최근 실행 결과"라 그 실행이 끝나기 전까진 값 자체가 안 바뀌므로, 자주
+// 다시 물어볼 이유도 없다. refresh()의 1초 주기와 분리해 훨씬 느린 별도
+// 타이머로 두고, 이전 호출이 안 끝났으면 겹쳐 쏘지 않는다.
+const INTEGRITY_POLL_INTERVAL_MS = 60000
+let integrityCheckInFlight = false
+
+async function pollIntegrityCheck() {
+  if (integrityCheckInFlight) return
+  integrityCheckInFlight = true
   try {
     await fetchIntegrityCheck()
   } catch (e) {
     integrityData.value = null
     integrityNote.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    integrityCheckInFlight = false
   }
 }
 
 // ---- 실행 상태 (페이퍼 트레이딩 / 리플레이) ----
-const RUN_STATUS_LABELS = {
-  IN_PROGRESS: '실행 중',
-  COMPLETED: '완료',
-  STOPPED: '중지됨',
-  FAILED: '실패',
-}
 const RUN_OWNER_LABELS = {
   trader: '페이퍼 트레이딩',
   replayengine: '리플레이(주문 재생)',
@@ -559,6 +667,30 @@ function formatElapsed(startedAt) {
   const m = Math.floor((totalSec % 3600) / 60)
   const s = totalSec % 60
   return h > 0 ? `${h}시간 ${m}분 ${s}초` : m > 0 ? `${m}분 ${s}초` : `${s}초`
+}
+
+// "최신" 배지(맨 왼쪽 카드에만) 대신, 카드마다 각자의 기준 시각으로부터
+// "N분 전"을 보여준다(2026-08-26 요청) — flex-wrap으로 줄바꿈돼도 항상
+// 정확하고, 얼마나 오래됐는지까지 한눈에 보인다. nowTick(1초 틱)에 의존해
+// formatElapsed와 같은 방식으로 계속 갱신된다.
+function formatAgo(iso) {
+  if (!iso) return ''
+  const ms = nowTick.value - new Date(iso).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return '방금 전'
+  const totalMin = Math.floor(totalSec / 60)
+  if (totalMin < 60) return `${totalMin}분 전`
+  const totalHour = Math.floor(totalMin / 60)
+  if (totalHour < 24) return `${totalHour}시간 전`
+  const totalDay = Math.floor(totalHour / 24)
+  return `${totalDay}일 전`
+}
+
+// 카드의 "기준 시각" — 진행 중이면 시작 시각(경과 시간과 같은 기준), 끝난
+// 실행이면 종료 시각(없으면 시작 시각으로 대체) 기준으로 "N분 전"을 잰다.
+function cardAgoRef(card) {
+  return card.inProgress ? card.startedAt : (card.endedAt || card.startedAt)
 }
 
 function formatKST(iso) {
@@ -593,8 +725,20 @@ const recentRunCards = computed(() => {
       // SIGKILL돼 반납 코드가 아예 못 돔, 2026-08-25 실측)는 뜻입니다.
       // "실행 중"이라고 보여주면 사실과 다르므로 별도 상태로 구분합니다.
       const zombie = i > 0 && s.record.status === 'IN_PROGRESS'
-      const status = zombie ? '미종료 (비정상 종료 추정)' : RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
       const inProgress = !zombie && s.record.status === 'IN_PROGRESS'
+      // 왼쪽 배지 — "완료/실패/중지됨" 같은 원래 상태명 대신, 정상 종료인지
+      // 아니면 왜 비정상 종료됐는지(사용자가 중지했는지, 오류였는지)를 바로
+      // 보여준다(2026-08-26 요청). STOPPED은 이 프로젝트에서 항상 사용자의
+      // "중지" 버튼(POST .../stop)을 통해서만 나오는 상태라 "사용자 중지"로
+      // 단정할 수 있다 — FAILED는 그 외의 오류 종료, zombie는 정상 반납 없이
+      // 응답이 끊긴 경우라 오류로 추정만 가능.
+      let status
+      if (inProgress) status = '실행 중'
+      else if (zombie) status = '오류 추정 종료'
+      else if (s.record.status === 'COMPLETED') status = '정상 종료'
+      else if (s.record.status === 'STOPPED') status = '사용자 중지'
+      else if (s.record.status === 'FAILED') status = '오류로 종료'
+      else status = s.record.status || '-'
       return {
         inProgress,
         zombie,
@@ -963,27 +1107,6 @@ function drawFlowFrame() {
     ctx.fillStyle = '#7f93a8'
     ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
     ctx.fillText(nd.sub, drawCx, ny + 11)
-
-    // Redis 캐시는 파이프라인의 별도 홉이 아니라 매칭엔진의 오더북 스냅샷
-    // 저장소라, 자기 노드 대신 매칭엔진 박스 오른쪽 위에 위성 점으로 붙임
-    // (2026-08-24, "시스템 구성요소 상태" 패널을 없애고 여기로 통합).
-    if (nd.key === 'matching') {
-      // 점이 박스 테두리 선(매칭엔진이 정상이면 초록, 이 점도 정상이면
-      // 초록)과 거의 겹치는 자리(bx+bw-2, by-2 — 테두리 선 바로 위)에 있어서
-      // 같은 색일 때 안 보이는 것처럼 눈에 안 띄던 문제(2026-08-25 지적) —
-      // 박스 모서리 바깥쪽으로 완전히 빼서 테두리 선과 안 겹치게 하고,
-      // 어두운 테두리도 더 두껍게 줘서 박스 색과 무관하게 항상 도드라지게 함.
-      const redisOk = flowUp('Redis 캐시')
-      const rx = bx + bw + 3
-      const ry = by - 3
-      ctx.beginPath()
-      ctx.fillStyle = redisOk ? '#2ed39a' : '#ff5c7a'
-      ctx.arc(rx, ry, 4, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#0a1420'
-      ctx.lineWidth = 1.8
-      ctx.stroke()
-    }
   }
 
   // "레플리카: 매칭 X · 기록기 Y"는 아래 "클러스터 현황" 패널에 이미 있는
@@ -996,9 +1119,9 @@ function drawFlowFrame() {
   ctx.fillStyle = '#cfe6ff'
   ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText(`● 접수 ${(m?.orderAcceptTps || 0).toFixed(1)}/s`, 14, 20)
+  ctx.fillText(`● 접수 ${(isRealtime ? m?.orderAcceptTps || 0 : 0).toFixed(1)}/s`, 14, 20)
   ctx.fillStyle = '#8ff5cf'
-  ctx.fillText(`● 체결 ${(m?.executionTps || 0).toFixed(1)}/s`, 14, 35)
+  ctx.fillText(`● 체결 ${(isRealtime ? m?.executionTps || 0 : 0).toFixed(1)}/s`, 14, 35)
 
   ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif'
   ctx.fillStyle = '#9fb0c2'
@@ -1042,10 +1165,13 @@ function stopFlowCanvas() {
 }
 
 let pollTimer = null
+let integrityPollTimer = null
 
 onMounted(() => {
   refresh()
   pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS)
+  pollIntegrityCheck()
+  integrityPollTimer = window.setInterval(pollIntegrityCheck, INTEGRITY_POLL_INTERVAL_MS)
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
   }, 1000)
@@ -1056,6 +1182,10 @@ onBeforeUnmount(() => {
   if (pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+  if (integrityPollTimer !== null) {
+    clearInterval(integrityPollTimer)
+    integrityPollTimer = null
   }
   if (tickTimer !== null) {
     clearInterval(tickTimer)
@@ -1087,7 +1217,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="panel run-status-panel">
-      <h3>실행 상태</h3>
+      <h3>실행 이력</h3>
       <div v-if="recentRunCards.length" class="run-status-list">
         <div
           v-for="(card, i) in recentRunCards"
@@ -1095,14 +1225,20 @@ onBeforeUnmount(() => {
           class="run-status-row"
           :class="{ 'run-active': card.inProgress }"
         >
-          <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
-            {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
-          </span>
+          <div class="run-badge-col">
+            <span v-if="formatAgo(cardAgoRef(card))" class="run-badge-latest">{{ formatAgo(cardAgoRef(card)) }}</span>
+            <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
+              {{ card.status }}
+            </span>
+          </div>
           <div class="run-status-text">
-            <strong>{{ i === 0 ? card.owner : `${i + 1}번째 전: ${card.owner}` }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
-            <span v-if="card.speed">{{ card.speed }}배속</span>
+            <strong>{{ card.owner }}</strong>
+            <span v-if="card.speed"><strong>{{ card.speed }}배속</strong></span>
             <span v-if="card.inProgress">시작 {{ formatKST(card.startedAt) }} · 경과 {{ formatElapsed(card.startedAt) }}</span>
-            <span v-else>{{ formatKST(card.startedAt) }} ~ {{ formatKST(card.endedAt) }}</span>
+            <template v-else>
+              <span>{{ formatKST(card.startedAt) }} ~</span>
+              <span>{{ formatKST(card.endedAt) }}</span>
+            </template>
             <span v-if="card.message" class="run-message">{{ card.message }}</span>
           </div>
         </div>
@@ -1129,10 +1265,8 @@ onBeforeUnmount(() => {
           </p>
         </article>
       </div>
-    </section>
 
-    <section class="panel order-status-panel">
-      <h3>주문 처리 현황</h3>
+      <h4 class="order-status-subtitle">주문 처리 현황</h4>
       <p class="cluster-note">최근 10분간 접수된 주문의 상태별 건수입니다.</p>
       <div class="stat-grid stat-grid-4">
         <div v-for="card in orderStatusCards" :key="card.label">
@@ -1145,22 +1279,32 @@ onBeforeUnmount(() => {
     <section class="panel cluster-panel">
       <h3>클러스터 현황</h3>
       <p v-if="clusterMetricsError" class="cluster-note">{{ clusterMetricsError }}</p>
-      <div class="stat-grid stat-grid-6">
+      <div class="stat-grid stat-grid-3">
         <div v-for="card in clusterCards" :key="card.label">
           <span>{{ card.label }}</span>
           <strong>{{ card.value }}</strong>
+          <em v-if="card.delta" class="cluster-delta">{{ card.delta }}</em>
         </div>
       </div>
-      <div v-if="podRestartRows.length" class="restart-table">
-        <div class="restart-row restart-header">
-          <span>파드 재시작 누적</span>
-          <span>횟수</span>
-        </div>
-        <div v-for="row in podRestartRows" :key="row.pod" class="restart-row">
-          <span>{{ row.pod }}</span>
-          <span>{{ row.restarts }}</span>
+
+      <h4 class="autoscaling-subtitle">
+        오토스케일링 현황 (KEDA 레플리카 수 / 최대)
+        <span
+          class="info-icon"
+          title="matching-engine/recorder는 KEDA ScaledObject의 실제 min/max 기준입니다. Karpenter 노드는 KEDA처럼 선언된 상한이 없어(NodePool의 CPU 예산으로 상한을 표현) 막대 눈금만 matching-engine의 max를 빌려 쓰고, 'max' 수치는 표기하지 않습니다."
+        >ⓘ</span>
+      </h4>
+      <div v-if="autoscalingBars.length" class="autoscaling-bars">
+        <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
+          <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
+          <div class="autoscaling-bar-track">
+            <div class="autoscaling-bar-fill" :class="`bar-${bar.key}`" :style="{ height: bar.percent + '%' }"></div>
+          </div>
+          <div class="autoscaling-bar-label">{{ bar.label }}<template v-if="bar.maxLabel"> ({{ bar.maxLabel }})</template></div>
+          <em v-if="bar.delta" class="cluster-delta">{{ bar.delta }}</em>
         </div>
       </div>
+      <div v-else class="cluster-note">클러스터 지표를 불러오는 중...</div>
     </section>
 
     <section class="throughput-section">
@@ -1346,6 +1490,13 @@ onBeforeUnmount(() => {
   border-color: rgba(46, 211, 154, 0.5);
 }
 
+.run-badge-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
 .run-badge {
   padding: 6px 14px;
   color: #8ea2b8;
@@ -1364,6 +1515,19 @@ onBeforeUnmount(() => {
 .run-badge.zombie {
   color: #ffb84d;
   background: rgba(255, 184, 77, 0.15);
+}
+
+/* 카드가 flex-wrap으로 줄바꿈되면 "왼쪽=최신"이 항상 맞지는 않으므로,
+   위치 대신 배지로 명시한다(2026-08-26 요청). */
+.run-badge-latest {
+  padding: 4px 10px;
+  color: #3f86ff;
+  background: rgba(63, 134, 255, 0.15);
+  border: 1px solid rgba(63, 134, 255, 0.4);
+  border-radius: 16px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .run-status-text {
@@ -1653,21 +1817,31 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.order-status-panel,
 .cluster-panel {
   margin-top: 18px;
 }
 
-.order-status-panel h3,
 .cluster-panel h3 {
   margin: 0;
   font-size: 16px;
+}
+
+.order-status-subtitle {
+  margin: 24px 0 0;
+  font-size: 13px;
+  color: #9fb0c2;
 }
 
 .cluster-note {
   margin: 6px 0 0;
   color: #8ea2b8;
   font-size: 12px;
+}
+
+.cluster-delta {
+  font-style: normal;
+  font-size: 11px;
+  color: #9fb0c2;
 }
 
 .stat-grid {
@@ -1681,6 +1855,73 @@ onBeforeUnmount(() => {
 
 .stat-grid-6 {
   grid-template-columns: repeat(6, 1fr);
+}
+
+.stat-grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.autoscaling-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 24px 0 0;
+  font-size: 13px;
+  color: #9fb0c2;
+}
+
+.info-icon {
+  color: #8ea2b8;
+  font-size: 13px;
+  cursor: help;
+}
+
+.autoscaling-bars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 20px;
+}
+
+.autoscaling-bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.autoscaling-bar-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #2ed39a;
+}
+
+.autoscaling-bar-track {
+  width: 100%;
+  height: 110px;
+  background: #0d1b2a;
+  border: 1px solid #172a3e;
+  border-radius: 8px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+
+.autoscaling-bar-fill {
+  width: 100%;
+  background: #2ed39a;
+  border-radius: 2px;
+  transition: height 0.4s ease;
+}
+
+.autoscaling-bar-fill.bar-karpenter {
+  background: #7fd858;
+}
+
+.autoscaling-bar-label {
+  color: #9fb0c2;
+  font-size: 12px;
+  text-align: center;
 }
 
 .stat-grid div {
@@ -1709,32 +1950,4 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.restart-table {
-  margin-top: 18px;
-  border-top: 1px solid #20344b;
-  padding-top: 14px;
-}
-
-.restart-row {
-  display: flex;
-  padding: 8px 0;
-  justify-content: space-between;
-  font-size: 13px;
-  border-bottom: 1px solid #16283b;
-}
-
-.restart-row:last-child {
-  border-bottom: 0;
-}
-
-.restart-header {
-  color: #8ea2b8;
-  font-size: 12px;
-  border-bottom: 1px solid #20344b;
-}
-
-.restart-row:not(.restart-header) span:last-child {
-  color: #ffb84d;
-  font-variant-numeric: tabular-nums;
-}
 </style>

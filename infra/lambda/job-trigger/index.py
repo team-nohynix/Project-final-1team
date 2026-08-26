@@ -117,6 +117,14 @@ def _base_args(body):
         args.append(f"-speed={body['speed']}")
     if body.get("orderBucket"):
         args.append(f"-order-bucket={body['orderBucket']}")
+    # fromTs/toTs(FR-27 구간 지정, Unix ms)는 2026-08-25까지 replay 잡에서만
+    # 뽑아 썼는데, 같은 날 ai-trader(trader) 바이너리에도 -from-ts/-to-ts를
+    # 추가했으므로(trader/replay.filterEventRange 참고) 여기 공통 헬퍼로
+    # 옮겨서 ai-trader/replay 둘 다 body에 실어 보내면 그대로 전달되게 했다.
+    if body.get("fromTs"):
+        args.append(f"-from-ts={body['fromTs']}")
+    if body.get("toTs"):
+        args.append(f"-to-ts={body['toTs']}")
     return args
 
 
@@ -176,10 +184,6 @@ def _build_replay_job(body, message_id):
         "-shard-index=$(JOB_COMPLETION_INDEX)",
         f"-shard-count={shard_count}",
     ]
-    if body.get("fromTs"):
-        args.append(f"-from-ts={body['fromTs']}")
-    if body.get("toTs"):
-        args.append(f"-to-ts={body['toTs']}")
 
     return {
         "apiVersion": "batch/v1",

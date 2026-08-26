@@ -5,11 +5,31 @@ import { useRouter } from 'vue-router'
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
 
+// available recorded dates fetched from backend
+const availableDates = ref<string[]>([])
+
+async function loadAvailableDates() {
+  try {
+    const res = await fetch('/order-api/v1/jobs/replay-dates')
+    if (!res.ok) return
+    const data = await res.json()
+    availableDates.value = Array.isArray(data.dates) ? data.dates : []
+    if (!selectedDate.value && availableDates.value.length) {
+      selectedDate.value = availableDates.value[0]
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
 // target speed multiplier (numeric)
 const speed = ref(60)
 
 // shardCount replaces pod selection: number of replay shards (1..20)
 const shardCount = ref(1)
+// optional time range within the selected date (HH:MM), empty => full day
+const startTime = ref('') // HH:MM, 비어있으면 제한 없음
+const endTime = ref('')   // HH:MM, 비어있으면 제한 없음
 
 // UI / state
 const precheckMessage = ref('')
@@ -57,6 +77,15 @@ const estimatedDurationDisplay = computed(() => {
   const speedVal = Number(speed.value) || 1
   const estSec = preview.value.maxEventSpanSeconds / speedVal
   return formatSecondsToHMS(estSec)
+})
+
+// 재생 진행률 — 페이퍼 트레이딩과 달리 리플레이는 프리뷰(GET .../replay-preview)로
+// 재생할 전체 주문 수(totalOrders)를 미리 알 수 있어서, 시세 수집과 같은
+// "N/전체" 실제 퍼센트 진행바를 보여줄 수 있다.
+const replayProgressPercent = computed(() => {
+  const total = preview.value?.totalOrders || 0
+  if (!total || !summary.value) return 0
+  return Math.min(100, Math.round((Number(summary.value.accepted) / total) * 100))
 })
 
 async function fetchReplayPreview(date: string) {
@@ -115,6 +144,8 @@ const SS_KEYS = {
   selectedDate: SS_PREFIX + 'selectedDate',
   speed: SS_PREFIX + 'speed',
   shardCount: SS_PREFIX + 'shardCount',
+  startTime: SS_PREFIX + 'startTime',
+  endTime: SS_PREFIX + 'endTime',
   runInfo: SS_PREFIX + 'runInfo',
 }
 
@@ -123,6 +154,7 @@ const validate = () => {
   if (!selectedDate.value) return '재생할 날짜를 선택해주세요'
   const sc = Number(shardCount.value)
   if (!sc || Number.isNaN(sc) || sc < 1 || sc > 20) return '샤드 수는 1~20 사이여야 합니다'
+  if (startTime.value && endTime.value && startTime.value >= endTime.value) return '종료 시각은 시작 시각보다 늦어야 합니다'
   return ''
 }
 
@@ -148,6 +180,8 @@ function saveToSession() {
     sessionStorage.setItem(SS_KEYS.selectedDate, selectedDate.value)
     sessionStorage.setItem(SS_KEYS.speed, String(speed.value))
     sessionStorage.setItem(SS_KEYS.shardCount, String(shardCount.value))
+    sessionStorage.setItem(SS_KEYS.startTime, startTime.value)
+    sessionStorage.setItem(SS_KEYS.endTime, endTime.value)
     sessionStorage.setItem(SS_KEYS.runInfo, JSON.stringify(runInfo.value || null))
     // persist stop request state
     sessionStorage.setItem(SS_PREFIX + 'stopRequested', JSON.stringify(stopRequested.value))
@@ -165,6 +199,10 @@ function loadFromSession() {
     if (sp) speed.value = Number(sp)
     const sc = sessionStorage.getItem(SS_KEYS.shardCount)
     if (sc) shardCount.value = Number(sc)
+    const st = sessionStorage.getItem(SS_KEYS.startTime)
+    if (st) startTime.value = st
+    const et = sessionStorage.getItem(SS_KEYS.endTime)
+    if (et) endTime.value = et
     const ri = sessionStorage.getItem(SS_KEYS.runInfo)
     if (ri) {
       const parsed = JSON.parse(ri)
@@ -269,7 +307,10 @@ async function startReplay() {
     previousRunId.value = existingRunId
 
     // 2) POST start job
-    const body = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    const toKstMs = (timeStr: string) => selectedDate.value && timeStr ? new Date(`${selectedDate.value}T${timeStr}:00+09:00`).getTime() : 0
+    const body: any = { jobType: 'replay', date: selectedDate.value, speed: Number(speed.value), shardCount: Number(shardCount.value) }
+    if (startTime.value) body.fromTs = toKstMs(startTime.value)
+    if (endTime.value) body.toTs = toKstMs(endTime.value)
     const res = await fetch('/order-api/v1/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     if (res.status !== 202) {
       const txt = await res.text()
@@ -387,6 +428,7 @@ function stopPolling() {
 
 onMounted(() => {
   loadFromSession()
+  loadAvailableDates()
   // if we restored an IN_PROGRESS run, resume polling to show live results
   if (runInfo.value && runInfo.value.status === 'IN_PROGRESS') {
     if (!isPolling.value) {
@@ -424,7 +466,21 @@ function goToResults() {
 
         <div class="form-field">
           <label>재생 날짜</label>
-          <input v-model="selectedDate" type="date" class="date-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+          <select v-model="selectedDate" style="width:100%; height:42px; background:#071826; border:1px solid #172a3e; color:#fff; padding:0 10px; border-radius:8px">
+            <option v-if="!availableDates.length" value="">기록된 날짜 없음</option>
+            <option v-for="d in availableDates" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <p class="date-hint">페이퍼 트레이딩으로 주문 기록이 실제로 존재하는 날짜만 표시됩니다.</p>
+        </div>
+
+        <div class="form-field">
+          <label>시작 / 종료 시각 (선택)</label>
+          <div style="display:flex; gap:8px; align-items:center">
+            <input v-model="startTime" type="time" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+            <span style="color:#9fb0c2; font-size:13px">—</span>
+            <input v-model="endTime" type="time" class="time-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+          </div>
+          <p class="date-hint">비워두면 전체 날짜 범위가 사용됩니다. (KST)</p>
         </div>
 
         <div class="form-field">
@@ -471,7 +527,7 @@ function goToResults() {
 
       <aside class="panel right-panel">
         <h3 class="panel-title">부하 시나리오 미리보기</h3>
-        <p class="panel-sub">예상 부하 분포와 검증 기준</p>
+        <p class="panel-sub">예상 부하 분포</p>
 
         <div class="bar-chart placeholder">
           <div v-if="previewLoading" class="empty-center">
@@ -493,12 +549,8 @@ function goToResults() {
               <div class="preview-main">총 {{ preview.totalOrders.toLocaleString() }}건 재생 예정 · {{ preview.marketsWithRecords }}/{{ preview.marketsTotal }}개 마켓</div>
             </div>
             <div class="preview-line" style="margin-top:8px">
-              <div class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</div>
-              <div class="preview-value">{{ estimatedDurationDisplay }}</div>
-            </div>
-
-            <div class="preview-checks" style="margin-top:12px">
-              <div class="check-item">검증 기준: 목표 처리량 10,000건/초 · 목표 체결률 90% · 허용 거부율 5%</div>
+              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</span>
+              <span class="preview-value"> {{ estimatedDurationDisplay }}</span>
             </div>
           </div>
 
@@ -515,10 +567,20 @@ function goToResults() {
           <div class="card-right">
             <span class="summary-inline">
               <template v-if="summary">
-                접수 {{ summary.accepted }}건 · {{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}
+                접수 {{ summary.accepted.toLocaleString() }}건 · {{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}
               </template>
               <template v-else>데이터 없음</template>
             </span>
+          </div>
+        </div>
+
+        <div v-if="runInfo?.status === 'IN_PROGRESS' && preview?.totalOrders" class="replay-progress">
+          <div class="progress-info">
+            <span>재생 진행률</span>
+            <span class="progress-count">{{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" :style="{ width: replayProgressPercent + '%' }"></div>
           </div>
         </div>
 
@@ -601,6 +663,11 @@ function goToResults() {
   color: #e6eef8;
   border-radius: 8px;
   outline: none;
+}
+
+input.time-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
 }
 
 .speed-slider-row {
@@ -689,7 +756,6 @@ function goToResults() {
 .right-panel {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
 }
 
 .bar-chart .bars {
