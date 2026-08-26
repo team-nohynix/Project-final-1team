@@ -94,3 +94,28 @@ func replayPreviewHandler(storage orderrecords.Storage) http.HandlerFunc {
 		})
 	}
 }
+
+// replayDatesResponse는 GET /v1/jobs/replay-dates의 응답입니다.
+type replayDatesResponse struct {
+	Dates []string `json:"dates"`
+}
+
+// replayDatesHandler는 GET /v1/jobs/replay-dates를 처리합니다 — 팀 요청
+// (2026-08-26)으로, 프론트의 리플레이 날짜 선택 화면이 "실제로 트레이딩 기록이
+// 있는 날짜"만 고를 수 있게 지원합니다. 20개 마켓 전체를 뒤져야 하는
+// replayPreviewHandler와 달리 이건 storage.ListDates 한 번이면 됩니다(로컬은
+// 디렉터리 훑기, S3는 ListObjectsV2). 기록이 하나도 없으면 빈 배열(에러 아님).
+func replayDatesHandler(storage orderrecords.Storage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		dates, err := storage.ListDates()
+		if err != nil {
+			log.Printf("리플레이 가능 날짜 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "날짜 목록 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, replayDatesResponse{Dates: dates})
+	}
+}

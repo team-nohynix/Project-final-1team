@@ -18,6 +18,12 @@ import (
 type fakeOrderRecordsStorage struct {
 	byMarket map[string][]orderrecords.RecordedOrder
 	errs     map[string]error
+	dates    []string
+	datesErr error
+}
+
+func (f *fakeOrderRecordsStorage) ListDates() ([]string, error) {
+	return f.dates, f.datesErr
 }
 
 func (f *fakeOrderRecordsStorage) Load(market string, start, end time.Time) ([]orderrecords.RecordedOrder, error) {
@@ -123,6 +129,50 @@ func TestReplayPreviewHandlerSkipsErroringMarket(t *testing.T) {
 	}
 	if got.TotalOrders != 2 {
 		t.Errorf("TotalOrders = %d, want 2", got.TotalOrders)
+	}
+}
+
+func TestReplayDatesHandlerReturnsDates(t *testing.T) {
+	storage := &fakeOrderRecordsStorage{dates: []string{"2026-08-25", "2026-08-19"}}
+	w := httptest.NewRecorder()
+	replayDatesHandler(storage)(w, httptest.NewRequest(http.MethodGet, "/v1/jobs/replay-dates", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var got replayDatesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if len(got.Dates) != 2 || got.Dates[0] != "2026-08-25" || got.Dates[1] != "2026-08-19" {
+		t.Errorf("Dates = %v", got.Dates)
+	}
+}
+
+func TestReplayDatesHandlerEmpty(t *testing.T) {
+	storage := &fakeOrderRecordsStorage{dates: nil}
+	w := httptest.NewRecorder()
+	replayDatesHandler(storage)(w, httptest.NewRequest(http.MethodGet, "/v1/jobs/replay-dates", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	var got replayDatesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if len(got.Dates) != 0 {
+		t.Errorf("Dates = %v, want empty", got.Dates)
+	}
+}
+
+func TestReplayDatesHandlerStorageError(t *testing.T) {
+	storage := &fakeOrderRecordsStorage{datesErr: errTestDownload}
+	w := httptest.NewRecorder()
+	replayDatesHandler(storage)(w, httptest.NewRequest(http.MethodGet, "/v1/jobs/replay-dates", nil))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 
