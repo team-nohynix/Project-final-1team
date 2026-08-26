@@ -1200,7 +1200,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="panel run-status-panel">
-      <h3>실행 상태</h3>
+      <h3>실행 이력</h3>
       <div v-if="recentRunCards.length" class="run-status-list">
         <div
           v-for="(card, i) in recentRunCards"
@@ -1211,6 +1211,7 @@ onBeforeUnmount(() => {
           <span class="run-badge" :class="{ running: card.inProgress, zombie: card.zombie }">
             {{ card.inProgress ? '실행 중' : card.zombie ? '미종료' : '종료됨' }}
           </span>
+          <span v-if="i === 0" class="run-badge-latest">최신</span>
           <div class="run-status-text">
             <strong>{{ card.owner }}{{ card.inProgress ? '' : ` — ${card.status}` }}</strong>
             <span v-if="card.speed">{{ card.speed }}배속</span>
@@ -1485,6 +1486,19 @@ onBeforeUnmount(() => {
 .run-badge.zombie {
   color: #ffb84d;
   background: rgba(255, 184, 77, 0.15);
+}
+
+/* 카드가 flex-wrap으로 줄바꿈되면 "왼쪽=최신"이 항상 맞지는 않으므로,
+   위치 대신 배지로 명시한다(2026-08-26 요청). */
+.run-badge-latest {
+  padding: 4px 10px;
+  color: #3f86ff;
+  background: rgba(63, 134, 255, 0.15);
+  border: 1px solid rgba(63, 134, 255, 0.4);
+  border-radius: 16px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .run-status-text {
