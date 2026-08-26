@@ -253,3 +253,67 @@ func TestApplyDeterministicReplay(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyDuplicateOrderIDWhileRestingIsIgnored — 2026-08-27 중복 체결 사고의 핵심
+// 시나리오를 그대로 재현합니다: 같은 OrderID의 NEW가 (재전달 등으로) 두 번 Apply되면,
+// 두 번째 호출은 무시돼야 합니다. 이 체크가 없으면 elements 맵이 새 리스트 노드로
+// 덮어써지고 먼저 넣은 노드가 유령 잔량으로 남아, 실측으로 주문 1건이 240번 체결돼
+// 원래 수량의 1.7배가 채워지는 사고로 이어졌습니다.
+func TestApplyDuplicateOrderIDWhileRestingIsIgnored(t *testing.T) {
+	ob := New("KRW-BTC")
+
+	execs1 := ob.Apply(order("bid1", Buy, "100", "1", 1))
+	if len(execs1) != 0 {
+		t.Fatalf("첫 Apply는 상대가 없어 체결 0건이어야 하는데 %d건", len(execs1))
+	}
+
+	// 같은 OrderID로 재전달 — 새 *Order 포인터지만 값은 같음(실제 재전달과 동일 모양).
+	execs2 := ob.Apply(order("bid1", Buy, "100", "1", 1))
+	if len(execs2) != 0 {
+		t.Fatalf("중복 NEW는 무시돼 체결 0건이어야 하는데 %d건", len(execs2))
+	}
+
+	if ob.Size() != 1 {
+		t.Fatalf("호가창에 bid1 1건만 있어야 하는데 Size()=%d (유령 노드 의심)", ob.Size())
+	}
+
+	// 유령 노드가 있었다면 이 매도 주문이 1이 아니라 2(또는 그 이상) 체결됐을 것.
+	execs3 := ob.Apply(order("ask1", Sell, "100", "5", 2))
+	if len(execs3) != 1 {
+		t.Fatalf("bid1과 딱 1번만 체결돼야 하는데 %d건 체결 (유령 노드가 또 체결에 응함)", len(execs3))
+	}
+	if !execs3[0].Quantity.Equal(d("1")) {
+		t.Errorf("체결 수량 = %s, want 1 (bid1 원래 수량만큼만)", execs3[0].Quantity)
+	}
+
+	bids, _ := ob.Snapshot(10)
+	if len(bids) != 0 {
+		t.Errorf("bid1이 전량 체결됐으니 매수 호가는 비어야 하는데 %v", bids)
+	}
+}
+
+// TestApplyDuplicateOrderIDAfterCancelIsIgnored — 취소된 뒤(=elements에서 빠진 뒤)
+// 같은 OrderID로 재전달돼도 방금 취소한 주문이 되살아나면 안 됩니다. elements 존재
+// 여부만으로 막는 orderbook 레벨 방어의 한계(취소/전량체결 이후는 못 잡음)를
+// 인지하되, 적어도 "아직 살아있는 동안의 취소 직후 재전달"은 정확히 처리돼야 함.
+func TestApplyDuplicateOrderIDAfterCancelIsIgnored(t *testing.T) {
+	ob := New("KRW-BTC")
+	ob.Apply(order("bid1", Buy, "100", "1", 1))
+	ob.Cancel("bid1")
+
+	if ob.Size() != 0 {
+		t.Fatalf("취소 후 Size()=%d, want 0", ob.Size())
+	}
+
+	// 취소된 주문의 NEW가 재전달되면(오프셋 가드는 engine 레벨 책임이라 여기선 없음)
+	// orderbook 혼자서는 "새 주문"과 구분할 수 없다는 게 바로 engine.Apply의 offset
+	// 가드가 필요한 이유 — 여기서는 최소한 orderbook 레벨에서 정상적인 "빈 호가창에
+	// 새 주문 하나" 동작과 동일하게(중복 노드 없이) 처리되는지만 확인한다.
+	execs := ob.Apply(order("bid1", Buy, "100", "1", 3))
+	if len(execs) != 0 {
+		t.Fatalf("상대가 없어 체결 0건이어야 하는데 %d건", len(execs))
+	}
+	if ob.Size() != 1 {
+		t.Fatalf("Size()=%d, want 1 (중복 노드 없이 정확히 1건)", ob.Size())
+	}
+}

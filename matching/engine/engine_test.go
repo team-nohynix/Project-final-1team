@@ -332,3 +332,63 @@ func TestEngineHandoffWritesSynchronouslyAndSurvivesToNewOwner(t *testing.T) {
 		t.Fatalf("인수받은 ask1과 체결돼야 하는데: %+v", pub.published)
 	}
 }
+
+// TestApplyDuplicateOffsetIsIgnored — 2026-08-27 중복 체결 사고의 두 번째 방어선을
+// 검증합니다: 이미 처리한 offset과 같거나 더 작은 이벤트는(재전달 등으로 다시
+// 도착해도) 완전히 무시돼야 합니다 — orderbook.Apply 자체의 OrderID 체크(이미
+// 미체결로 남아있는 동안만 잡음)와 달리, 이 가드는 전량 체결/취소돼 호가창에서
+// 빠진 뒤에 재전달되는 경우까지 포함해 offset만으로 통째로 막습니다.
+func TestApplyDuplicateOffsetIsIgnored(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	e := New("KRW-BTC", pub, store, 1000, time.Hour)
+
+	// ask1이 bid1과 정확히 맞아 전량 체결되고 둘 다 호가창에서 사라짐.
+	e.Apply(context.Background(), newOrderEvent(EventNew, "ask1", orderbook.Sell, "100", "1", 1))
+	if err := e.Apply(context.Background(), newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 2)); err != nil {
+		t.Fatalf("bid1 접수 실패: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("첫 체결 1건을 기대했으나 %d건", len(pub.published))
+	}
+
+	// bid1(offset=2)이 재전달됨 — 이미 전량 체결/제거된 뒤라 orderbook의 OrderID
+	// 체크만으로는 못 잡는 케이스. offset 가드가 없으면 완전히 새 주문처럼
+	// 재매칭돼(상대가 없어 이번엔 호가창에 편입) 유령 잔량이 생긴다.
+	if err := e.Apply(context.Background(), newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 2)); err != nil {
+		t.Fatalf("재전달된 bid1 처리 실패: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("재전달은 무시돼 체결이 늘면 안 되는데 published=%d", len(pub.published))
+	}
+
+	// 재전달이 새 미체결 주문으로 편입되지 않았는지 확인 — 상대가 나타나도 체결이
+	// 없어야 함.
+	e.Apply(context.Background(), newOrderEvent(EventNew, "ask2", orderbook.Sell, "100", "1", 3))
+	if len(pub.published) != 1 {
+		t.Fatalf("유령 bid1이 있었다면 여기서 체결이 하나 더 났을 것 — published=%d", len(pub.published))
+	}
+}
+
+// TestApplyOlderOffsetAfterRecoveryIsIgnored — Recover 이후 정상적으로 이어받은
+// offset보다 작은 이벤트가(스냅샷 경쟁 등으로) 들어와도 무시되는지 확인합니다.
+func TestApplyOlderOffsetAfterRecoveryIsIgnored(t *testing.T) {
+	pub := &fakePublisher{}
+	store := newFakeSnapshotStore()
+	e := New("KRW-BTC", pub, store, 1000, time.Hour)
+
+	e.Apply(context.Background(), newOrderEvent(EventNew, "ask1", orderbook.Sell, "100", "1", 5))
+	e.Apply(context.Background(), newOrderEvent(EventNew, "bid1", orderbook.Buy, "100", "1", 6))
+	if len(pub.published) != 1 {
+		t.Fatalf("체결 1건을 기대했으나 %d건", len(pub.published))
+	}
+
+	// offset=3은 이미 지나온 offset=6보다 작음 — 오래된/재전달된 이벤트로 간주해 무시.
+	if err := e.Apply(context.Background(), newOrderEvent(EventNew, "late1", orderbook.Sell, "100", "1", 3)); err != nil {
+		t.Fatalf("오래된 offset 처리 실패: %v", err)
+	}
+	bids, asks := e.book.Snapshot(10)
+	if len(bids) != 0 || len(asks) != 0 {
+		t.Errorf("오래된 offset 이벤트가 무시되지 않고 호가창에 반영됨: bids=%v asks=%v", bids, asks)
+	}
+}

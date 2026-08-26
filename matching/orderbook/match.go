@@ -7,7 +7,22 @@ import "github.com/shopspring/decimal"
 // 호가창에 있던(선행) 주문의 가격을 따릅니다. 매칭 후 incoming에 수량이 남아 있으면
 // 그 잔량을 새 미체결 주문으로 호가창에 편입합니다. 반환값은 이번 호출에서 발생한
 // 체결들(하나도 없을 수 있음)이며, 발생 순서 그대로입니다.
+//
+// **중복 OrderID 방어 — 2026-08-27, 정합성 검사 "중복 체결" 사고의 진짜 원인.**
+// 어떤 경로로든(컨슈머 재전달, 리밸런스 타이밍, 재시도 등) 같은 OrderID의 NEW
+// 이벤트가 두 번 Apply되면, 이 체크가 없을 때는 완전히 새 *Order를 또 만들어
+// insertResting이 호가창에 "같은 OrderID를 가진 별개의 리스트 노드"를 두 번째로
+// 추가했다. elements 맵은 OrderID당 노드 하나만 가리킬 수 있어(나중 것으로
+// 덮어써짐) 먼저 넣은 노드는 Cancel로도 다시는 못 지우는 유령 잔량이 되고,
+// 이후 들어오는 모든 반대편 주문과 계속 체결되며 실제 수량을 몇 배로 초과
+// 체결시켰다(실측: 주문 1건이 240번 체결돼 원래 수량의 1.7배 채워짐). 이 엔진은
+// 마켓당 고루틴 하나로 순차 호출되는 게 전제라 여기서 락 없이 elements 맵만
+// 확인하면 충분하다 — OrderID가 이미 호가창에 있으면(=이미 처리된 NEW) 이번
+// 호출은 매칭도 편입도 하지 않고 완전히 무시한다.
 func (ob *OrderBook) Apply(incoming *Order) []Execution {
+	if _, exists := ob.elements[incoming.OrderID]; exists {
+		return nil
+	}
 	incoming.Price = normalizePrice(incoming.Price)
 
 	oppositeSide := Sell
