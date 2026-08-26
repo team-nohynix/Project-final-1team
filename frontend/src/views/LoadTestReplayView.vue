@@ -88,6 +88,22 @@ const replayProgressPercent = computed(() => {
   return Math.min(100, Math.round((Number(summary.value.accepted) / total) * 100))
 })
 
+// 남은 시간 — estimatedDurationDisplay(예상 총 소요)에서 이미 지난 시간만큼
+// 뺀 것(2026-08-26 요청). accepted/total 진행률로 역산하지 않고 시간 기반으로
+// 계산하는 이유는, 배속 재생은 실제 이벤트 간격을 그대로 압축한 것이라
+// "지금까지 걸린 시간/전체 예상 시간"이 접수 건수 비율보다 원래도 더
+// 정확한 진행률의 근거이기 때문(estimatedDurationDisplay와 같은 데이터를
+// 재사용).
+const replayRemainingDisplay = computed(() => {
+  if (!preview.value?.maxEventSpanSeconds || !runInfo.value?.startedAt) return ''
+  const speedVal = Number(speed.value) || 1
+  const totalSec = preview.value.maxEventSpanSeconds / speedVal
+  const elapsedSec = (Date.now() - new Date(runInfo.value.startedAt).getTime()) / 1000
+  const remaining = totalSec - elapsedSec
+  if (remaining <= 0) return '거의 완료'
+  return `남은 시간 약 ${formatSecondsToHMS(remaining)}`
+})
+
 async function fetchReplayPreview(date: string) {
   previewError.value = null
   previewLoading.value = true
@@ -577,7 +593,9 @@ function goToResults() {
         <div v-if="runInfo?.status === 'IN_PROGRESS' && preview?.totalOrders" class="replay-progress">
           <div class="progress-info">
             <span>재생 진행률</span>
-            <span class="progress-count">{{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)</span>
+            <span class="progress-count">
+              {{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)<template v-if="replayRemainingDisplay"> · {{ replayRemainingDisplay }}</template>
+            </span>
           </div>
           <div class="progress-bar-track">
             <div class="progress-bar-fill" :style="{ width: replayProgressPercent + '%' }"></div>

@@ -469,6 +469,66 @@ const runEndedAt = ref<string | null>(null)
 // run speed observed from last-run (backend may include `speed` in last-run response)
 const runSpeed = ref<number | null>(null)
 
+// 진행률/남은 시간 표시용(2026-08-26 요청) — 페이퍼 트레이딩도 사실 그 날짜
+// 하루치 시세를 배속 재생하는 것이라(트레이더 -date 인자, 리플레이와 같은
+// 구조) LoadTestReplayView.vue의 "예상 소요 시간"과 같은 방식으로 전체
+// 예상 시간을 낼 수 있다 — replay-preview가 그 날짜의 maxEventSpanSeconds를
+// 준다. 다만 이 프리뷰는 date만 받고 fromTs/toTs(시간 범위 좁히기)는 반영
+// 못 하므로, 시작/종료 시각을 좁혀서 실행하면 추정치가 실제보다 길게
+// 나온다 — 어디까지나 근사치.
+const paperPreview = ref<{ maxEventSpanSeconds: number } | null>(null)
+
+async function fetchPaperPreview(date: string) {
+  if (!date) {
+    paperPreview.value = null
+    return
+  }
+  try {
+    const res = await fetch(`/order-api/v1/jobs/replay-preview?date=${encodeURIComponent(date)}`)
+    if (!res.ok) return
+    paperPreview.value = await res.json()
+  } catch (e) {
+    // 진행률 계산용 보조 데이터라 실패해도 조용히 넘어간다 — 진행바는
+    // 그냥 퍼센트 없이(인디터미닛으로) 표시된다.
+  }
+}
+
+function formatSecondsToHMS(secTotal: number) {
+  if (!Number.isFinite(secTotal) || secTotal <= 0) return '0초'
+  const s = Math.floor(secTotal)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sRem = s % 60
+  const parts = []
+  if (h) parts.push(`${h}시간`)
+  if (m) parts.push(`${m}분`)
+  parts.push(`${sRem}초`)
+  return parts.join(' ')
+}
+
+function paperEstimatedTotalSeconds(): number {
+  const span = paperPreview.value?.maxEventSpanSeconds
+  const speedVal = runSpeed.value || Number(speed.value) || 1
+  if (!span || !Number.isFinite(span) || span <= 0) return 0
+  return span / speedVal
+}
+
+function paperProgressPercent(): number {
+  const total = paperEstimatedTotalSeconds()
+  if (!total || !runStartedAt.value) return 0
+  const elapsedSec = (Date.now() - new Date(runStartedAt.value).getTime()) / 1000
+  return Math.max(0, Math.min(100, Math.round((elapsedSec / total) * 100)))
+}
+
+function paperRemainingDisplay(): string {
+  const total = paperEstimatedTotalSeconds()
+  if (!total || !runStartedAt.value) return ''
+  const elapsedSec = (Date.now() - new Date(runStartedAt.value).getTime()) / 1000
+  const remaining = total - elapsedSec
+  if (remaining <= 0) return '거의 완료'
+  return `남은 시간 약 ${formatSecondsToHMS(remaining)}`
+}
+
 // 유저가 중지(Stop)를 요청했는지 여부 — 폴링이나 새로고침으로 보존되어야 함
 const stopRequested = ref(false)
 // stop 요청이 네트워크로 전송 중인지(중복 클릭 방지)
@@ -786,6 +846,8 @@ const startPaperTrading = async () => {
       }
     }
 
+    fetchPaperPreview(selectedDate.value)
+
     const payload: any = { jobType: 'ai-trader', date: selectedDate.value, speed: Number(speed.value) }
     const from = startTime.value ? toKstMs(startTime.value) : 0
     const to = endTime.value ? toKstMs(endTime.value) : 0
@@ -886,6 +948,7 @@ onMounted(async () => {
       storedRunId.value = stored.storedRunId ?? storedRunId.value
       // If execution was running when saved, resume polling to refresh status/results
       if (executionStatus.value === 'running') {
+        fetchPaperPreview(selectedDate.value)
         try {
           // poll once immediately to resume live updates
           await pollLastRun()
@@ -1165,10 +1228,21 @@ const resetMatchingEngineBook = async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
-            <!-- 목표 주문 수가 없어 시세 수집처럼 "N/전체" 퍼센트로는 못 보여준다
-                 (트레이딩 세션은 정지할 때까지 계속 도는 워크로드) — 대신 진행
-                 중임을 보여주는 인디터미닛 바를 시세 수집과 같은 트랙 스타일로 둔다. -->
-            <div class="progress-bar-track indeterminate">
+            <!-- 페이퍼 트레이딩도 사실 그 날짜 하루치 시세를 배속 재생하는
+                 것이라(trader -date, 리플레이와 같은 구조) replay-preview로
+                 전체 예상 시간을 알 수 있다(2026-08-26) — 있으면 실제 퍼센트
+                 진행바+남은 시간을, 프리뷰를 아직 못 받아왔거나 실패했으면
+                 예전처럼 인디터미닛 바로 대체 표시한다. -->
+            <template v-if="paperEstimatedTotalSeconds()">
+              <div class="progress-info">
+                <span>재생 진행률</span>
+                <span class="progress-count">{{ paperProgressPercent() }}%<template v-if="paperRemainingDisplay()"> · {{ paperRemainingDisplay() }}</template></span>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" :style="{ width: paperProgressPercent() + '%' }"></div>
+              </div>
+            </template>
+            <div v-else class="progress-bar-track indeterminate">
               <div class="progress-bar-fill-indeterminate"></div>
             </div>
             <div v-if="typedPaperTradingResult">
@@ -1751,8 +1825,6 @@ const resetMatchingEngineBook = async () => {
 }
 .market-table {
   margin-top: 12px;
-  max-height: 420px;
-  overflow-y: auto;
   border-radius: 8px;
   border: 1px solid #163247;
 }

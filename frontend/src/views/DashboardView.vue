@@ -906,8 +906,12 @@ function flowResizeCanvas() {
 function flowSpawnPair(tps, color, mode, w) {
   const rate = Math.max(tps, 0)
   const perFrame = Math.min(Math.sqrt(rate) / 1.9, 3.5)
+  // 예전엔 rate가 0에 가까워도 "화면이 죽어 보이지 않게" 1%/프레임 확률로
+  // 점 하나를 흘려보냈는데, 이게 isRealtime 게이팅과 무관하게 항상 작동해서
+  // 유휴 상태(호출부가 rate=0을 넘기는 경우)에도 계속 점이 생겼다(2026-08-26
+  // 사용자 리포트 — 아무것도 안 하는데 점이 지나다님). rate=0은 항상 0개여야
+  // 한다.
   let n = Math.floor(perFrame) + (Math.random() < perFrame % 1 ? 1 : 0)
-  if (rate < 0.05 && Math.random() < 0.01) n = 1
   for (let i = 0; i < n; i++) {
     const jitter = (Math.random() - 0.5) * 0.75
     const speed = 1.3 + Math.random() * 0.9
