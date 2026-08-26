@@ -1,0 +1,47 @@
+# infra/k8s/backend/{matching-engine,recorder}-scaledobject.yaml을 이식(2026-08-26) —
+# serverAddress만 AWS 모니터링 EC2(monitor.jhyang.click:9090)에서 클러스터 내부
+# Prometheus(kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090)로
+# 교체, 나머지 트리거/threshold/replica 범위는 실측 근거 그대로 유지.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: matching-engine
+  namespace: backend
+spec:
+  scaleTargetRef:
+    name: matching-engine
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        metricName: matching_engine_total_lag
+        query: sum(matching_engine_lag)
+        threshold: "500"
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        metricName: matching_engine_total_book_size
+        query: sum(matching_engine_book_size)
+        threshold: "20000"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: recorder
+  namespace: backend
+spec:
+  scaleTargetRef:
+    name: recorder
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        metricName: recorder_total_lag
+        query: sum(recorder_consumer_lag)
+        threshold: "1000"
