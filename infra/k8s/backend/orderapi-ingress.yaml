@@ -3,6 +3,10 @@
 # 동일한 값을 직접 박아넣었다(Ingress는 Terraform 리소스가 아니라 output을 그대로
 # 참조할 수 없음). healthcheck-path는 orderapi에 별도 헬스체크 엔드포인트가 없어서,
 # 실제로 인증 없이 200을 주는 걸 확인한 GET /v1/markets/{market}/orderbook을 쓴다.
+# security-groups도 같은 이유로 리터럴 — infra/network의 output security_group_ids.alb_public과
+# 항상 같은 값이어야 한다. network 모듈을 통째로 재생성(VPC 재구축 등)하면 이 ID가
+# 바뀌므로 반드시 같이 갱신할 것 — 안 그러면 ALB Controller가 "security group not
+# found"로 계속 실패한다(2026-08-26, AWS 인프라 전체 재구축 후 실측).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -12,7 +16,7 @@ metadata:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/security-groups: sg-086268e229a37b879
+    alb.ingress.kubernetes.io/security-groups: sg-030ac623921fb4c59
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:727646470302:certificate/9085e196-5c96-4d18-9214-315810d902e6
