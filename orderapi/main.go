@@ -43,6 +43,14 @@ const (
 // ttlSeconds를 그대로 씀), 크래시로 하트비트가 끊기면 이 시간 뒤 자동으로 풀립니다.
 const sessionTTL = 30 * time.Second
 
+// storeSweepInterval/storeSweepMaxAge — order.Store/idempotency.Store 주석 참고
+// (2026-08-27 메모리 축출 사고 대응). maxAge 1시간은 정상적인 취소/멱등 재확인
+// 시나리오보다 넉넉합니다.
+const (
+	storeSweepInterval = 10 * time.Minute
+	storeSweepMaxAge   = 1 * time.Hour
+)
+
 func main() {
 	cfg := LoadConfig()
 
@@ -50,6 +58,22 @@ func main() {
 
 	store := order.NewStore()
 	idem := idempotency.NewStore()
+	// order.Store/idempotency.Store 둘 다 지금까지 지운 적이 없어 프로세스가
+	// 오래 살아있고 대형 리플레이가 여러 번 돌면(오늘 실측) 무한정 자라 노드
+	// 메모리 축출까지 갔습니다(order.go/idempotency.go 주석 참고, 2026-08-27).
+	// 취소/멱등성 재확인은 실질적으로 최근 주문에서만 일어나므로 넉넉한
+	// maxAge(1시간)로 주기적으로 정리합니다.
+	go func() {
+		ticker := time.NewTicker(storeSweepInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			removedOrders := store.Sweep(storeSweepMaxAge)
+			removedIdem := idem.Sweep(storeSweepMaxAge)
+			if removedOrders > 0 || removedIdem > 0 {
+				log.Printf("메모리 정리: 오래된 주문 %d건, 멱등성 캐시 %d건 제거", removedOrders, removedIdem)
+			}
+		}
+	}()
 	producer, err := kafkaclient.NewOrderProducer(ctx, cfg.KafkaBroker, cfg.OrdersTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("주문 프로듀서 생성 실패: %v", err)

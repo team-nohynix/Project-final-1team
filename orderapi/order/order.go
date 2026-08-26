@@ -43,14 +43,25 @@ type Order struct {
 // 여부 확인)에 씁니다. ApplyFill(2026-08-10)이 executions 토픽을 구독하는
 // kafkaclient.ExecutionConsumer로부터 체결을 받아 ACCEPTED/PARTIALLY_FILLED/
 // FILLED 사이 전이를 반영합니다.
+//
+// **insertedAt/Sweep — 2026-08-27, orderapi가 노드 메모리 부족으로 강제 축출된
+// 사고 대응.** orders 맵은 지금까지 한 번 넣은 항목을 절대 지우지 않았습니다 —
+// 주석의 "취소 요청 처리에 필요한 만큼만"이라는 원래 의도와 달리 실제로는 이
+// 프로세스가 살아있는 동안 접수된 모든 주문이 영원히 쌓였습니다. 오늘처럼 대형
+// 리플레이(회당 100만+ 건)를 재시작 없이 여러 번 돌리면 그만큼 누적돼, 실측
+// 3GB까지 자라 노드가 "memory pressure"로 이 파드를 축출했습니다(취소 대상은
+// 사실상 항상 최근 주문뿐이라 이렇게 오래 들고 있을 이유가 없었음). insertedAt은
+// 항목별 저장 시각만 별도로 추적해 Sweep이 오래된 항목을 지울 수 있게 합니다 —
+// Order 자체(JSON 응답 모양)는 건드리지 않습니다.
 type Store struct {
-	mu     sync.Mutex
-	orders map[string]*Order
+	mu         sync.Mutex
+	orders     map[string]*Order
+	insertedAt map[string]time.Time
 }
 
 // NewStore는 빈 Store를 만듭니다.
 func NewStore() *Store {
-	return &Store{orders: make(map[string]*Order)}
+	return &Store{orders: make(map[string]*Order), insertedAt: make(map[string]time.Time)}
 }
 
 // NewOrderID는 "ord_{YYYYMMDD}_{16자리 hex}" 형태의 주문 번호를 발급합니다.
@@ -79,6 +90,26 @@ func (s *Store) Save(o *Order) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.orders[o.OrderID] = o
+	s.insertedAt[o.OrderID] = time.Now()
+}
+
+// Sweep은 maxAge보다 오래전에 저장된(=Save가 호출된) 주문을 지웁니다 — 이
+// Store의 유일한 용도인 취소 요청 처리는 실질적으로 최근 주문에서만 일어나므로,
+// maxAge는 넉넉하게 잡아도(예: 1시간) 정상적인 취소/조회를 막지 않으면서 메모리
+// 누적을 그 시간만큼으로 상한선을 둡니다. 반환값은 지운 건수입니다(호출부 로깅용).
+func (s *Store) Sweep(maxAge time.Duration) int {
+	cutoff := time.Now().Add(-maxAge)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for id, t := range s.insertedAt {
+		if t.Before(cutoff) {
+			delete(s.orders, id)
+			delete(s.insertedAt, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Get은 orderID로 주문을 조회합니다. 없으면 ok=false.
