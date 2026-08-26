@@ -198,6 +198,7 @@ func main() {
 		orderRecordsStorage = orderrecords.NewLocalFileStorage("orders")
 	}
 	mux.HandleFunc("GET /v1/jobs/replay-preview", replayPreviewHandler(orderRecordsStorage))
+	mux.HandleFunc("GET /v1/jobs/replay-dates", replayDatesHandler(orderRecordsStorage))
 
 	mux.Handle("GET /metrics", promhttp.Handler())
 

@@ -5,6 +5,23 @@ import { useRouter } from 'vue-router'
 // user-selectable run date (KST day)
 const selectedDate = ref('') // YYYY-MM-DD
 
+// available recorded dates fetched from backend
+const availableDates = ref<string[]>([])
+
+async function loadAvailableDates() {
+  try {
+    const res = await fetch('/order-api/v1/jobs/replay-dates')
+    if (!res.ok) return
+    const data = await res.json()
+    availableDates.value = Array.isArray(data.dates) ? data.dates : []
+    if (!selectedDate.value && availableDates.value.length) {
+      selectedDate.value = availableDates.value[0]
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
 // target speed multiplier (numeric)
 const speed = ref(60)
 
@@ -402,6 +419,7 @@ function stopPolling() {
 
 onMounted(() => {
   loadFromSession()
+  loadAvailableDates()
   // if we restored an IN_PROGRESS run, resume polling to show live results
   if (runInfo.value && runInfo.value.status === 'IN_PROGRESS') {
     if (!isPolling.value) {
@@ -439,7 +457,11 @@ function goToResults() {
 
         <div class="form-field">
           <label>재생 날짜</label>
-          <input v-model="selectedDate" type="date" class="date-input" @click="($event) => { try { $event.target.showPicker && $event.target.showPicker() } catch(e) {} }" />
+          <select v-model="selectedDate" style="width:100%; height:42px; background:#071826; border:1px solid #172a3e; color:#fff; padding:0 10px; border-radius:8px">
+            <option v-if="!availableDates.length" value="">기록된 날짜 없음</option>
+            <option v-for="d in availableDates" :key="d" :value="d">{{ d }}</option>
+          </select>
+          <p class="date-hint">페이퍼 트레이딩으로 주문 기록이 실제로 존재하는 날짜만 표시됩니다.</p>
         </div>
 
         <div class="form-field">

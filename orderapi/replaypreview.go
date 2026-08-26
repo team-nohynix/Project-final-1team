@@ -25,13 +25,19 @@ type replayPreviewResponse struct {
 	MaxEventSpanSeconds float64 `json:"maxEventSpanSeconds"`
 }
 
+// kst는 한국 표준시(UTC+9)입니다 — backend/upbit.KST와 같은 이유로
+// time.LoadLocation("Asia/Seoul") 대신 FixedZone을 씁니다.
+var kst = time.FixedZone("KST", 9*60*60)
+
 // replayPreviewHandler는 GET /v1/jobs/replay-preview?date=YYYY-MM-DD를
-// 처리합니다. trader/replayengine과 완전히 같은 날짜 경계 규칙(UTC 캘린더
-// 하루, trader/main.go 참고 — 시세 데이터 API의 KST 규칙과는 다름)으로 20개
-// 마켓 전부의 기록 파일을 읽어 건수를 세고, 가장 긴 마켓의 (마지막-첫 이벤트)
-// 시간 간격을 재생 소요 시간의 추정치로 씁니다 — replayengine이 마켓마다
-// 독립된 고루틴으로 동시에 재생하므로, 전체 실행 시간은 이 최댓값에
-// 수렴합니다(합이 아님).
+// 처리합니다. trader/replayengine과 완전히 같은 날짜 경계 규칙(KST 캘린더
+// 하루, trader/main.go 참고 — 2026-08-26부터 시세 데이터 API의 KST 규칙과
+// 통일됨. 예전엔 UTC 캘린더 하루라 둘이 달랐는데, -from-ts/-to-ts 구간
+// 지정을 프론트가 어느 기준으로 계산해야 하는지 헷갈리기 쉬웠던 문제를 없애기
+// 위해 통일했다)으로 20개 마켓 전부의 기록 파일을 읽어 건수를 세고, 가장 긴
+// 마켓의 (마지막-첫 이벤트) 시간 간격을 재생 소요 시간의 추정치로 씁니다 —
+// replayengine이 마켓마다 독립된 고루틴으로 동시에 재생하므로, 전체 실행
+// 시간은 이 최댓값에 수렴합니다(합이 아님).
 //
 // 기록이 없는 마켓(ErrNotFound)이나 개별 조회 실패는 건너뛰고 계속 진행합니다
 // — collectAllMarkets 등 이 repo 전반의 "한 마켓의 실패가 나머지를 막지
@@ -46,12 +52,11 @@ func replayPreviewHandler(storage orderrecords.Storage) http.HandlerFunc {
 			writeError(w, reqID, http.StatusBadRequest, "MISSING_DATE", "date는 필수입니다 (YYYY-MM-DD).")
 			return
 		}
-		start, err := time.Parse("2006-01-02", dateStr)
+		start, err := time.ParseInLocation("2006-01-02", dateStr, kst)
 		if err != nil {
 			writeError(w, reqID, http.StatusBadRequest, "INVALID_DATE", "date 형식이 올바르지 않습니다 (YYYY-MM-DD).")
 			return
 		}
-		start = start.UTC()
 		end := start.Add(24 * time.Hour)
 
 		var totalOrders, marketsWithRecords int
@@ -87,5 +92,30 @@ func replayPreviewHandler(storage orderrecords.Storage) http.HandlerFunc {
 			MarketsTotal:        len(validate.TargetMarkets),
 			MaxEventSpanSeconds: float64(maxSpanMs) / 1000,
 		})
+	}
+}
+
+// replayDatesResponse는 GET /v1/jobs/replay-dates의 응답입니다.
+type replayDatesResponse struct {
+	Dates []string `json:"dates"`
+}
+
+// replayDatesHandler는 GET /v1/jobs/replay-dates를 처리합니다 — 팀 요청
+// (2026-08-26)으로, 프론트의 리플레이 날짜 선택 화면이 "실제로 트레이딩 기록이
+// 있는 날짜"만 고를 수 있게 지원합니다. 20개 마켓 전체를 뒤져야 하는
+// replayPreviewHandler와 달리 이건 storage.ListDates 한 번이면 됩니다(로컬은
+// 디렉터리 훑기, S3는 ListObjectsV2). 기록이 하나도 없으면 빈 배열(에러 아님).
+func replayDatesHandler(storage orderrecords.Storage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		reqID := requestID(r)
+		w.Header().Set("X-Request-Id", reqID)
+
+		dates, err := storage.ListDates()
+		if err != nil {
+			log.Printf("리플레이 가능 날짜 조회 실패: %v", err)
+			writeError(w, reqID, http.StatusInternalServerError, "INTERNAL_ERROR", "날짜 목록 조회에 실패했습니다.")
+			return
+		}
+		writeJSON(w, http.StatusOK, replayDatesResponse{Dates: dates})
 	}
 }

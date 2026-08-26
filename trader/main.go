@@ -20,6 +20,11 @@ import (
 	"trader/session"
 )
 
+// kst는 한국 표준시(UTC+9)입니다 — backend/upbit.KST와 같은 이유로
+// time.LoadLocation("Asia/Seoul") 대신 FixedZone을 씁니다: 한국은 DST가 없어
+// 오프셋이 항상 고정이고, tzdata 없는 최소 컨테이너 이미지에서도 안전합니다.
+var kst = time.FixedZone("KST", 9*60*60)
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -36,6 +41,13 @@ func run() (err error) {
 	date := flag.String("date", "", "재생할 날짜 (YYYY-MM-DD, 필수)")
 	speed := flag.Float64("speed", 60, "재생 배속 (이벤트 간 대기 시간을 이 값으로 나눔)")
 	orderBucket := flag.String("order-bucket", "", "주문 기록을 저장할 S3 버킷 (비어있으면 ./orders 로컬 디렉터리에 저장)")
+	// fromTS/toTS는 replayengine의 -from-ts/-to-ts(FR-27 구간 지정)와 같은 이름·같은
+	// 단위(Unix ms, 0=제한 없음)입니다 — 시세 수집기가 하루 단위로만 데이터를 주기
+	// 때문에, 하루치를 받아온 뒤 트레이더 쪽에서 이 구간만 걸러 재생합니다
+	// (trader/replay.filterEventRange 참고). 테스트 반복 속도를 높이려는 용도로
+	// 2026-08-25 추가.
+	fromTS := flag.Int64("from-ts", 0, "이 시각(Unix ms) 이전 이벤트는 재생 제외 (0이면 제한 없음)")
+	toTS := flag.Int64("to-ts", 0, "이 시각(Unix ms) 이후 이벤트는 재생 제외 (0이면 제한 없음)")
 	flag.Parse()
 
 	cfg := LoadConfig()
@@ -43,11 +55,17 @@ func run() (err error) {
 	if *date == "" {
 		return fmt.Errorf("-date는 필수입니다 (YYYY-MM-DD)")
 	}
-	start, err := time.Parse("2006-01-02", *date)
+	// KST 캘린더 일 기준으로 해석합니다(2026-08-26, UTC 기준에서 변경) — 시세
+	// 수집기(backend)의 시장 데이터 API가 이미 KST 하루 경계를 쓰고 있어서
+	// (docs의 "Date boundaries are KST" 규칙), 트레이더/리플레이 엔진만 UTC
+	// 경계를 쓰면 프론트가 -from-ts/-to-ts로 시간 구간을 고를 때 어느 기준으로
+	// 변환해야 하는지 헷갈리기 쉬웠다(실제로 문서화하다가 발견) — 전부 KST로
+	// 통일해 이 함정을 없앤다. replayengine도 objectKey가 같아야 하므로 동일하게
+	// 바꿔야 함(replayengine/main.go 참고).
+	start, err := time.ParseInLocation("2006-01-02", *date, kst)
 	if err != nil {
 		return fmt.Errorf("-date 형식이 올바르지 않습니다: %w", err)
 	}
-	start = start.UTC()
 	end := start.Add(24 * time.Hour)
 
 	httpClient := client.NewHTTPClient()
@@ -273,7 +291,7 @@ func run() (err error) {
 	// 조기 종료이지 실패가 아니므로 failed에 넣지 않습니다.
 	for _, entry := range manifest.Markets {
 		wg.Go(func() {
-			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market]); err != nil && !errors.Is(err, context.Canceled) {
+			if err := replay.ReplayMarket(ctx, httpClient, cfg.BackendURL, entry, *speed, submitter, states[entry.Market], *fromTS, *toTS); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("[%s] 재생 실패: %v", entry.Market, err)
 				mu.Lock()
 				failed = append(failed, entry.Market)

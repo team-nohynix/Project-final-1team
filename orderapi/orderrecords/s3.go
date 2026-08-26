@@ -64,3 +64,30 @@ func (s *S3Storage) Load(market string, start, end time.Time) ([]RecordedOrder, 
 	}
 	return orders, nil
 }
+
+func (s *S3Storage) ListDates() ([]string, error) {
+	dates := make(map[string]bool)
+	var continuationToken *string
+	for {
+		out, err := s.client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("S3 목록 조회 실패: %w", err)
+		}
+		for _, obj := range out.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			if date, ok := parseDateFromObjectKey(*obj.Key); ok {
+				dates[date] = true
+			}
+		}
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			break
+		}
+		continuationToken = out.NextContinuationToken
+	}
+	return sortedDatesDesc(dates), nil
+}
