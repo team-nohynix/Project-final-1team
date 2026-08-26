@@ -155,6 +155,11 @@ func (e *Engine) Recover(ctx context.Context) (resumeFromOffset int64, err error
 			e.book.Restore(&orderbook.Order{OrderID: ov.OrderID, Market: e.Market, Side: orderbook.Sell, Price: ov.Price, Quantity: ov.Quantity, Offset: ov.Offset})
 		}
 		e.lastOffset = snap.Offset
+		// 임시 진단 로깅(2026-08-27, orderbook/match.go 주석 참고) — book 인스턴스
+		// 포인터로 "이 담당 기간이 언제 시작했는지"를 남겨, 반복 체결이 한 담당
+		// 기간 안에서 벌어지는지 여러 기간에 걸쳐 벌어지는지 구분한다.
+		log.Printf("[진단] Recover 완료 (market=%s bookPtr=%p bids=%d asks=%d resumeFrom=%d)",
+			e.Market, e.book, len(snap.Bids), len(snap.Asks), snap.Offset+1)
 		return snap.Offset + 1, nil
 	}
 
@@ -199,6 +204,7 @@ func (e *Engine) BookSize() int {
 // 처리된(=재전달된) 이벤트다. NEW/CANCEL 둘 다 여기서 한 번에 막는다.
 func (e *Engine) Apply(ctx context.Context, ev OrderEvent) error {
 	if ev.Offset <= e.lastOffset {
+		log.Printf("[진단] offset 가드 발동 (market=%s orderId=%s evOffset=%d lastOffset=%d)", e.Market, ev.OrderID, ev.Offset, e.lastOffset)
 		return nil
 	}
 
@@ -249,7 +255,10 @@ func (e *Engine) snapshot(ctx context.Context) error {
 // 전부 끝나 있어야 합니다(호출부가 고루틴을 완전히 join한 뒤에 불러야 함) — 안
 // 그러면 저장하는 도중에도 상태가 계속 바뀌어 스냅샷이 일관되지 않을 수 있습니다.
 func (e *Engine) Handoff(ctx context.Context) error {
-	if err := e.snapshots.Handoff(ctx, e.currentSnapshot()); err != nil {
+	snap := e.currentSnapshot()
+	log.Printf("[진단] Handoff 시작 (market=%s bookPtr=%p bids=%d asks=%d offset=%d)",
+		e.Market, e.book, len(snap.Bids), len(snap.Asks), snap.Offset)
+	if err := e.snapshots.Handoff(ctx, snap); err != nil {
 		return fmt.Errorf("핸드오프 스냅샷 저장 실패 (market=%s): %w", e.Market, err)
 	}
 	return nil
