@@ -350,24 +350,9 @@ const clusterCards = computed(() => {
       delta: c ? clusterDeltaText(c.activeNodes, prev?.activeNodes ?? null) : '',
     },
     {
-      label: '실행 중인 Pod (backend 전체)',
+      label: '실행 중인 Pod',
       value: c ? displayValue(c.runningPodsBackend) : '--',
       delta: c ? clusterDeltaText(c.runningPodsBackend, prev?.runningPodsBackend ?? null) : '',
-    },
-    {
-      label: '매칭엔진 레플리카',
-      value: c ? `${displayValue(c.autoscaling.matching.current)} / ${displayValue(c.autoscaling.matching.max)}` : '--',
-      delta: c ? clusterDeltaText(c.autoscaling.matching.current, prev?.autoscaling?.matching?.current ?? null) : '',
-    },
-    {
-      label: '기록기 레플리카',
-      value: c ? `${displayValue(c.autoscaling.recorder.current)} / ${displayValue(c.autoscaling.recorder.max)}` : '--',
-      delta: c ? clusterDeltaText(c.autoscaling.recorder.current, prev?.autoscaling?.recorder?.current ?? null) : '',
-    },
-    {
-      label: 'Karpenter 노드',
-      value: c ? displayValue(c.autoscaling.karpenterNodes) : '--',
-      delta: c ? clusterDeltaText(c.autoscaling.karpenterNodes, prev?.autoscaling?.karpenterNodes ?? null) : '',
     },
     // 원래 "주문 처리 현황"에 있었던 카드 — 내부 구현 디테일(매칭엔진 메모리
     // 오더북 크기)이라 여기 엔지니어용 섹션으로 옮겼습니다(2026-08-25).
@@ -379,6 +364,51 @@ const clusterCards = computed(() => {
   ]
 })
 const podRestartRows = computed(() => clusterMetrics.value?.podRestarts || [])
+
+// 오토스케일링 현황 — 예전엔 clusterCards 안에 "N / max" 텍스트로만 있던 걸
+// 막대그래프로 바꿨다(2026-08-26 요청). matching/recorder는 KEDA
+// ScaledObject의 실제 min/max가 있어 current/max 비율이 그대로 막대 높이가
+// 되지만, Karpenter 노드 수는 API에 대응하는 "max" 값 자체가 없다(Karpenter는
+// KEDA처럼 레플리카 상한을 선언하는 게 아니라 NodePool의 CPU 총량 예산으로
+// 상한을 표현하므로 — infra/k8s/karpenter/nodepool-backend.yaml 참고). 그래서
+// Karpenter 막대는 "max N"을 사칭하지 않고, matching의 max(레플리카 1개당
+// 노드 1대에 가깝게 튜닝돼 있음)를 시각적 눈금으로만 빌려 쓴다 — 실제 상한
+// 표기가 아니므로 라벨에 "(max ...)"를 붙이지 않는다.
+const autoscalingBars = computed(() => {
+  const c = clusterMetrics.value
+  if (!c) return []
+  const prev = clusterSnapshotOneMinAgo()
+  const matchingMax = c.autoscaling.matching.max || 1
+  const recorderMax = c.autoscaling.recorder.max || 1
+  const karpenterScale = matchingMax || 1
+  const pct = (current, max) => Math.max(4, Math.min(100, Math.round((current / max) * 100)))
+  return [
+    {
+      key: 'matching',
+      label: 'matching-engine',
+      maxLabel: `max ${displayValue(matchingMax)}`,
+      current: c.autoscaling.matching.current,
+      percent: pct(c.autoscaling.matching.current, matchingMax),
+      delta: clusterDeltaText(c.autoscaling.matching.current, prev?.autoscaling?.matching?.current ?? null),
+    },
+    {
+      key: 'recorder',
+      label: 'recorder',
+      maxLabel: `max ${displayValue(recorderMax)}`,
+      current: c.autoscaling.recorder.current,
+      percent: pct(c.autoscaling.recorder.current, recorderMax),
+      delta: clusterDeltaText(c.autoscaling.recorder.current, prev?.autoscaling?.recorder?.current ?? null),
+    },
+    {
+      key: 'karpenter',
+      label: 'Karpenter 노드',
+      maxLabel: '',
+      current: c.autoscaling.karpenterNodes,
+      percent: pct(c.autoscaling.karpenterNodes, karpenterScale),
+      delta: clusterDeltaText(c.autoscaling.karpenterNodes, prev?.autoscaling?.karpenterNodes ?? null),
+    },
+  ]
+})
 
 async function fetchIntegrityCheck() {
   const lastRunRes = await fetch('/order-api/v1/sessions/last-run')
@@ -650,11 +680,24 @@ const recentRunCards = computed(() => {
       const zombie = i > 0 && s.record.status === 'IN_PROGRESS'
       const status = zombie ? '미종료 (비정상 종료 추정)' : RUN_STATUS_LABELS[s.record.status] || s.record.status || '-'
       const inProgress = !zombie && s.record.status === 'IN_PROGRESS'
+      // 정상/비정상 종료 여부 + 비정상이면 원인(사용자가 중지 버튼을 눌렀는지,
+      // 오류로 끊겼는지)까지 구분해서 보여준다(2026-08-26 요청). 아직 실행
+      // 중(inProgress)이면 결론이 안 났으니 비워둔다. STOPPED은 이 프로젝트에서
+      // 항상 사용자의 "중지" 버튼(POST .../stop)을 통해서만 나오는 상태라
+      // "사용자 중단"으로 단정할 수 있다 — FAILED는 그 외의 오류 종료.
+      let outcome = ''
+      if (!inProgress) {
+        if (zombie) outcome = '비정상 종료 — 오류로 추정 (정상 반납 없이 응답 끊김)'
+        else if (s.record.status === 'COMPLETED') outcome = '정상 종료'
+        else if (s.record.status === 'STOPPED') outcome = '비정상 종료 — 사용자 중단'
+        else if (s.record.status === 'FAILED') outcome = '비정상 종료 — 오류'
+      }
       return {
         inProgress,
         zombie,
         owner,
         status,
+        outcome,
         startedAt: s.record.startedAt,
         endedAt: s.record.endedAt,
         message: s.record.message,
@@ -1018,27 +1061,6 @@ function drawFlowFrame() {
     ctx.fillStyle = '#7f93a8'
     ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
     ctx.fillText(nd.sub, drawCx, ny + 11)
-
-    // Redis 캐시는 파이프라인의 별도 홉이 아니라 매칭엔진의 오더북 스냅샷
-    // 저장소라, 자기 노드 대신 매칭엔진 박스 오른쪽 위에 위성 점으로 붙임
-    // (2026-08-24, "시스템 구성요소 상태" 패널을 없애고 여기로 통합).
-    if (nd.key === 'matching') {
-      // 점이 박스 테두리 선(매칭엔진이 정상이면 초록, 이 점도 정상이면
-      // 초록)과 거의 겹치는 자리(bx+bw-2, by-2 — 테두리 선 바로 위)에 있어서
-      // 같은 색일 때 안 보이는 것처럼 눈에 안 띄던 문제(2026-08-25 지적) —
-      // 박스 모서리 바깥쪽으로 완전히 빼서 테두리 선과 안 겹치게 하고,
-      // 어두운 테두리도 더 두껍게 줘서 박스 색과 무관하게 항상 도드라지게 함.
-      const redisOk = flowUp('Redis 캐시')
-      const rx = bx + bw + 3
-      const ry = by - 3
-      ctx.beginPath()
-      ctx.fillStyle = redisOk ? '#2ed39a' : '#ff5c7a'
-      ctx.arc(rx, ry, 4, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#0a1420'
-      ctx.lineWidth = 1.8
-      ctx.stroke()
-    }
   }
 
   // "레플리카: 매칭 X · 기록기 Y"는 아래 "클러스터 현황" 패널에 이미 있는
@@ -1200,7 +1222,7 @@ onBeforeUnmount(() => {
     <section class="panel cluster-panel">
       <h3>클러스터 현황</h3>
       <p v-if="clusterMetricsError" class="cluster-note">{{ clusterMetricsError }}</p>
-      <div class="stat-grid stat-grid-6">
+      <div class="stat-grid stat-grid-3">
         <div v-for="card in clusterCards" :key="card.label">
           <span>{{ card.label }}</span>
           <strong>{{ card.value }}</strong>
@@ -1217,6 +1239,27 @@ onBeforeUnmount(() => {
           <span>{{ row.restarts }}</span>
         </div>
       </div>
+    </section>
+
+    <section class="panel autoscaling-panel">
+      <h3>
+        오토스케일링 현황 (KEDA 레플리카 수 / 최대)
+        <span
+          class="info-icon"
+          title="matching-engine/recorder는 KEDA ScaledObject의 실제 min/max 기준입니다. Karpenter 노드는 KEDA처럼 선언된 상한이 없어(NodePool의 CPU 예산으로 상한을 표현) 막대 눈금만 matching-engine의 max를 빌려 쓰고, 'max' 수치는 표기하지 않습니다."
+        >ⓘ</span>
+      </h3>
+      <div v-if="autoscalingBars.length" class="autoscaling-bars">
+        <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
+          <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
+          <div class="autoscaling-bar-track">
+            <div class="autoscaling-bar-fill" :class="`bar-${bar.key}`" :style="{ height: bar.percent + '%' }"></div>
+          </div>
+          <div class="autoscaling-bar-label">{{ bar.label }}<template v-if="bar.maxLabel"> ({{ bar.maxLabel }})</template></div>
+          <em v-if="bar.delta" class="cluster-delta">{{ bar.delta }}</em>
+        </div>
+      </div>
+      <div v-else class="cluster-note">클러스터 지표를 불러오는 중...</div>
     </section>
 
     <section class="throughput-section">
@@ -1743,6 +1786,70 @@ onBeforeUnmount(() => {
 
 .stat-grid-6 {
   grid-template-columns: repeat(6, 1fr);
+}
+
+.stat-grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.autoscaling-panel h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.info-icon {
+  color: #8ea2b8;
+  font-size: 13px;
+  cursor: help;
+}
+
+.autoscaling-bars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 20px;
+}
+
+.autoscaling-bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.autoscaling-bar-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #2ed39a;
+}
+
+.autoscaling-bar-track {
+  width: 100%;
+  height: 110px;
+  background: #0d1b2a;
+  border: 1px solid #172a3e;
+  border-radius: 8px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+
+.autoscaling-bar-fill {
+  width: 100%;
+  background: #2ed39a;
+  border-radius: 2px;
+  transition: height 0.4s ease;
+}
+
+.autoscaling-bar-fill.bar-karpenter {
+  background: #7fd858;
+}
+
+.autoscaling-bar-label {
+  color: #9fb0c2;
+  font-size: 12px;
+  text-align: center;
 }
 
 .stat-grid div {

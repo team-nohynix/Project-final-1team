@@ -79,6 +79,15 @@ const estimatedDurationDisplay = computed(() => {
   return formatSecondsToHMS(estSec)
 })
 
+// 재생 진행률 — 페이퍼 트레이딩과 달리 리플레이는 프리뷰(GET .../replay-preview)로
+// 재생할 전체 주문 수(totalOrders)를 미리 알 수 있어서, 시세 수집과 같은
+// "N/전체" 실제 퍼센트 진행바를 보여줄 수 있다.
+const replayProgressPercent = computed(() => {
+  const total = preview.value?.totalOrders || 0
+  if (!total || !summary.value) return 0
+  return Math.min(100, Math.round((Number(summary.value.accepted) / total) * 100))
+})
+
 async function fetchReplayPreview(date: string) {
   previewError.value = null
   previewLoading.value = true
@@ -558,10 +567,20 @@ function goToResults() {
           <div class="card-right">
             <span class="summary-inline">
               <template v-if="summary">
-                접수 {{ summary.accepted }}건 · {{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}
+                접수 {{ summary.accepted.toLocaleString() }}건 · {{ runInfo ? (runInfo.status === 'IN_PROGRESS' ? '처리 중' : runInfo.status === 'COMPLETED' ? '완료' : runInfo.status === 'FAILED' ? '실패' : runInfo.status === 'STOPPED' ? '중지됨' : runInfo.status) : '상태 확인 전' }}
               </template>
               <template v-else>데이터 없음</template>
             </span>
+          </div>
+        </div>
+
+        <div v-if="runInfo?.status === 'IN_PROGRESS' && preview?.totalOrders" class="replay-progress">
+          <div class="progress-info">
+            <span>재생 진행률</span>
+            <span class="progress-count">{{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" :style="{ width: replayProgressPercent + '%' }"></div>
           </div>
         </div>
 
