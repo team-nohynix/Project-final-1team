@@ -518,7 +518,7 @@ function goToResults() {
 
       <aside class="panel right-panel">
         <h3 class="panel-title">부하 시나리오 미리보기</h3>
-        <p class="panel-sub">예상 부하 분포와 검증 기준</p>
+        <p class="panel-sub">예상 부하 분포</p>
 
         <div class="bar-chart placeholder">
           <div v-if="previewLoading" class="empty-center">
@@ -542,10 +542,6 @@ function goToResults() {
             <div class="preview-line" style="margin-top:8px">
               <div class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</div>
               <div class="preview-value">{{ estimatedDurationDisplay }}</div>
-            </div>
-
-            <div class="preview-checks" style="margin-top:12px">
-              <div class="check-item">검증 기준: 목표 처리량 10,000건/초 · 목표 체결률 90% · 허용 거부율 5%</div>
             </div>
           </div>
 
@@ -741,7 +737,6 @@ input.time-input::-webkit-calendar-picker-indicator {
 .right-panel {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
 }
 
 .bar-chart .bars {
