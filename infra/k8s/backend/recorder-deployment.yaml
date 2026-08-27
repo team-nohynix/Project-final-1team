@@ -105,6 +105,21 @@ spec:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 8"]
+          # 2026-08-27: 아무 경로도 이 마운트를 직접 읽지 않는다 — DATABASE_URL은 여전히
+          # 위 secretKeyRef(recorder-db-secret)로 받는다. 이 볼륨은 Secrets Store CSI
+          # Driver의 secretObjects 동기화(recorder-db-secret-provider.yaml)를 "트리거"하는
+          # 용도일 뿐이다(최소 한 파드가 마운트해야 동기화가 시작됨).
+          volumeMounts:
+            - name: secrets-store-inline
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: secrets-store-inline
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: recorder-db-secret-provider
 ---
 # 조회 API(GET /v1/trace/{orderId}, GET /v1/matching/engines, :8082 고정) 노출용.
 # 2026-08-12까지 Service가 아예 없어서 클러스터 내부에서도 호출할 방법이 없었음
