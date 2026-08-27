@@ -55,17 +55,27 @@ resource "helm_release" "csi_secrets_store" {
 # 마운트 시 "CSI token error: serviceAccount.tokens not provided"로 실패한다(실측).
 # kubernetes_csi_driver_v1로 같은 이름의 리소스를 새로 선언하면 helm이 이미 만든
 # 오브젝트와 소유권이 충돌하므로(둘 다 "내가 만들었다"고 함), helm_release 적용 뒤
-# 패치로 보완한다. CI 러너에 kubectl이 있어야 동작한다.
+# 패치로 보완한다.
+#
+# 2026-08-27: providers.tf의 kubernetes/helm provider는 exec{}로 매 호출마다
+# `aws eks get-token`을 그때그때 부르는 방식이라 ~/.kube/config 자체가 없다 —
+# CI의 terraform-apply job도 이 스택 전에 aws eks update-kubeconfig를 안 부른다
+# (kubectl apply는 배포 job들에서만 하고, terraform-apply job은 안 함). 그래서
+# local-exec 안에서 커맨드 스스로 kubeconfig를 만들어 써야 bare kubectl이 인증된다 —
+# 로컬 세션에서도 이 job과 동일하게 KUBECONFIG를 새로 만들어 검증함.
 resource "null_resource" "csi_driver_token_requests_patch" {
   triggers = {
     helm_revision = helm_release.csi_secrets_store.metadata[0].revision
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
+    command     = <<-EOT
+      export KUBECONFIG=$(mktemp)
+      aws eks update-kubeconfig --name ${aws_eks_cluster.team1.name} --region ap-northeast-2
       kubectl patch csidriver secrets-store.csi.k8s.io --type=merge -p \
         '{"spec":{"tokenRequests":[{"audience":"sts.amazonaws.com","expirationSeconds":86400}]}}'
     EOT
+    interpreter = ["bash", "-c"]
   }
 
   depends_on = [helm_release.csi_secrets_store]
