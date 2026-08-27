@@ -79,6 +79,26 @@ resource "aws_iam_role_policy" "github_actions_terraform_plan_lockfile" {
   policy = data.aws_iam_policy_document.github_actions_terraform_plan_lockfile.json
 }
 
+# ReadOnlyAccess는 GetSecretValue를 일부러 빼고 준다(진짜 비밀값이 아니라 존재/메타데이터만
+# 보이게) — 근데 secrets-manager.tf의 aws_secretsmanager_secret_version은 plan의 refresh
+# 단계에서 실제 값을 읽어야만 diff를 계산할 수 있다. 2026-08-27, CI에서
+# "AccessDeniedException: ... secretsmanager:GetSecretValue"로 실측(prod push 직후
+# terraform-plan 실패, apply는 안 돎). "읽기 전용은 값을 못 본다"는 원칙을 계정
+# 전체가 아니라 이 시크릿 하나로만 좁혀서 깬다 — tf-apply 쪽에도 같은 예외가 있다
+# (cicd-terraform.tf의 SecretsManagerRecorderDbUrl 참고).
+data "aws_iam_policy_document" "github_actions_terraform_plan_secretsmanager" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [aws_secretsmanager_secret.recorder_mysql_db_url.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_terraform_plan_secretsmanager" {
+  name   = "team1-github-actions-tf-plan-secretsmanager-policy"
+  role   = aws_iam_role.github_actions_terraform_plan.id
+  policy = data.aws_iam_policy_document.github_actions_terraform_plan_secretsmanager.json
+}
+
 # --- apply (쓰기 권한, environment로 게이트) ---------------------------------
 
 data "aws_iam_policy_document" "github_actions_terraform_apply_assume" {
@@ -171,6 +191,14 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_policy" {
       "events:*",
     ]
     resources = ["*"]
+  }
+  # 2026-08-27: 위 목록엔 secretsmanager:*가 없다(GetSecretValue는 위 "*"에도
+  # 일부러 안 넣어온 민감 액션 부류) — secrets-manager.tf의 aws_secretsmanager_secret_version이
+  # plan/apply 중 refresh로 실제 값을 읽어야 해서, 그 한 시크릿에만 좁혀서 예외를 둔다.
+  statement {
+    sid       = "SecretsManagerRecorderDbUrl"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [aws_secretsmanager_secret.recorder_mysql_db_url.arn]
   }
 }
 
