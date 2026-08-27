@@ -205,6 +205,24 @@ resource "aws_iam_role_policy" "sa_recorder" {
   policy = data.aws_iam_policy_document.sa_recorder_policy.json
 }
 
+# 2026-08-27: Secrets Store CSI Driver(csi-secrets-store.tf)가 recorder 파드 자신의
+# IRSA(이 역할)를 통해 team1/backend/mysql-db-url(secrets-manager.tf)을 읽어온다 —
+# 드라이버/프로바이더 자체는 별도 IRSA가 없고(csi-secrets-store-provider-aws SA에
+# role-arn 애너테이션 없음, 실측 확인), 마운트하는 파드의 신원을 그대로 쓰는 구조라
+# 별도 역할이 아니라 기존 sa-recorder 역할에 인라인 정책만 추가한다.
+data "aws_iam_policy_document" "sa_recorder_secretsmanager" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [aws_secretsmanager_secret.recorder_mysql_db_url.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "sa_recorder_secretsmanager" {
+  name   = "team1-recorder-secretsmanager-read"
+  role   = aws_iam_role.sa_recorder.id
+  policy = data.aws_iam_policy_document.sa_recorder_secretsmanager.json
+}
+
 # ---------------------------------------------------------------------------
 # sa-collector (시세 수집기, collector ns) — S3 PutObject(market-data)만. Kafka 미사용.
 
