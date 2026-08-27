@@ -113,8 +113,8 @@
       <div class="stat"><div class="k">Region</div><div class="v">ap-northeast-2</div></div>
       <div class="stat"><div class="k">VPC</div><div class="v">team1-vpc · 10.10.0.0/16</div></div>
       <div class="stat"><div class="k">Availability Zone</div><div class="v">2a · 2b · 2d</div></div>
-      <div class="stat"><div class="k">컴퓨트</div><div class="v">EKS 1 + 노드그룹 1 + Fargate ×3</div></div>
-      <div class="stat"><div class="k">DB</div><div class="v">RDS Multi-AZ 클러스터</div></div>
+      <div class="stat"><div class="k">컴퓨트</div><div class="v">EKS 1 + 시스템 노드그룹 1 + Karpenter + Fargate ×3</div></div>
+      <div class="stat"><div class="k">DB</div><div class="v">EC2 자체 MySQL (단일, RDS 아님)</div></div>
     </div>
   </header>
 
@@ -123,7 +123,7 @@
 
     <figure>
       <div class="diagram-frame">
-        <svg viewBox="0 0 1480 1135" role="img" aria-label="Truss VPC 네트워크 배치도: 10.10.0.0/16 VPC 안에 ap-northeast-2a, 2b, 2d 세 가용영역이 있고, 2a와 2b에는 퍼블릭 서브넷(NAT)과 프라이빗 컴퓨트 서브넷(EKS 노드그룹+Fargate 3종), 프라이빗 데이터 서브넷(RDS/Redis/MSK)이 대칭으로 배치되며, 2d에는 RDS 읽기 전용 스탠바이만 있는 데이터 서브넷 하나만 존재한다. VPC 밖에는 Route53, CloudFront, S3 4개 버킷이 있고 S3 Gateway Endpoint로 NAT 없이 연결된다.">
+        <svg viewBox="0 0 1560 1500" role="img" aria-label="Truss VPC 네트워크 배치도(실측): CloudFront(truss.jhyang.click) 하나가 경로 기반으로 S3 프론트엔드·접수API ALB·시세수집기 ALB에 라우팅한다. VPC 10.10.0.0/16 안에 ap-northeast-2a, 2b, 2d 세 가용영역이 있다. 컴퓨트는 워크로드별 서브넷 4쌍(backend/collector/aitrader/replay)으로 나뉘며, backend 서브넷에는 taint 없는 고정 시스템 노드그룹(t3.medium)과 Karpenter가 관리하는 backend 노드풀(c6i.large, taint=workload:backend)이 같이 있고 매칭엔진·접수API·기록기가 전부 이 Karpenter 노드에서 돈다. RDS는 없고 EC2 위에 자체 MySQL을 직접 운영한다(단일 AZ, 이중화 없음). data-d 서브넷은 RDS 배치 예정이었으나 실제로는 쓰이지 않는다. 모니터링은 관리형 AMP/AMG가 아니라 EC2 위의 자체 호스팅 Prometheus와 K8s 위의 Grafana(별도 ALB)다.">
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -132,274 +132,271 @@
 
           <g font-family="ui-sans-serif, Segoe UI, Arial, sans-serif">
 
-          <!-- ================= Edge row (outside VPC) — Route53을 IGW(중심 700) 바로 위에 두고, CloudFront/S3프론트엔드는 그 오른쪽으로 이어감 ================= -->
+          <!-- ================= Edge row (outside VPC) ================= -->
           <g>
-            <rect x="615" y="25" width="170" height="44" rx="6" class="mono" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
-            <text x="700" y="43" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">Route 53</text>
-            <text x="700" y="58" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">jhyang.click</text>
+            <rect x="600" y="20" width="170" height="44" rx="6" class="mono" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
+            <text x="685" y="38" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">Route 53</text>
+            <text x="685" y="53" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">jhyang.click</text>
 
-            <rect x="835" y="25" width="170" height="44" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
-            <text x="920" y="43" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">CloudFront</text>
-            <text x="920" y="58" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">team1-cf-frontend</text>
+            <rect x="820" y="20" width="220" height="44" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
+            <text x="930" y="38" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">CloudFront</text>
+            <text x="930" y="53" text-anchor="middle" font-size="10" fill="var(--ink-muted)">truss.jhyang.click (단일 진입점)</text>
 
-            <rect x="1055" y="25" width="210" height="44" rx="6" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="1160" y="43" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">S3 · team1-truss-frontend</text>
-            <text x="1160" y="58" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">OAC 경유만 (퍼블릭 차단)</text>
+            <rect x="1090" y="20" width="220" height="44" rx="6" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+            <text x="1200" y="38" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">S3 · team1-truss-frontend</text>
+            <text x="1200" y="53" text-anchor="middle" font-size="10" fill="var(--ink-muted)">OAC 경유만 (기본 경로 /*)</text>
 
-            <line x1="785" y1="47" x2="833" y2="47" stroke="var(--cat-edge-stroke)" marker-end="url(#arrow)"/>
-            <text x="809" y="40" text-anchor="middle" font-size="9.5" fill="var(--cat-edge-stroke)" class="lbl">truss.jhyang.click</text>
-            <line x1="1005" y1="47" x2="1053" y2="47" stroke="var(--cat-data-stroke)" marker-end="url(#arrow)"/>
-            <text x="1029" y="40" text-anchor="middle" font-size="10" fill="var(--ink-muted)" class="lbl">OAC</text>
+            <line x1="770" y1="42" x2="818" y2="42" stroke="var(--cat-edge-stroke)" marker-end="url(#arrow)"/>
+            <text x="794" y="35" text-anchor="middle" font-size="9.5" fill="var(--cat-edge-stroke)" class="lbl">ALIAS</text>
+            <line x1="1040" y1="42" x2="1088" y2="42" stroke="var(--cat-data-stroke)" marker-end="url(#arrow)"/>
+            <text x="1064" y="35" text-anchor="middle" font-size="10" fill="var(--ink-muted)" class="lbl">OAC</text>
           </g>
 
-          <!-- IGW: VPC 전체 폭(x20~1380, 중심 700)에 맞춰 가운데 정렬. Route53과는 별개 — DNS가 가리키는 대상이 아니라 "인터넷이 VPC로 들어오는 문"일 뿐이라 인터넷 아이콘에서만 화살표를 받는다 -->
-          <rect x="625" y="100" width="150" height="40" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
-          <text x="700" y="124" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">team1-igw</text>
+          <rect x="610" y="95" width="150" height="40" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
+          <text x="685" y="119" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">team1-igw</text>
+          <text x="545" y="108" text-anchor="middle" font-size="10" fill="var(--ink-muted)" class="lbl">인터넷</text>
+          <line x1="545" y1="117" x2="608" y2="117" stroke="var(--cat-network-stroke)" marker-end="url(#arrow)"/>
 
-          <text x="565" y="113" text-anchor="middle" font-size="10" fill="var(--ink-muted)" class="lbl">인터넷</text>
-          <line x1="565" y1="122" x2="623" y2="122" stroke="var(--cat-network-stroke)" marker-end="url(#arrow)"/>
-          <line x1="700" y1="140" x2="700" y2="198" stroke="var(--cat-network-stroke)" marker-end="url(#arrow)"/>
-          <text x="685" y="155" text-anchor="end" font-size="9" fill="var(--ink-muted)" class="lbl">클라이언트 트래픽</text>
+          <!-- CloudFront → 시세수집기 ALB(/v1/*): 대체로 수직에 가까움 -->
+          <line x1="905" y1="64" x2="895" y2="245" stroke="var(--cat-edge-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+          <text x="911" y="150" font-size="9.5" fill="var(--ink-muted)" class="lbl">/v1/*</text>
 
-          <!-- Route53 → ALB: api.jhyang.click은 IGW가 아니라 ALB를 가리키는 ALIAS 레코드라, IGW 오른쪽(x=790)으로 돌아 ALB 윗면으로 직접 진입한다 (DNS 해석 ≠ 실제 트래픽 경로) -->
-          <path d="M760,69 L780,69 Q790,69 790,79 L790,198" fill="none" stroke="var(--cat-edge-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
-          <text x="800" y="115" font-size="10" fill="var(--ink-muted)" class="lbl">api.jhyang.click</text>
-          <text x="800" y="128" font-size="9" fill="var(--ink-muted)" class="lbl">(ALIAS → ALB)</text>
+          <!-- CloudFront → 접수API ALB(/order-api/*, /recorder-api/*): IGW를 피해 오른쪽 여백으로 내려갔다 왼쪽으로 -->
+          <path d="M850,64 L850,150 Q850,160 840,160 L585,160 Q575,160 575,170 L575,243" fill="none" stroke="var(--cat-edge-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+          <text x="700" y="153" text-anchor="middle" font-size="9" fill="var(--ink-muted)" class="lbl">/order-api/*, /recorder-api/*</text>
 
           <!-- ================= VPC container ================= -->
-          <rect x="20" y="165" width="1360" height="810" rx="10" fill="none" stroke="var(--cat-network-stroke)" stroke-width="2"/>
-          <text x="36" y="188" font-size="13" font-weight="800" fill="var(--cat-network-stroke)">VPC · team1-vpc · 10.10.0.0/16 · ap-northeast-2</text>
+          <rect x="20" y="175" width="1520" height="1010" rx="10" fill="none" stroke="var(--cat-network-stroke)" stroke-width="2"/>
+          <text x="36" y="197" font-size="13" font-weight="800" fill="var(--cat-network-stroke)">VPC · team1-vpc · 10.10.0.0/16 · ap-northeast-2</text>
 
-          <!-- ALB: IGW와 같은 중심(700)에 정렬. WAF는 별도 네트워크 홉이 아니라 ALB에 연결(associate)되는 규칙셋이라 박스 안 속성으로 표기 -->
-          <rect x="570" y="200" width="260" height="60" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
-          <text x="700" y="216" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">Public ALB · team1-alb-api</text>
-          <text x="700" y="228" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">Target Group: team1-tg-api</text>
-          <text x="700" y="239" text-anchor="middle" font-size="9" fill="var(--ink-muted)">Security Group team1-sg-alb-public</text>
-          <text x="700" y="253" text-anchor="middle" font-size="9" font-weight="700" fill="var(--ink-muted)">WAF: team1-waf-alb (연결됨)</text>
+          <!-- 퍼블릭 ALB 2개: CloudFront Function이 접두사를 벗겨서 각 오리진으로 전달 -->
+          <rect x="430" y="245" width="290" height="76" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
+          <text x="575" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ink)">Public ALB · k8s-backend-orderapi</text>
+          <text x="575" y="275" text-anchor="middle" font-size="9" fill="var(--ink-muted)">TG: orderapi:8081, recorder:8082</text>
+          <text x="575" y="287" text-anchor="middle" font-size="9" fill="var(--ink-muted)">Security Group team1-sg-alb-public</text>
+          <text x="575" y="300" text-anchor="middle" font-size="9" font-weight="700" fill="var(--ink-muted)">WAF: team1-waf-alb (연결됨)</text>
+          <text x="575" y="313" text-anchor="middle" font-size="8" fill="var(--ink-muted)">jhyang.click 와일드카드 인증서(ACM)</text>
+
+          <rect x="760" y="245" width="290" height="76" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
+          <text x="905" y="262" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ink)">Public ALB · k8s-collecto-backend</text>
+          <text x="905" y="275" text-anchor="middle" font-size="9" fill="var(--ink-muted)">TG: backend:8080 (시세수집기)</text>
+          <text x="905" y="287" text-anchor="middle" font-size="9" fill="var(--ink-muted)">Security Group team1-sg-alb-public</text>
+          <text x="905" y="300" text-anchor="middle" font-size="9" font-weight="700" fill="var(--ink-muted)">WAF: team1-waf-alb (연결됨)</text>
+          <text x="905" y="313" text-anchor="middle" font-size="8" fill="var(--ink-muted)">jhyang.click 와일드카드 인증서(ACM)</text>
 
           <!-- ============ AZ-a ============ -->
           <g>
-            <rect x="40" y="270" width="460" height="610" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
-            <text x="55" y="290" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2a</text>
+            <rect x="40" y="340" width="460" height="560" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
+            <text x="55" y="360" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2a</text>
 
             <!-- public-a -->
-            <rect x="55" y="300" width="430" height="54" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="65" y="315" font-size="11" font-weight="700" fill="var(--ink)">team1-public-a · 10.10.0.0/24</text>
-            <rect x="330" y="320" width="140" height="28" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
-            <text x="400" y="338" text-anchor="middle" font-size="10.5" fill="var(--ink)">team1-natgw-a</text>
-            <text x="65" y="349" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-public &#8594; team1-igw</text>
-            <text x="65" y="367" font-size="9" fill="var(--ink-muted)">NAT 용도: 시세수집기 &#8594; 업비트 API 아웃바운드</text>
+            <rect x="55" y="370" width="430" height="88" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="385" font-size="11" font-weight="700" fill="var(--ink)">team1-public-a · 10.10.0.0/24</text>
+            <rect x="70" y="396" width="130" height="44" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
+            <text x="135" y="414" text-anchor="middle" font-size="10" fill="var(--ink)">team1-natgw-a</text>
+            <text x="135" y="427" text-anchor="middle" font-size="8" fill="var(--ink-muted)">시세수집기→업비트</text>
+            <rect x="290" y="396" width="180" height="44" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="380" y="411" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">EC2 · team1-monitoring</text>
+            <text x="380" y="423" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">t3.medium · 43.202.105.104 공개IP</text>
+            <text x="380" y="434" text-anchor="middle" font-size="8" fill="var(--ink-muted)">monitor.jhyang.click 직접 노출</text>
 
-            <!-- private-compute-a -->
-            <rect x="55" y="380" width="430" height="244" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="65" y="396" font-size="11" font-weight="700" fill="var(--ink)">team1-private-compute-a · 10.10.10.0/24</text>
+            <!-- eks-backend-a -->
+            <rect x="55" y="466" width="430" height="150" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="481" font-size="11" font-weight="700" fill="var(--ink)">team1-eks-backend-a · 10.10.10.0/24</text>
 
-            <rect x="70" y="406" width="400" height="50" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-            <text x="270" y="422" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">EC2 · team1-eks-ng-backend (c6i.large)</text>
-            <text x="270" y="435" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">Docker(Deployment): 매칭엔진 · 접수API · 기록기</text>
-            <text x="270" y="449" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">매칭엔진: KEDA 파드 스케일링 / Karpenter 노드 스케일링</text>
+            <rect x="70" y="490" width="195" height="52" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="167" y="505" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">EC2 · team1-ng-system</text>
+            <text x="167" y="517" text-anchor="middle" font-size="8" fill="var(--ink-muted)">t3.medium 고정 2대, taint 없음</text>
+            <text x="167" y="528" text-anchor="middle" font-size="8" fill="var(--ink-muted)">CoreDNS·ALB컨트롤러·Karpenter</text>
 
-            <rect x="70" y="464" width="150" height="20" rx="4" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-            <text x="145" y="478" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">EBS gp3 (root)</text>
-            <text x="70" y="492" font-size="9.5" fill="var(--ink-muted)">Security Group team1-sg-eks-backend</text>
+            <rect x="275" y="490" width="195" height="52" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="372" y="505" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">EC2 · Karpenter 노드</text>
+            <text x="372" y="517" text-anchor="middle" font-size="8" fill="var(--ink-muted)">c6i.large, taint=workload:backend</text>
+            <text x="372" y="528" text-anchor="middle" font-size="8" fill="var(--ink-muted)">매칭엔진·접수API (기록기는 별도 NodePool, 8장)</text>
 
-            <g>
-              <rect x="70" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="133" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="133" y="531" text-anchor="middle" font-size="8" fill="var(--ink-muted)">시세수집기 (Deployment)</text>
+            <rect x="70" y="548" width="195" height="52" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="167" y="565" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">EC2 · team1-mysql</text>
+            <text x="167" y="577" text-anchor="middle" font-size="8" fill="var(--ink-muted)">m6i.2xlarge, 단일 AZ</text>
+            <text x="167" y="589" text-anchor="middle" font-size="8" fill="var(--ink-muted)">RDS 아님 — 자체 관리 MySQL</text>
 
-              <rect x="206" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="269" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="269" y="531" text-anchor="middle" font-size="9" fill="var(--ink-muted)">AI트레이더 (Job)</text>
+            <rect x="275" y="548" width="195" height="52" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="372" y="565" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">Lambda (VPC 연결)</text>
+            <text x="372" y="577" text-anchor="middle" font-size="8" fill="var(--ink-muted)">team1-lambda-job-trigger</text>
+            <text x="372" y="589" text-anchor="middle" font-size="8" fill="var(--ink-muted)">python3.13</text>
 
-              <rect x="342" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="405" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="405" y="531" text-anchor="middle" font-size="9" fill="var(--ink-muted)">리플레이 (Job)</text>
-            </g>
+            <!-- eks-collector-a -->
+            <rect x="55" y="626" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="641" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-collector-a · 10.10.20.0/24</text>
+            <rect x="330" y="638" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="402" y="654" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · 시세수집기</text>
 
-            <!-- Lambda(Job 트리거 전용)를 VPC 연결해서 EKS 프라이빗 엔드포인트로 직접 Job을 생성 — 접수API는 K8s RBAC 권한을 아예 안 가짐 -->
-            <rect x="70" y="560" width="180" height="32" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-            <text x="160" y="573" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">Lambda (VPC 연결)</text>
-            <text x="160" y="585" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1-lambda-job-trigger</text>
+            <!-- eks-aitrader-a -->
+            <rect x="55" y="678" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="693" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-aitrader-a · 10.10.30.0/24</text>
+            <rect x="330" y="690" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="402" y="706" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · AI트레이더(Job)</text>
 
-            <!-- Lambda가 실제로 하는 일: EKS 프라이빗 엔드포인트로 K8s API를 호출해 이 두 Fargate Job을 생성한다 -->
-            <line x1="200" y1="558" x2="269" y2="546" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
-            <line x1="230" y1="558" x2="405" y2="546" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
-            <text x="250" y="554" font-size="8" fill="var(--ink-muted)" class="lbl">Job 생성 (EKS Private Endpoint)</text>
+            <!-- eks-replay-a -->
+            <rect x="55" y="730" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="745" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-replay-a · 10.10.40.0/24</text>
+            <rect x="330" y="742" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="402" y="758" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · 리플레이(Job)</text>
 
-            <text x="65" y="614" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-private-compute-a &#8594; team1-natgw-a</text>
+            <!-- Lambda → Job 생성 -->
+            <line x1="372" y1="600" x2="402" y2="690" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+            <line x1="350" y1="600" x2="402" y2="742" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+            <text x="480" y="620" font-size="8" fill="var(--ink-muted)" class="lbl">Job 생성 (EKS Private Endpoint)</text>
 
-            <!-- private-data-a -->
-            <rect x="55" y="632" width="430" height="150" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="65" y="648" font-size="11" font-weight="700" fill="var(--ink)">team1-private-data-a · 10.10.50.0/24</text>
-
-            <rect x="70" y="664" width="190" height="42" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="165" y="677" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">RDS Writer</text>
-            <text x="165" y="689" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-rds-truss</text>
-            <text x="165" y="700" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">db.m6gd.large</text>
-
-            <rect x="280" y="664" width="190" height="42" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="375" y="677" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">Redis Primary</text>
-            <text x="375" y="689" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-redis-truss</text>
-            <text x="375" y="700" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">cache.t4g.medium</text>
-            <text x="70" y="718" font-size="9.5" fill="var(--ink-muted)">Security Group team1-sg-rds / team1-sg-redis</text>
-
-            <rect x="70" y="726" width="190" height="34" rx="5" fill="var(--cat-stream-fill)" stroke="var(--cat-stream-stroke)"/>
-            <text x="165" y="747" text-anchor="middle" font-size="10" fill="var(--ink)">MSK ENI · team1-msk-truss</text>
-
-            <text x="65" y="774" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-private-data (인터넷·NAT 경로 없음)</text>
+            <!-- data-a: 실측상 Redis Replica -->
+            <rect x="55" y="782" width="430" height="90" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="65" y="797" font-size="11" font-weight="700" fill="var(--ink)">team1-data-a · 10.10.50.0/24</text>
+            <rect x="70" y="806" width="190" height="52" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+            <text x="165" y="822" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Redis Replica</text>
+            <text x="165" y="834" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1-truss-redis · cache.t4g.medium</text>
+            <text x="165" y="846" text-anchor="middle" font-size="8" fill="var(--ink-muted)">CurrentRole: replica</text>
+            <rect x="280" y="806" width="190" height="34" rx="5" fill="var(--cat-stream-fill)" stroke="var(--cat-stream-stroke)"/>
+            <text x="375" y="827" text-anchor="middle" font-size="10" fill="var(--ink)">MSK ENI · team1-truss-msk</text>
           </g>
 
           <!-- ============ AZ-b ============ -->
           <g>
-            <rect x="520" y="270" width="460" height="610" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
-            <text x="535" y="290" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2b</text>
+            <rect x="520" y="340" width="460" height="560" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
+            <text x="535" y="360" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2b</text>
 
-            <rect x="535" y="300" width="430" height="54" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="545" y="315" font-size="11" font-weight="700" fill="var(--ink)">team1-public-b · 10.10.1.0/24</text>
-            <rect x="810" y="320" width="140" height="28" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
-            <text x="880" y="338" text-anchor="middle" font-size="10.5" fill="var(--ink)">team1-natgw-b</text>
-            <text x="545" y="349" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-public &#8594; team1-igw</text>
-            <text x="545" y="367" font-size="9" fill="var(--ink-muted)">NAT 용도: 시세수집기 &#8594; 업비트 API 아웃바운드</text>
+            <rect x="535" y="370" width="430" height="88" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="385" font-size="11" font-weight="700" fill="var(--ink)">team1-public-b · 10.10.1.0/24</text>
+            <rect x="550" y="396" width="130" height="44" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
+            <text x="615" y="414" text-anchor="middle" font-size="10" fill="var(--ink)">team1-natgw-b</text>
+            <text x="615" y="427" text-anchor="middle" font-size="8" fill="var(--ink-muted)">시세수집기→업비트</text>
 
-            <rect x="535" y="380" width="430" height="244" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="545" y="396" font-size="11" font-weight="700" fill="var(--ink)">team1-private-compute-b · 10.10.11.0/24</text>
+            <rect x="535" y="466" width="430" height="150" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="481" font-size="11" font-weight="700" fill="var(--ink)">team1-eks-backend-b · 10.10.11.0/24</text>
 
-            <rect x="550" y="406" width="400" height="50" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-            <text x="750" y="422" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">EC2 · team1-eks-ng-backend (c6i.large)</text>
-            <text x="750" y="435" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">Docker(Deployment): 매칭엔진 · 접수API · 기록기</text>
-            <text x="750" y="449" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">매칭엔진 파드: KEDA / 노드 부족 시: Karpenter</text>
+            <rect x="550" y="490" width="195" height="52" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="647" y="505" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">EC2 · team1-ng-system</text>
+            <text x="647" y="517" text-anchor="middle" font-size="8" fill="var(--ink-muted)">t3.medium 고정 2대, taint 없음</text>
+            <text x="647" y="528" text-anchor="middle" font-size="8" fill="var(--ink-muted)">CoreDNS·ALB컨트롤러·Karpenter</text>
 
-            <rect x="550" y="464" width="150" height="20" rx="4" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-            <text x="625" y="478" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">EBS gp3 (root)</text>
-            <text x="550" y="492" font-size="9.5" fill="var(--ink-muted)">Security Group team1-sg-eks-backend</text>
+            <rect x="755" y="490" width="195" height="52" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="852" y="505" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">EC2 · Karpenter 노드</text>
+            <text x="852" y="517" text-anchor="middle" font-size="8" fill="var(--ink-muted)">c6i.large, taint=workload:backend</text>
+            <text x="852" y="528" text-anchor="middle" font-size="8" fill="var(--ink-muted)">매칭엔진·접수API (기록기는 별도 NodePool, 8장)</text>
 
-            <g>
-              <rect x="550" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="613" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="613" y="531" text-anchor="middle" font-size="8" fill="var(--ink-muted)">시세수집기 (Deployment)</text>
+            <rect x="550" y="548" width="195" height="52" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+            <text x="647" y="565" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">Lambda (VPC 연결)</text>
+            <text x="647" y="577" text-anchor="middle" font-size="8" fill="var(--ink-muted)">team1-lambda-job-trigger</text>
+            <text x="647" y="589" text-anchor="middle" font-size="8" fill="var(--ink-muted)">python3.13</text>
+            <text x="850" y="572" text-anchor="middle" font-size="8" fill="var(--ink-muted)">(AZ-a에만 있는 team1-mysql은</text>
+            <text x="850" y="583" text-anchor="middle" font-size="8" fill="var(--ink-muted)">여기 없음 — 단일 인스턴스)</text>
 
-              <rect x="686" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="749" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="749" y="531" text-anchor="middle" font-size="9" fill="var(--ink-muted)">AI트레이더 (Job)</text>
+            <rect x="535" y="626" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="641" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-collector-b · 10.10.21.0/24</text>
+            <rect x="810" y="638" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="882" y="654" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · 시세수집기</text>
 
-              <rect x="822" y="502" width="126" height="42" rx="5" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
-              <text x="885" y="518" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Fargate</text>
-              <text x="885" y="531" text-anchor="middle" font-size="9" fill="var(--ink-muted)">리플레이 (Job)</text>
-            </g>
+            <rect x="535" y="678" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="693" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-aitrader-b · 10.10.31.0/24</text>
+            <rect x="810" y="690" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="882" y="706" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · AI트레이더(Job)</text>
 
-            <rect x="550" y="560" width="180" height="32" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-            <text x="640" y="573" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">Lambda (VPC 연결)</text>
-            <text x="640" y="585" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1-lambda-job-trigger</text>
+            <rect x="535" y="730" width="430" height="46" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="745" font-size="10.5" font-weight="700" fill="var(--ink)">team1-eks-replay-b · 10.10.41.0/24</text>
+            <rect x="810" y="742" width="145" height="24" rx="4" fill="var(--cat-compute-fill)" stroke="var(--cat-compute-stroke)"/>
+            <text x="882" y="758" text-anchor="middle" font-size="9" fill="var(--ink)">Fargate · 리플레이(Job)</text>
 
-            <line x1="680" y1="558" x2="749" y2="546" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
-            <line x1="710" y1="558" x2="885" y2="546" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
-            <text x="730" y="554" font-size="8" fill="var(--ink-muted)" class="lbl">Job 생성 (EKS Private Endpoint)</text>
+            <line x1="852" y1="600" x2="882" y2="690" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+            <line x1="830" y1="600" x2="882" y2="742" stroke="var(--cat-neutral-stroke)" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
 
-            <text x="545" y="614" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-private-compute-b &#8594; team1-natgw-b</text>
-
-            <rect x="535" y="632" width="430" height="150" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="545" y="648" font-size="11" font-weight="700" fill="var(--ink)">team1-private-data-b · 10.10.51.0/24</text>
-
-            <rect x="550" y="664" width="190" height="42" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="645" y="677" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">RDS Reader/Standby</text>
-            <text x="645" y="689" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-rds-truss</text>
-            <text x="645" y="700" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">db.m6gd.large</text>
-
-            <rect x="760" y="664" width="190" height="42" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="855" y="677" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">Redis Replica</text>
-            <text x="855" y="689" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-redis-truss</text>
-            <text x="855" y="700" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">cache.t4g.medium</text>
-            <text x="550" y="718" font-size="9.5" fill="var(--ink-muted)">Security Group team1-sg-rds / team1-sg-redis</text>
-
-            <rect x="550" y="726" width="190" height="34" rx="5" fill="var(--cat-stream-fill)" stroke="var(--cat-stream-stroke)"/>
-            <text x="645" y="747" text-anchor="middle" font-size="10" fill="var(--ink)">MSK ENI · team1-msk-truss</text>
-
-            <text x="545" y="774" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-private-data (인터넷·NAT 경로 없음)</text>
+            <!-- data-b: 실측상 Redis Primary -->
+            <rect x="535" y="782" width="430" height="90" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
+            <text x="545" y="797" font-size="11" font-weight="700" fill="var(--ink)">team1-data-b · 10.10.51.0/24</text>
+            <rect x="550" y="806" width="190" height="52" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+            <text x="645" y="822" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Redis Primary</text>
+            <text x="645" y="834" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1-truss-redis · cache.t4g.medium</text>
+            <text x="645" y="846" text-anchor="middle" font-size="8" fill="var(--ink-muted)">CurrentRole: primary</text>
+            <rect x="760" y="806" width="190" height="34" rx="5" fill="var(--cat-stream-fill)" stroke="var(--cat-stream-stroke)"/>
+            <text x="855" y="827" text-anchor="middle" font-size="10" fill="var(--ink)">MSK ENI · team1-truss-msk</text>
           </g>
 
-          <!-- ============ AZ-d ============ -->
+          <!-- ============ AZ-d (미사용) ============ -->
           <g>
-            <rect x="1010" y="270" width="330" height="610" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
-            <text x="1025" y="290" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2d (RDS 전용)</text>
-
-            <rect x="1025" y="310" width="300" height="290" rx="6" fill="none" stroke="var(--border-strong)" stroke-dasharray="3 3"/>
-            <text x="1175" y="450" text-anchor="middle" font-size="11" fill="var(--ink-muted)">컴퓨트 없음</text>
-            <text x="1175" y="466" text-anchor="middle" font-size="10" fill="var(--ink-muted)">(Public·Private-compute 서브넷 미배치)</text>
-
-            <rect x="1025" y="632" width="300" height="110" rx="6" fill="none" stroke="var(--cat-network-stroke)"/>
-            <text x="1035" y="648" font-size="11" font-weight="700" fill="var(--ink)">team1-private-data-d · 10.10.52.0/24</text>
-            <rect x="1040" y="664" width="270" height="42" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-            <text x="1175" y="677" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--ink)">RDS Reader/Standby</text>
-            <text x="1175" y="689" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-rds-truss</text>
-            <text x="1175" y="700" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">db.m6gd.large</text>
-            <text x="1035" y="722" font-size="9.5" fill="var(--ink-muted)">RT team1-rt-private-data (공유, NAT 경로 없음)</text>
+            <rect x="1020" y="340" width="280" height="200" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
+            <text x="1035" y="360" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2d</text>
+            <rect x="1035" y="375" width="250" height="140" rx="6" fill="none" stroke="var(--border-strong)" stroke-dasharray="3 3"/>
+            <text x="1160" y="425" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">team1-data-d · 10.10.52.0/24</text>
+            <text x="1160" y="442" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">과거엔 RDS 3번째 노드가 있었음</text>
+            <text x="1160" y="456" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">(스냅샷 team1-rds-final-before-</text>
+            <text x="1160" y="469" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">subnet-migration 잔존) 지금은 유휴</text>
           </g>
 
-          <!-- ============ S3 Gateway Endpoint + S3 group ============ -->
-          <!-- 양방향: PutObject(시세수집기/AI트레이더/기록기 쓰기)뿐 아니라 GetObject(AI트레이더·리플레이 읽기)도 같은 엔드포인트를 지난다 -->
-          <line x1="510" y1="881" x2="510" y2="898" stroke="var(--cat-data-stroke)" stroke-dasharray="4 3" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-          <text x="524" y="893" font-size="9" fill="var(--ink-muted)" class="lbl">Put/GetObject</text>
+          <!-- ============ 관리형 부가 서비스 + S3 + SQS ============ -->
+          <text x="36" y="920" font-size="12" font-weight="800" fill="var(--ink)">모니터링 (관리형 AMP/AMG 아님 — EC2 자체 호스팅)</text>
+          <rect x="36" y="930" width="230" height="56" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="151" y="946" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">EC2 · team1-monitoring</text>
+          <text x="151" y="959" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">Prometheus:9090 · Grafana:80/3000</text>
+          <text x="151" y="971" text-anchor="middle" font-size="8" fill="var(--ink-muted)">동일 인스턴스 — monitor.jhyang.click</text>
 
-          <rect x="290" y="900" width="440" height="40" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
-          <text x="510" y="924" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">team1-vpce-s3 · S3 Gateway Endpoint</text>
+          <rect x="286" y="930" width="230" height="56" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="401" y="946" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">grafana.jhyang.click — 끊긴 레코드</text>
+          <text x="401" y="959" text-anchor="middle" font-size="8" fill="var(--ink-muted)">과거 K8s ALB(team1shared) 가리켰으나</text>
+          <text x="401" y="971" text-anchor="middle" font-size="8" fill="var(--ink-muted)">그 ALB가 삭제돼 지금은 죽은 레코드</text>
 
-          <line x1="510" y1="940" x2="510" y2="986" stroke="var(--cat-data-stroke)" stroke-dasharray="4 3" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
-          <text x="524" y="965" font-size="9" fill="var(--ink-muted)" class="lbl">Put/GetObject</text>
+          <rect x="536" y="930" width="230" height="56" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="651" y="946" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">CloudWatch agent + fluent-bit</text>
+          <text x="651" y="959" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">전 노드 DaemonSet, 로그·보조 지표</text>
+          <text x="651" y="971" text-anchor="middle" font-size="8" fill="var(--ink-muted)">amazon-cloudwatch 네임스페이스</text>
 
-          <text x="160" y="1000" font-size="11.5" font-weight="800" fill="var(--ink)">S3 (Gateway Endpoint 경유)</text>
+          <rect x="786" y="930" width="230" height="56" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="901" y="946" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">node-exporter · kube-state-metrics</text>
+          <text x="901" y="959" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">monitoring 네임스페이스, DaemonSet</text>
+          <text x="901" y="971" text-anchor="middle" font-size="8" fill="var(--ink-muted)">team1-monitoring의 Prometheus가 스크레이프</text>
 
-          <rect x="160" y="1010" width="220" height="32" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-          <text x="270" y="1031" text-anchor="middle" font-size="10.5" fill="var(--ink)">team1-truss-market-data</text>
+          <text x="36" y="1005" font-size="11" font-weight="800" fill="var(--ink)">CloudWatch Alarm ×7 → SNS · team1-sns-alerts</text>
+          <rect x="36" y="1012" width="960" height="34" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="516" y="1033" text-anchor="middle" font-size="8.5" fill="var(--ink)">alb-5xx-orderapi · alb-5xx-collector · redis-cpu-001 · redis-cpu-002 · msk-health · mysql-ec2-cpu · nodegroup-health</text>
 
-          <rect x="400" y="1010" width="220" height="32" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-          <text x="510" y="1031" text-anchor="middle" font-size="10.5" fill="var(--ink)">team1-truss-order-records</text>
+          <text x="36" y="1070" font-size="12" font-weight="800" fill="var(--ink)">S3 버킷 (S3 Gateway Endpoint 경유)</text>
+          <rect x="36" y="1080" width="200" height="40" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+          <text x="136" y="1104" text-anchor="middle" font-size="10" fill="var(--ink)">team1-truss-market-data</text>
+          <rect x="246" y="1080" width="200" height="40" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+          <text x="346" y="1104" text-anchor="middle" font-size="10" fill="var(--ink)">team1-truss-order-records</text>
+          <rect x="456" y="1080" width="200" height="40" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+          <text x="556" y="1104" text-anchor="middle" font-size="10" fill="var(--ink)">team1-truss-trade-results</text>
+          <rect x="666" y="1080" width="200" height="40" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
+          <text x="766" y="1104" text-anchor="middle" font-size="10" fill="var(--ink)">team1-truss-frontend</text>
 
-          <rect x="640" y="1010" width="220" height="32" rx="5" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-          <text x="750" y="1031" text-anchor="middle" font-size="10.5" fill="var(--ink)">team1-truss-trade-results</text>
+          <rect x="36" y="1130" width="200" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="136" y="1154" text-anchor="middle" font-size="10" fill="var(--ink)">team1-monitoring-config</text>
+          <rect x="246" y="1130" width="200" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="346" y="1154" text-anchor="middle" font-size="10" fill="var(--ink)">team1-mysql-config</text>
+          <rect x="456" y="1130" width="200" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="556" y="1154" text-anchor="middle" font-size="9.5" fill="var(--ink)">team1-terraform-state-s3</text>
+          <text x="556" y="1165" text-anchor="middle" font-size="7.5" fill="var(--ink-muted)">(IaC 상태, 애플리케이션 무관)</text>
 
-          <!-- SQS: 접수API의 Job 트리거 요청이 여기로 발행된다. SQS는 Gateway Endpoint를 지원하지 않아(S3/DynamoDB만 가능) Interface Endpoint(ENI 기반)로 private-compute에서 NAT 없이 직접 접근 -->
-          <line x1="1000" y1="930" x2="1000" y2="953" stroke="var(--cat-neutral-stroke)" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
-          <text x="1014" y="945" font-size="9" fill="var(--ink-muted)" class="lbl">접수API 발행</text>
+          <text x="936" y="1070" font-size="12" font-weight="800" fill="var(--ink)">Job 트리거 (SQS + Lambda)</text>
+          <rect x="936" y="1080" width="230" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="1051" y="1096" text-anchor="middle" font-size="10" fill="var(--ink)">SQS · team1-sqs-job-trigger</text>
+          <text x="1051" y="1109" text-anchor="middle" font-size="8" fill="var(--ink-muted)">가시성 타임아웃 60초</text>
+          <rect x="1186" y="1080" width="230" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="1301" y="1096" text-anchor="middle" font-size="10" fill="var(--ink)">DLQ · team1-sqs-job-trigger-dlq</text>
+          <text x="1301" y="1109" text-anchor="middle" font-size="8" fill="var(--ink-muted)">maxReceiveCount 3</text>
+          <line x1="1166" y1="1100" x2="1184" y2="1100" stroke="var(--cat-neutral-stroke)" marker-end="url(#arrow)"/>
 
-          <rect x="915" y="955" width="170" height="32" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-network-stroke)"/>
-          <text x="1000" y="969" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">team1-vpce-sqs</text>
-          <text x="1000" y="981" text-anchor="middle" font-size="8" fill="var(--ink-muted)">Interface Endpoint · NAT 미경유</text>
+          <rect x="936" y="1130" width="230" height="40" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="1051" y="1154" text-anchor="middle" font-size="9.5" fill="var(--ink)">SQS · team1-sqs-karpenter-interruption</text>
 
-          <line x1="1000" y1="987" x2="1000" y2="1008" stroke="var(--cat-neutral-stroke)" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+          <text x="936" y="1200" font-size="12" font-weight="800" fill="var(--ink)">WAF 규칙 (team1-waf-alb)</text>
+          <rect x="936" y="1210" width="480" height="70" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="946" y="1228" font-size="9.5" fill="var(--ink)">1. AWSManagedRulesCommonRuleSet</text>
+          <text x="946" y="1243" font-size="9.5" fill="var(--ink)">2. AWSManagedRulesKnownBadInputsRuleSet</text>
+          <text x="946" y="1258" font-size="9.5" fill="var(--ink)">3. RateLimitPerIP — IP당 20,000회/5분 초과 시 차단</text>
+          <text x="946" y="1273" font-size="9.5" fill="var(--ink)">DDoS 저평판 모드(ALBLowReputationMode) 활성</text>
 
-          <rect x="900" y="1010" width="200" height="32" rx="5" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="1000" y="1031" text-anchor="middle" font-size="10.5" fill="var(--ink)">SQS · team1-sqs-job-trigger</text>
-
-          <!-- SQS → Lambda 트리거는 team1-vpce-sqs를 안 지난다 — AWS Lambda 서비스 자체의 관리형 폴러(이벤트 소스 매핑)가 폴링해서 함수를 호출하는 별개 경로이고, 고객 VPC 네트워크를 거치지 않는다 -->
-          <line x1="1100" y1="1026" x2="1140" y2="1026" stroke="var(--cat-neutral-stroke)" stroke-dasharray="2 2" marker-end="url(#arrow)"/>
-          <text x="1150" y="1023" font-size="8.5" fill="var(--ink-muted)" class="lbl">→ Lambda 트리거</text>
-          <text x="1150" y="1034" font-size="8" fill="var(--ink-muted)" class="lbl">(AWS 관리형 폴러, VPC 미경유)</text>
-
-          <!-- ============ cross-cutting services strip ============ -->
-          <text x="36" y="1076" font-size="10.5" fill="var(--ink-muted)">관리형 부가 서비스</text>
-          <rect x="36" y="1083" width="290" height="28" rx="14" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="181" y="1101" text-anchor="middle" font-size="9.5" fill="var(--ink)">Secrets Manager · team1-secret-rds-credentials</text>
-
-          <!-- Redis-cpu, msk-health 추가 — Redis/MSK는 실거래 상태를 들고 있는데 알람이 없었음 -->
-          <rect x="340" y="1083" width="460" height="40" rx="14" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="570" y="1099" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink)">CloudWatch Alarm</text>
-          <text x="570" y="1112" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">rds-cpu · redis-cpu · msk-health · alb-5xx · nodegroup-health</text>
-
-          <rect x="814" y="1083" width="200" height="28" rx="14" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="914" y="1101" text-anchor="middle" font-size="9.5" fill="var(--ink)">SNS · team1-sns-alerts</text>
-
-          <!-- EKS(노드그룹+Fargate 전체)에서 AMP로 — 워크로드별로 다 그으면 선이 난립해서 VPC 경계에서 하나로 요약 -->
-          <line x1="1130" y1="975" x2="1130" y2="1081" stroke="var(--cat-neutral-stroke)" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
-          <text x="1144" y="1030" font-size="9" fill="var(--ink-muted)" class="lbl">지표·로그 (EKS 전체)</text>
-
-          <rect x="1030" y="1083" width="200" height="28" rx="14" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="1130" y="1101" text-anchor="middle" font-size="9.5" fill="var(--ink)">AMP · team1-amp-truss</text>
-
-          <line x1="1230" y1="1097" x2="1244" y2="1097" stroke="var(--cat-neutral-stroke)" marker-end="url(#arrow)"/>
-
-          <rect x="1246" y="1083" width="200" height="28" rx="14" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="1346" y="1101" text-anchor="middle" font-size="9.5" fill="var(--ink)">AMG · team1-amg-truss</text>
+          <text x="36" y="1200" font-size="12" font-weight="800" fill="var(--ink)">VPC 인터페이스 엔드포인트 (2a/2b)</text>
+          <rect x="36" y="1210" width="700" height="34" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
+          <text x="386" y="1231" text-anchor="middle" font-size="9.5" fill="var(--ink)">STS · ECR api/dkr · CloudWatch Logs · Bedrock Runtime · SQS</text>
+          <text x="36" y="1260" font-size="9.5" fill="var(--ink-muted)">S3는 Gateway Endpoint(무료), MSK는 자체 관리형 PrivateLink(팀 SG로 자동 구성) — 위 목록과 별개</text>
+          <text x="36" y="1285" font-size="9.5" fill="var(--ink-muted)">Secrets Manager: 7/22 도입→7/28 삭제→8/27 CSI Driver로 재도입(team1/backend/mysql-db-url, 8장)</text>
 
           </g>
         </svg>
@@ -409,10 +406,11 @@
     <div class="legend-row">
       <span class="sw"><span class="dot" style="background:var(--cat-network-stroke)"></span>네트워크(VPC/서브넷/IGW/NAT/RT)</span>
       <span class="sw"><span class="dot" style="background:var(--cat-compute-stroke)"></span>컴퓨트(EC2/Fargate/Docker)</span>
-      <span class="sw"><span class="dot" style="background:var(--cat-data-stroke)"></span>데이터(RDS/Redis/S3)</span>
+      <span class="sw"><span class="dot" style="background:var(--cat-data-stroke)"></span>데이터(MySQL/Redis/S3)</span>
       <span class="sw"><span class="dot" style="background:var(--cat-stream-stroke)"></span>메시징(MSK)</span>
       <span class="sw"><span class="dot" style="background:var(--cat-edge-stroke)"></span>엣지(Route53/CloudFront/ALB)</span>
     </div>
+    <p style="font-size:12.5px;color:var(--ink-muted);margin:10px 4px 0;">2026-08-27 AWS CLI/kubectl 실측 반영. 이전 설계안(RDS Multi-AZ 클러스터, 관리형 AMP/AMG, 워크로드별 서브넷 통합 등)은 실제 배포와 달라 전면 교체함 — 8장 "실측 인프라 노트" 참고.</p>
   </section>
 
   <section id="flow">
@@ -420,7 +418,7 @@
 
     <figure>
       <div class="diagram-frame">
-        <svg viewBox="0 0 1700 900" role="img" aria-label="Truss 데이터 흐름도: 사용자 브라우저가 Route53을 거쳐 CloudFront와 S3 프론트엔드, 또는 ALB와 접수API로 접속하는 사용자 접속 흐름(마젠타), 매칭엔진·접수API·기록기가 Redis와 RDS를 읽고 쓰는 앱-DB 연결 흐름(청록), 시세수집기·AI트레이더·리플레이엔진·기록기가 각각 S3 버킷에 쓰거나 읽는 앱-S3 연결 흐름(주황), 접수API-매칭엔진-기록기가 MSK의 orders·executions 토픽을 주고받는 메시징 흐름(초록)을 화살표 색으로 구분해 보여준다.">
+        <svg viewBox="0 0 1700 900" role="img" aria-label="Truss 데이터 흐름도(실측): 사용자 브라우저가 Route53을 거쳐 CloudFront와 S3 프론트엔드, 또는 ALB와 접수API로 접속하는 사용자 접속 흐름(마젠타), 매칭엔진·접수API·기록기가 Redis와 EC2 자체 호스팅 MySQL을 읽고 쓰는 앱-DB 연결 흐름(청록, RDS 아님), 시세수집기·AI트레이더·리플레이엔진·기록기가 각각 S3 버킷에 쓰거나 읽는 앱-S3 연결 흐름(주황), 접수API-매칭엔진-기록기가 MSK의 orders·executions 토픽을 주고받는 메시징 흐름(초록), AI트레이더가 시세수집기의 매니페스트/파일 API를 HTTP로 직접 pull하는 흐름(보라)을 화살표 색으로 구분해 보여준다.">
           <defs>
             <marker id="arrow2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -429,17 +427,19 @@
           <g font-family="ui-sans-serif, Segoe UI, Arial, sans-serif">
 
           <!-- legend -->
-          <rect x="1330" y="20" width="350" height="104" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+          <rect x="1330" y="20" width="350" height="122" rx="8" fill="var(--surface)" stroke="var(--border)"/>
           <line x1="1346" y1="38" x2="1372" y2="38" stroke="var(--flow-user)" stroke-width="3"/>
           <text x="1382" y="42" font-size="11" fill="var(--ink)">사용자 접속 흐름</text>
           <line x1="1346" y1="56" x2="1372" y2="56" stroke="var(--flow-db)" stroke-width="3"/>
-          <text x="1382" y="60" font-size="11" fill="var(--ink)">앱–DB 연결 흐름</text>
+          <text x="1382" y="60" font-size="11" fill="var(--ink)">앱–DB(MySQL) 연결 흐름</text>
           <line x1="1346" y1="74" x2="1372" y2="74" stroke="var(--flow-s3)" stroke-width="3"/>
           <text x="1382" y="78" font-size="11" fill="var(--ink)">앱–S3 연결 흐름</text>
           <line x1="1346" y1="92" x2="1372" y2="92" stroke="var(--cat-stream-stroke)" stroke-width="3"/>
           <text x="1382" y="96" font-size="11" fill="var(--ink)">메시징(MSK) 흐름</text>
-          <line x1="1346" y1="110" x2="1372" y2="110" stroke="var(--ink-muted)" stroke-width="3"/>
-          <text x="1382" y="114" font-size="11" fill="var(--ink)">빌드·배포 / 모니터링 (참고용)</text>
+          <line x1="1346" y1="110" x2="1372" y2="110" stroke="var(--cat-compute-stroke)" stroke-width="3"/>
+          <text x="1382" y="114" font-size="11" fill="var(--ink)">컴포넌트 간 직접 HTTP 호출</text>
+          <line x1="1346" y1="128" x2="1372" y2="128" stroke="var(--ink-muted)" stroke-width="3"/>
+          <text x="1382" y="132" font-size="11" fill="var(--ink)">빌드·배포 / 모니터링 (참고용)</text>
 
           <!-- col1: client / ci-cd -->
           <rect x="30" y="40" width="170" height="44" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
@@ -458,7 +458,7 @@
 
           <rect x="250" y="400" width="190" height="44" rx="6" fill="var(--cat-edge-fill)" stroke="var(--cat-edge-stroke)"/>
           <text x="345" y="422" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">Public ALB</text>
-          <text x="345" y="436" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">team1-alb-api</text>
+          <text x="345" y="436" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">k8s-backend-orderapi-*</text>
 
           <!-- 접수API가 K8s API를 직접 호출하지 않도록 SQS+Lambda로 Job 생성 권한을 분리 (동재님 지적: 외부 노출 컴포넌트에 RBAC 권한을 얹으면 공격 표면·blast radius가 커짐) -->
           <rect x="250" y="452" width="190" height="34" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
@@ -470,8 +470,9 @@
           <text x="345" y="520" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1-lambda-job-trigger</text>
 
           <rect x="250" y="600" width="190" height="44" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="345" y="622" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ink)">Secrets Manager</text>
-          <text x="345" y="636" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">team1-secret-rds-credentials</text>
+          <text x="345" y="618" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">Secrets Manager → CSI → K8s Secret</text>
+          <text x="345" y="631" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">team1/backend/mysql-db-url → recorder-db-secret</text>
+          <text x="345" y="643" text-anchor="middle" font-size="8" fill="var(--ink-muted)">Secrets Store CSI Driver로 자동 동기화</text>
 
           <rect x="250" y="700" width="190" height="44" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
           <text x="345" y="722" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ink)">ECR</text>
@@ -516,8 +517,8 @@
           <text x="1145" y="302" text-anchor="middle" font-size="9" fill="var(--ink-muted)">호가창 상태</text>
 
           <rect x="1050" y="458" width="190" height="44" rx="6" fill="var(--cat-data-fill)" stroke="var(--cat-data-stroke)"/>
-          <text x="1145" y="478" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">RDS</text>
-          <text x="1145" y="492" text-anchor="middle" font-size="9" fill="var(--ink-muted)">체결·주문 이력</text>
+          <text x="1145" y="476" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--ink)">MySQL (EC2, 단일)</text>
+          <text x="1145" y="490" text-anchor="middle" font-size="8.5" fill="var(--ink-muted)">체결·주문 이력 · RDS 아님</text>
 
           <!-- MSK: 실제 주문 매칭 경로(접수API→orders→매칭엔진→executions→기록기)만 지난다. 시세수집기·AI트레이더는 카프카를 쓰지 않고 S3로 직접 주고받는다 -->
           <rect x="1050" y="352" width="190" height="90" rx="6" fill="var(--cat-stream-fill)" stroke="var(--cat-stream-stroke)"/>
@@ -598,7 +599,7 @@
 
             <!-- SecretsManager → 기록기: 왼쪽 여백 lane(x=530) 재사용 -->
             <path d="M440,622 L520,622 Q530,622 530,612 L530,489 Q530,479 540,479 L578,479" marker-end="url(#arrow2)"/>
-            <text x="534" y="600" font-size="8.5" fill="var(--flow-db)" class="lbl">RDS 자격증명</text>
+            <text x="534" y="600" font-size="8.5" fill="var(--flow-db)" class="lbl">MySQL 자격증명(Secret mount)</text>
           </g>
 
           <!-- ===== edges: app-s3 (amber) ===== -->
@@ -618,9 +619,9 @@
             <path d="M1330,415 L1310,415 Q1300,415 1300,425 L1300,621 Q1300,631 1290,631 L782,631" marker-end="url(#arrow2)"/>
             <text x="1296" y="520" text-anchor="end" font-size="9.5" fill="var(--flow-s3)" class="lbl">GetObject</text>
 
-            <!-- S3 시세원본 → AI트레이더(GetObject, 역방향): 카프카를 안 쓰므로 세션 시작 시 S3에서 직접 읽는다. x=1260 lane(주문기록 lane보다 왼쪽 — 위 화살표와 꼬이지 않게). MSK 박스(y=352~442)를 그대로 가로지르면 안 되므로 Redis-MSK 사이 빈 틈(y=340)까지 올라갔다가 900~1050 여백에서 다시 AI트레이더 높이(y=410)로 내려간다 -->
-            <path d="M1330,556 L1270,556 Q1260,556 1260,546 L1260,350 Q1260,340 1250,340 L1010,340 Q1000,340 1000,350 L1000,400 Q1000,410 990,410 L782,410" marker-end="url(#arrow2)"/>
-            <text x="1256" y="450" text-anchor="end" font-size="9" fill="var(--flow-s3)" class="lbl">GetObject</text>
+            <!-- 시세수집기 → AI트레이더: S3도 Kafka도 아니고 시세수집기가 내는 매니페스트/파일 API를 AI트레이더가 HTTP로 직접 풀(pull)한다(requirements.md 2026-08-12 정정, 실측 collector ALB /v1/* 경로와 일치). col3 내부 우회(x=960) — 기록기 행을 관통하지 않게 오른쪽 여백을 돈다 -->
+            <path d="M782,555 L950,555 Q960,555 960,545 L960,420 Q960,410 950,410 L782,410" stroke="var(--cat-compute-stroke)" marker-end="url(#arrow2)"/>
+            <text x="964" y="480" font-size="8.5" fill="var(--cat-compute-stroke)" class="lbl">HTTP GET (매니페스트/파일 API)</text>
 
             <!-- 기록기 → S3 체결결과: trade-results(458~502)와 market-data(534~578) 사이 32px 틈의 정중앙(y=518)으로 우회해서 RDS를 관통하지 않는다 -->
             <path d="M780,495 L810,495 Q820,495 820,505 L820,508 Q820,518 830,518 L1480,518 Q1490,518 1490,508 L1490,502" marker-end="url(#arrow2)"/>
@@ -657,16 +658,16 @@
 
           <!-- ===== 모니터링 (횡단 관심사 — 4개 네임스페이스 전체가 보내지만, 워크로드별로 그으면 선이 난립해서 하나로 요약) ===== -->
           <rect x="780" y="710" width="150" height="40" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="855" y="726" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">AMP</text>
-          <text x="855" y="740" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-amp-truss</text>
+          <text x="855" y="724" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Prometheus (EC2)</text>
+          <text x="855" y="737" text-anchor="middle" font-size="8" fill="var(--ink-muted)">team1-monitoring:9090</text>
 
           <rect x="950" y="710" width="150" height="40" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
-          <text x="1025" y="726" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">AMG</text>
-          <text x="1025" y="740" text-anchor="middle" font-size="9" fill="var(--ink-muted)">team1-amg-truss</text>
+          <text x="1025" y="724" text-anchor="middle" font-size="10" font-weight="700" fill="var(--ink)">Grafana (같은 EC2)</text>
+          <text x="1025" y="737" text-anchor="middle" font-size="8" fill="var(--ink-muted)">:80/:3000, AMP/AMG 아님</text>
 
           <g stroke="var(--ink-muted)" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" opacity="0.55" fill="none">
             <path d="M750,692 L780,726" marker-end="url(#arrow2)"/>
-            <text x="635" y="705" font-size="9" fill="var(--ink-muted)" class="lbl">지표·로그 (4개 네임스페이스 전체)</text>
+            <text x="635" y="705" font-size="9" fill="var(--ink-muted)" class="lbl">스크레이프 (전 네임스페이스)</text>
 
             <line x1="930" y1="730" x2="948" y2="730" marker-end="url(#arrow2)"/>
           </g>
@@ -843,11 +844,13 @@
           <tr><th>네임스페이스</th><th>워크로드</th><th class="name">컴퓨트</th><th>실행 모델</th><th>격리 근거</th></tr>
         </thead>
         <tbody>
-          <tr><td><span class="tag compute">backend</span></td><td>매칭엔진</td><td class="name">team1-eks-ng-backend</td><td>Deployment, KEDA 파드 스케일링 + Karpenter 노드 스케일링</td><td>처리량에 따라 자동 확장</td></tr>
-          <tr><td><span class="tag compute">backend</span></td><td>접수API · 기록기</td><td class="name">team1-eks-ng-backend</td><td>Deployment (상시, EC2 taint)</td><td>성능 측정 대상 — 예측 가능한 CPU 필요</td></tr>
-          <tr><td><span class="tag compute">collector</span></td><td>시세수집기</td><td class="name">team1-eks-fp-collector</td><td>Deployment ×1</td><td>replicas 고정</td></tr>
-          <tr><td><span class="tag compute">ai-trader</span></td><td>AI 트레이더</td><td class="name">team1-eks-fp-aitrader</td><td>Job (세션 단위)</td><td>부하 생성 주체, 유휴 비용 없음</td></tr>
-          <tr><td><span class="tag compute">replay</span></td><td>리플레이엔진</td><td class="name">team1-eks-fp-replay</td><td>Job (세션 단위)</td><td>측정 대상과 자원 완전 분리</td></tr>
+          <tr><td><span class="tag compute">backend</span></td><td>매칭엔진</td><td class="name">Karpenter NodePool team1-backend (c6i.large)</td><td>Deployment, KEDA(min2/max10, Prometheus 트리거)</td><td>Karpenter 노드풀(접수API와 공유), 파드는 KEDA로 자동 확장</td></tr>
+          <tr><td><span class="tag compute">backend</span></td><td>접수API(orderapi)</td><td class="name">Karpenter NodePool team1-backend (c6i.large)</td><td>Deployment, KEDA 미적용(고정)</td><td>매칭엔진과 같은 노드풀, taint=workload:backend</td></tr>
+          <tr><td><span class="tag compute">backend</span></td><td>기록기(recorder)</td><td class="name">Karpenter NodePool team1-recorder (c6i.xlarge)</td><td>Deployment, KEDA(min2/max10, Prometheus 트리거)</td><td>매칭엔진·접수API와 분리된 전용 노드풀, taint=workload:recorder. CPU 한도 8 vCPU(team1-backend는 160)</td></tr>
+          <tr><td><span class="tag neutral">kube-system</span></td><td>CoreDNS·ALB컨트롤러·Karpenter·KEDA 등</td><td class="name">team1-ng-system (t3.medium ×2 고정)</td><td>Deployment, taint 없음</td><td>워크로드와 분리된 시스템 전용 노드그룹</td></tr>
+          <tr><td><span class="tag compute">collector</span></td><td>시세수집기</td><td class="name">team1-fp-collector</td><td>Deployment ×1</td><td>replicas 고정, 별도 Public ALB로 HTTP API 노출</td></tr>
+          <tr><td><span class="tag compute">ai-trader</span></td><td>AI 트레이더</td><td class="name">team1-fp-aitrader</td><td>Job (세션 단위)</td><td>부하 생성 주체, 유휴 비용 없음</td></tr>
+          <tr><td><span class="tag compute">replay</span></td><td>리플레이엔진</td><td class="name">team1-fp-replay</td><td>Job (세션 단위)</td><td>측정 대상과 자원 완전 분리</td></tr>
         </tbody>
       </table>
     </div>
@@ -860,140 +863,100 @@
         <table>
           <thead><tr><th class="name">버킷</th><th>쓰기</th><th>읽기</th></tr></thead>
           <tbody>
-            <tr><td class="name">team1-truss-market-data</td><td>시세수집기</td><td>AI트레이더</td></tr>
+            <tr><td class="name">team1-truss-market-data</td><td>시세수집기</td><td>— (AI트레이더는 HTTP로 직접 pull, S3 안 읽음)</td></tr>
             <tr><td class="name">team1-truss-order-records</td><td>AI트레이더</td><td>리플레이엔진</td></tr>
             <tr><td class="name">team1-truss-trade-results</td><td>기록기</td><td>—</td></tr>
             <tr><td class="name">team1-truss-frontend</td><td>CI/CD</td><td>CloudFront(OAC)</td></tr>
+            <tr><td class="name">team1-monitoring-config</td><td>운영자</td><td>team1-monitoring EC2(Prometheus 설정)</td></tr>
+            <tr><td class="name">team1-mysql-config</td><td>운영자</td><td>team1-mysql EC2(초기화 스크립트)</td></tr>
+            <tr><td class="name">team1-terraform-state-s3</td><td>Terraform</td><td>—(IaC 상태, 앱 무관)</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
     <section id="sgtable">
-      <h2>6. Security Group</h2>
+      <h2>6. Security Group (실측)</h2>
       <div class="table-scroll">
         <table>
           <thead><tr><th class="name">소스</th><th class="name">대상</th><th>포트</th></tr></thead>
           <tbody>
-            <tr><td class="name">sg-eks-backend</td><td class="name">sg-rds</td><td>3306</td></tr>
-            <tr><td class="name">sg-eks-backend</td><td class="name">sg-redis</td><td>6379</td></tr>
-            <tr><td class="name">sg-eks-backend</td><td class="name">sg-msk</td><td>9098 (IAM)</td></tr>
-            <tr><td class="name">sg-alb-public</td><td class="name">sg-eks-backend</td><td>접수API 포트</td></tr>
-            <tr><td class="name">sg-eks-collector</td><td class="name">0.0.0.0/0 (NAT 경유)</td><td>443 (업비트 API)</td></tr>
-            <tr><td class="name">sg-lambda-job-trigger</td><td class="name">EKS 프라이빗 엔드포인트</td><td>443 (K8s API)</td></tr>
+            <tr><td class="name">team1-sg-eks-backend</td><td class="name">team1-sg-mysql-ec2</td><td>3306</td></tr>
+            <tr><td class="name">team1-sg-eks-backend</td><td class="name">team1-sg-redis</td><td>6379</td></tr>
+            <tr><td class="name">team1-sg-alb-public</td><td class="name">team1-sg-eks-backend</td><td>8081(orderapi)/8082(recorder)/8080(collector)</td></tr>
+            <tr><td class="name">team1-sg-eks-backend</td><td class="name">team1-sg-msk</td><td>9098(IAM)</td></tr>
+            <tr><td class="name">team1-sg-lambda-job-trigger</td><td class="name">EKS 프라이빗 엔드포인트</td><td>443 (K8s API)</td></tr>
+            <tr><td class="name">team1-sg-vpc-endpoints</td><td class="name">Interface Endpoint 6종</td><td>443</td></tr>
+            <tr><td class="name">인터넷</td><td class="name">team1-sg-monitoring</td><td>공개 IP 직접 노출(모니터링 EC2)</td></tr>
           </tbody>
-        </table>
+          </table>
       </div>
+      <p style="font-size:11.5px;color:var(--ink-muted);margin:8px 4px 0;">collector/aitrader/replay 전용 SG는 실측상 존재하지 않음 — Fargate 워크로드가 team1-sg-eks-backend를 공유하거나 EKS 기본 SG를 씀.</p>
     </section>
   </div>
 
   <section id="names">
-    <h2>7. 리소스 명명 참조</h2>
+    <h2>7. 리소스 명명 참조 (실측)</h2>
     <div class="table-scroll">
       <table>
         <thead><tr><th>분류</th><th class="name">리소스명</th></tr></thead>
         <tbody>
-          <tr><td><span class="tag neutral">네트워크</span></td><td class="name">team1-vpc · team1-public-a/b · team1-private-compute-a/b · team1-private-data-a/b/d · team1-igw · team1-natgw-a/b · team1-vpce-s3</td></tr>
-          <tr><td><span class="tag compute">컴퓨트</span></td><td class="name">team1-eks · team1-eks-ng-backend · team1-eks-fp-collector/aitrader/replay · team1-ecr-truss</td></tr>
-          <tr><td><span class="tag compute">Job 트리거</span></td><td class="name">team1-sqs-job-trigger · team1-lambda-job-trigger · team1-sg-lambda-job-trigger · team1-vpce-sqs</td></tr>
-          <tr><td><span class="tag data">데이터</span></td><td class="name">team1-rds-truss · team1-rds-subnet-group · team1-redis-truss · team1-msk-truss</td></tr>
-          <tr><td><span class="tag data">저장소</span></td><td class="name">team1-truss-market-data / order-records / trade-results / frontend</td></tr>
-          <tr><td><span class="tag edge">엣지</span></td><td class="name">team1-cf-frontend · team1-alb-api · team1-tg-api · team1-acm-cloudfront · team1-acm-alb · team1-waf-alb</td></tr>
-          <tr><td><span class="tag neutral">보안</span></td><td class="name">team1-sg-eks-backend/collector/aitrader/replay · team1-sg-rds/redis/msk/alb-public · team1-secret-rds-credentials</td></tr>
-          <tr><td><span class="tag neutral">모니터링</span></td><td class="name">team1-alarm-rds-cpu/redis-cpu/msk-health/alb-5xx/nodegroup-health · team1-sns-alerts · team1-amp-truss · team1-amg-truss</td></tr>
+          <tr><td><span class="tag neutral">네트워크</span></td><td class="name">team1-vpc · team1-public-a/b · team1-eks-backend/collector/aitrader/replay-a/b · team1-data-a/b/d · team1-igw · team1-natgw-a/b</td></tr>
+          <tr><td><span class="tag compute">컴퓨트</span></td><td class="name">team1-eks(v1.36) · team1-ng-system · Karpenter NodePool team1-backend/team1-recorder · team1-fp-collector/aitrader/replay</td></tr>
+          <tr><td><span class="tag compute">Job 트리거</span></td><td class="name">team1-sqs-job-trigger(+dlq) · team1-lambda-job-trigger · team1-sg-lambda-job-trigger · team1-sqs-karpenter-interruption</td></tr>
+          <tr><td><span class="tag data">데이터</span></td><td class="name">team1-mysql(EC2, RDS 아님) · team1-truss-redis · team1-truss-msk</td></tr>
+          <tr><td><span class="tag neutral">시크릿</span></td><td class="name">team1/backend/mysql-db-url · team1/monitoring/grafana-admin(삭제됨) · csi-secrets-store(Helm) · csi-secrets-store-provider-aws</td></tr>
+          <tr><td><span class="tag data">저장소</span></td><td class="name">team1-truss-market-data / order-records / trade-results / frontend / monitoring-config / mysql-config / terraform-state-s3</td></tr>
+          <tr><td><span class="tag edge">엣지</span></td><td class="name">CloudFront(truss.jhyang.click, 이름 없음) · k8s-backend-orderapi-* ALB · k8s-collecto-backend-* ALB · jhyang.click 와일드카드 ACM · team1-waf-alb</td></tr>
+          <tr><td><span class="tag neutral">보안</span></td><td class="name">team1-sg-eks-backend/alb-public/mysql-ec2/redis/msk/monitoring/lambda-job-trigger/vpc-endpoints</td></tr>
+          <tr><td><span class="tag neutral">모니터링</span></td><td class="name">team1-alarm-alb-5xx-orderapi/collector · team1-alarm-redis-cpu-001/002 · team1-alarm-msk-health · team1-alarm-mysql-ec2-cpu · team1-alarm-nodegroup-health · team1-sns-alerts</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
-  <section id="tradeoffs">
-    <h2>8. 설계 근거 · 트레이드오프</h2>
+  <section id="realitynotes">
+    <h2>8. 실측 인프라 노트</h2>
+    <p style="font-size:12.5px;color:var(--ink-muted);margin:0 0 20px;">AWS CLI(<span class="mono">aws sts/ec2/eks/rds/elasticache/elbv2/cloudfront/route53/wafv2/acm/sqs/lambda/s3/ecr/cloudwatch/sns/secretsmanager/kms</span>)와 <span class="mono">kubectl</span>로 직접 조회해 확인한 사실만 적었다. 완전성은 <span class="mono">resourcegroupstaggingapi get-resources</span>로 <span class="mono">Team=team1</span> 태그가 붙은 리소스 전체(약 40개 서비스·유형, fleet 이력 제외 160여 개)를 한 번에 뽑아 서비스별로 대조하는 방식으로 확인했다 — 개별 서비스 API만 훑어서는 놓쳤던 항목(아래 Secrets Manager, RDS 스냅샷 등)이 이 방법으로 드러났다. 설계 의도·근거가 아니라 지금 이 순간 배포된 상태의 기록이며, 서로 다른 조회 결과가 충돌할 때는 더 최근에 조회한 값을 우선했다(예: MSK 브로커 주소).</p>
 
-    <h3 style="font-size:15px;margin:0 0 8px;">AZ 구성 — 컴퓨트 2AZ, 데이터만 3AZ</h3>
+    <h3 style="font-size:15px;margin:0 0 8px;">RDS 대신 EC2 자체 MySQL — 과거엔 RDS가 있었다</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">현재 RDS 인스턴스·클러스터는 계정에 team1 리소스로 하나도 없다(<span class="mono">describe-db-instances</span>/<span class="mono">describe-db-clusters</span> 둘 다 빈 결과). 대신 <span class="mono">team1-mysql</span> EC2(m6i.2xlarge, ap-northeast-2a 단일 인스턴스)에 MySQL을 직접 설치해 운영 중이다. Multi-AZ·자동 백업·자동 페일오버 등 RDS의 관리형 기능은 전혀 없다. 다만 <span class="mono">team1-rds-final-before-subnet-migration</span>이라는 RDS 스냅샷이 아직 남아 있어(태그 전수조사로 발견) — 이름 그대로 서브넷 마이그레이션 직전에 RDS가 실제로 존재했고, 그 시점에 최종 스냅샷을 뜬 뒤 삭제했다는 걸 보여준다. <span class="mono">team1-data-d</span> 서브넷(10.10.52.0/24)이 그 RDS 3번째 노드용이었던 흔적이다.</p>
+
+    <h3 style="font-size:15px;margin:20px 0 8px;">Secrets Manager — 2026-08-27, K8s Secret에서 다시 전환</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">처음엔 "미사용"이라고 적었는데, <span class="mono">list-secrets</span> 결과만 봐서 그랬다 — 태그 전수조사로 <span class="mono">team1/backend/secrets</span>·<span class="mono">team1/monitoring/grafana-admin</span> 두 시크릿이 <span class="mono">DeletedDate: 2026-07-28</span>로 삭제 처리돼 있는 걸 발견했다(생성 7/22·7/27, 삭제 7/28 — RDS→EC2 MySQL와 같은 시기의 "관리형에서 자체 운영으로" 흐름). 이후 팀 요청으로 Secrets Manager를 다시 도입했다: 현재 DB 접속 문자열을 <span class="mono">team1/backend/mysql-db-url</span> 시크릿으로 새로 생성하고, Secrets Store CSI Driver(+ AWS provider)를 설치해 <span class="mono">recorder-db-secret</span> K8s Secret을 여기서 자동 동기화하도록 전환했다. <span class="mono">team1-sa-recorder</span> IRSA 역할에 <span class="mono">secretsmanager:GetSecretValue</span> 정책을 추가했고, recorder Deployment에 CSI 볼륨 마운트를 붙여 두 파드 모두 무중단 롤링 재시작으로 전환 완료했다(재시작 후 0회 재기동, 정상 기동 로그 확인). 앱 코드·env var 이름은 바뀌지 않았다 — K8s Secret이 이제 AWS가 채워주는 것으로 바뀌었을 뿐이다.</p>
+
+    <h3 style="font-size:15px;margin:20px 0 8px;">태그 전수조사로 추가 확인된 것</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">Elastic IP 3개(<span class="mono">team1-nat-eip-a/b</span> — NAT용, <span class="mono">team1-eip-monitoring</span> — team1-monitoring EC2의 공인 IP 43.202.105.104). EKS 애드온 4종(<span class="mono">amazon-cloudwatch-observability, coredns, kube-proxy, vpc-cni</span> — aws-load-balancer-controller와 karpenter는 애드온이 아니라 별도 Deployment로 설치됨). backend 네임스페이스 IRSA 역할 4개(<span class="mono">team1-sa-ingest-api, team1-sa-kafka-admin, team1-sa-matching-engine, team1-sa-recorder</span> — kafka-admin은 이전에 파악 못 했던 역할). <span class="mono">team1-eks-node-system-lt</span> 런치 템플릿, EKS 컨트롤 플레인 로그 그룹(<span class="mono">/aws/eks/team1-eks/cluster</span>) 확인.</p>
+
+    <h3 style="font-size:15px;margin:20px 0 8px;">컴퓨트 — 시스템 노드그룹과 Karpenter는 별개</h3>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>항목</th><th>내용</th></tr></thead>
+        <thead><tr><th>리소스</th><th class="name">실측값</th><th>비고</th></tr></thead>
         <tbody>
-          <tr><td>목표 우선순위</td><td>현업 수준 HA를 1순위, 비용은 2순위(공유 계정) — 단 AZ 구성만 예외로 비용을 고려</td></tr>
-          <tr><td>데이터 계층 3AZ</td><td>RDS Multi-AZ DB 클러스터는 3AZ 배포가 하드 제약이라 선택지가 없음</td></tr>
-          <tr><td>컴퓨트 계층 2AZ 유지</td><td>NAT·Interface Endpoint·노드그룹은 AZ 수에 비례해 비용 증가(NAT 1개당 약 $43/월) — RDS처럼 강제되지 않는 계층까지 3AZ로 맞출 이유 없음</td></tr>
-          <tr><td>3번째 AZ가 2c 아닌 2d인 이유</td><td>AWS CLI(<span class="mono">describe-orderable-db-instance-options</span>)로 확인한 결과 RDS 시작 클래스 <span class="mono">db.m6gd.large</span>가 Multi-AZ 클러스터 배포 시 2c를 지원하지 않음(2a/2b/2d만 지원)</td></tr>
-          <tr><td>트레이드오프</td><td>컴퓨트 계층은 AZ 1개 장애 시 손실 비율 50%(3AZ 대칭이었다면 33%). RDS만 3노드 구조로 보호되고 나머지 계층은 격리 수준이 낮음 — 팀이 인지하고 감수한 결정</td></tr>
+          <tr><td>관리형 노드그룹</td><td class="name">team1-ng-system, t3.medium, min=max=2(고정), taint 없음</td><td>CoreDNS·aws-node·ALB컨트롤러·Karpenter컨트롤러·KEDA·CSI 드라이버 등 시스템 파드 전용 — 워크로드는 여기서 안 돎</td></tr>
+          <tr><td>Karpenter NodePool #1</td><td class="name">team1-backend, c6i.large, taint=workload:backend</td><td>CPU 160 vCPU 한도, 매칭엔진·접수API만 여기서 실행(현재 3대)</td></tr>
+          <tr><td>Karpenter NodePool #2</td><td class="name">team1-recorder, c6i.xlarge(4vCPU/8GiB), taint=workload:recorder</td><td>CPU 8 vCPU 한도, 기록기 전용 — team1-backend와 분리된 별도 노드풀(현재 2대). 이전엔 셋이 한 풀을 공유한다고 파악했으나 그 사이 팀이 분리한 것으로 보임</td></tr>
+          <tr><td>Karpenter 축소 정책</td><td class="name">consolidateAfter 5m, WhenEmptyOrUnderutilized</td><td>5분 이상 비거나 저활용인 노드를 자동 통합·제거, 1회 최대 전체 노드의 10%까지만</td></tr>
+          <tr><td>Karpenter 노드 만료</td><td class="name">expireAfter 720h(30일)</td><td>30일마다 강제 교체</td></tr>
+          <tr><td>Fargate Profile</td><td class="name">team1-fp-collector / team1-fp-aitrader / team1-fp-replay</td><td>Terraform 명명은 team1-eks-fp-*였으나 실제로는 eks- 접두사 없음</td></tr>
         </tbody>
       </table>
     </div>
 
-    <h3 style="font-size:15px;margin:20px 0 8px;">인스턴스 클래스 선정 근거</h3>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>리소스</th><th class="name">클래스</th><th>근거</th></tr></thead>
-        <tbody>
-          <tr><td>EKS 백엔드 컴퓨트</td><td class="name">시스템 노드그룹(t3.medium 고정 2대, CoreDNS 등 상주) + Karpenter NodePool(c6i.large, On-Demand 전용, CPU 합산 상한 160)</td><td>NFR-01/02(초당 1만 건) 측정 대상 자체라 버스터블(t계열) 배제 — 크레딧 고갈 패턴이 아니라 실제 시스템 성능을 측정해야 함. compute-optimized 중 최소 사이즈. Cluster Autoscaler 대신 Karpenter로 전환 완료(11장) — 미리 정한 min/max 대신 실제 파드 리소스 요청 기준으로 노드를 즉시 프로비저닝/정리</td></tr>
-          <tr><td>RDS</td><td class="name">db.m6gd.large</td><td>Multi-AZ DB 클러스터는 로컬 NVMe "d" 계열에서만 지원(AWS CLI로 확인) — 애초 검토했던 db.r6g.large는 클러스터 배포 자체를 지원하지 않음. "d" 계열 중 가장 저렴한 클래스로 시작, 부족하면 db.r8gd.large로 상향</td></tr>
-          <tr><td>ElastiCache Redis</td><td class="name">cache.t4g.medium</td><td>20개 마켓 호가창은 데이터량이 작아 메모리 최적화·샤딩 불필요 — 범용 거쳐 버스터블까지 하향. 트레이드오프: 크레딧 소진 시 지연 튈 수 있어 리플레이 고배속 구간에서 CPU 크레딧 사용률을 부하 시험으로 관찰 예정</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <h3 style="font-size:15px;margin:20px 0 8px;">파드 단위 오토스케일링(KEDA)</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">matching-engine</span>(min 2 / max 10)과 <span class="mono">recorder</span>(min 2 / max 10, 재확인 시점 기준 — 이전 확인 때는 min 1이었음) 둘 다 KEDA ScaledObject가 붙어 있고 트리거는 Prometheus 쿼리다. <span class="mono">orderapi</span>는 KEDA 대상이 아니다.</p>
 
-    <h3 style="font-size:15px;margin:20px 0 8px;">NAT / VPC 엔드포인트</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0;">NAT Gateway는 AZ당 1개(총 2개) — 컴퓨트 계층을 3AZ로 확장하지 않기로 한 결정에 맞춰 2개 유지, 실질 용도는 시세수집기→업비트 아웃바운드뿐이다. S3는 Gateway Endpoint(무료)로 NAT 없이 처리하고, ECR·CloudWatch Logs·STS·Bedrock Runtime·SQS는 Interface Endpoint로 2a/2b에 배치해 NAT 장애가 배포·로그·Job 트리거까지 막지 않게 한다.</p>
-  </section>
+    <h3 style="font-size:15px;margin:20px 0 8px;">모니터링 — 관리형 AMP/AMG 아님, EC2 하나에 Prometheus+Grafana 동거</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">team1-monitoring</span> EC2(t3.medium) 보안그룹 규칙에 "Prometheus"(9090), "Grafana"(80, 3000) 설명이 그대로 박혀 있어 확인했다 — Prometheus와 Grafana가 같은 인스턴스에서 같이 뜬다. <span class="mono">monitor.jhyang.click</span>이 이 인스턴스의 공인 IP(43.202.105.104)를 직접 가리킨다. 반면 Route53의 <span class="mono">grafana.jhyang.click</span> 레코드는 <span class="mono">k8s-team1shared-*</span> ALB를 가리키는데, 그 ALB는 계정에 더 이상 존재하지 않는다 — 예전엔 K8s 위에서 Grafana를 돌리다가 지금의 EC2 방식으로 옮기면서 이 레코드를 정리하지 않은 것으로 보이는, 실질적으로 끊긴 링크다.</p>
 
-  <section id="jobtrigger">
-    <h2>9. Job 트리거 상세 — SQS + Lambda</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>항목</th><th>내용</th></tr></thead>
-        <tbody>
-          <tr><td>문제</td><td>접수API(Public ALB 뒤 외부 노출, HPA 스케일아웃 가능)가 K8s API를 직접 호출해 Job을 생성 → 노출 컴포넌트가 클러스터 RBAC 권한을 보유, 공격 표면·blast radius 확대</td></tr>
-          <tr><td>개편</td><td>접수API에서 Job 생성 권한(RBAC) 제거, SQS 발행 권한만 부여</td></tr>
-          <tr><td>흐름</td><td>접수API → SQS(team1-sqs-job-trigger) 발행 → Lambda(team1-lambda-job-trigger, VPC 연결)가 이벤트소스매핑으로 소비 → EKS 프라이빗 엔드포인트 호출해 Job 생성</td></tr>
-          <tr><td>Job 구분</td><td>메시지 본문의 job_type으로 AI트레이더 Job / 리플레이 Job 분기 생성</td></tr>
-          <tr><td>권한 범위</td><td>Lambda 전용 IAM 역할 → EKS 액세스 엔트리로 매핑, 특정 네임스페이스 create-only(최소 권한)</td></tr>
-          <tr><td>효과</td><td>클러스터 변경 권한 보유 주체 = Lambda 단일 지점. 접수API 스케일아웃·침해와 무관하게 Job 생성 권한 없음</td></tr>
-          <tr><td>SQS를 끼우는 이유</td><td>세션 시작 요청이 몰릴 때 접수API 응답 시간과 Lambda/EKS API 호출 속도를 분리(버스트 완충), 실패 시 재시도·내구성을 SQS가 대신 보장, 접수API는 Lambda 가용성에 의존하지 않음</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+    <h3 style="font-size:15px;margin:20px 0 8px;">시세 전달 경로 — Kafka도 S3도 아니고 HTTP pull</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">AI트레이더는 시세수집기가 내는 매니페스트/파일 API를 HTTP로 직접 호출해서 시세를 받는다. 시세수집기는 <span class="mono">team1-truss-market-data</span> 버킷에도 원본을 쓰지만, 이건 보관용이고 AI트레이더가 실시간으로 읽는 경로가 아니다. 시세수집기는 자체 Public ALB(<span class="mono">truss-collector.jhyang.click</span>)로도 노출되며, CloudFront(<span class="mono">truss.jhyang.click</span>)가 <span class="mono">/v1/*</span> 경로를 여기로 라우팅한다.</p>
 
-  <section id="aibots">
-    <h2>10. AI 트레이더 봇 설계 요약</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>봇</th><th>LLM 사용</th><th>판단 기준</th></tr></thead>
-        <tbody>
-          <tr><td>마켓메이커</td><td><span class="tag neutral">규칙 기반</span></td><td>항상 매수·매도 동시 호가, 체결되면 즉시 재호가(취소 후 재호가하는 유일한 봇)</td></tr>
-          <tr><td>노이즈</td><td><span class="tag neutral">규칙 기반</span></td><td>고정 확률로 발동, 방향·가격·수량 모두 무작위 소량</td></tr>
-          <tr><td>대량주문</td><td><span class="tag neutral">규칙 기반</span></td><td>낮은 확률로 발동, 발동 시 훨씬 큰 수량(부분 체결 검증 목적)</td></tr>
-          <tr><td>모멘텀추종</td><td><span class="tag compute">LLM(Bedrock)</span></td><td>"추세인가 아닌가" 정성적 판단 — 최근 가격 변화율·캔들 데이터를 프롬프트에 계산해 전달</td></tr>
-          <tr><td>평균회귀</td><td><span class="tag compute">LLM(Bedrock)</span></td><td>"과열인가 아닌가" 정성적 판단 — 이동평균 대비 이격도를 프롬프트에 계산해 전달</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <ul style="font-size:13.5px;color:var(--ink-muted);margin:14px 0 0;padding-left:20px;">
-      <li>판단 주기와 주문 생성 주기는 별개 — 봇은 최신 방향 신호(공유 상태)를 계속 갱신하고, 주문 생성 로직은 그 상태를 자기 루프 주기로 읽어 주문을 만든다. Claude 호출 지연(수 초)이 주문 생성 속도에 영향을 주지 않기 위함</li>
-      <li>호가창은 AI 트레이더가 아니라 매칭엔진이 만든다 — 접수API가 발행한 주문을 매칭엔진이 체결하며 Redis에 반영, 접수API가 조회 응답으로 돌려준다</li>
-      <li>Bedrock 모델: 기본 claude-sonnet-5, 비용 부담 시 claude-haiku-4-5로 하향. 역할 프로필(persona, 고정)은 프롬프트 캐싱 대상</li>
-      <li>Bedrock 호출 권한(IRSA)은 ai-trader 네임스페이스 서비스 어카운트에만 부여(최소 권한)</li>
-    </ul>
-  </section>
+    <h3 style="font-size:15px;margin:20px 0 8px;">진입점 — CloudFront 하나가 경로 기반으로 전부 라우팅</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">truss.jhyang.click</span> CloudFront 배포 하나가 기본 경로(S3 프론트엔드), <span class="mono">/order-api/*</span>·<span class="mono">/recorder-api/*</span>(접수API ALB), <span class="mono">/v1/*</span>(시세수집기 ALB)를 CloudFront Function으로 접두사를 벗겨가며 라우팅한다. WAF(<span class="mono">team1-waf-alb</span>)는 CloudFront가 아니라 두 ALB에 직접 붙어 있다(<span class="mono">get-web-acl-for-resource</span>로 확인, CloudFront의 WebACL은 빈 값). ACM 인증서는 "team1-acm-*"라는 별도 이름이 아니라 <span class="mono">jhyang.click</span> 와일드카드 인증서 하나를 리전별로 재사용한다.</p>
 
-  <section id="openitems">
-    <h2>11. 남은 결정 사항</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>항목</th><th>상태</th></tr></thead>
-        <tbody>
-          <tr><td>Bedrock 모델의 ap-northeast-2 가용 여부</td><td>미확인 — 크로스 리전 추론 프로파일 필요 시 IRSA 정책 ARN도 같이 확정</td></tr>
-          <tr><td>분산 트레이싱(X-Ray 등)</td><td>미결 — FR-21 구간별 소요 시간 추적에 AMP/Grafana만으론 부족할 수 있음</td></tr>
-          <tr><td>Karpenter NodePool CPU 상한, RDS/ElastiCache 최종 클래스</td><td>1차 부하 시험 결과로 확정 예정(현재는 시작값)</td></tr>
-          <tr><td>리플레이 엔진 마켓 단위 병렬 실행</td><td>논의 중 — 매칭엔진 호가창이 마켓별 독립이라 마켓 단위 병렬 Job이 자연스러운 경계. 락 키를 세션 단위에서 세션+마켓 단위로 바꾸는 안 검토 중</td></tr>
-          <tr><td>주문 기록 파일 병합/분할 책임</td><td>미정 — 현재는 파드(봇 인스턴스) 단위 시간순 파일. 마켓 단위 병렬 리플레이를 하려면 마켓별 재그룹핑이 필요, 트레이더가 세션 종료 시 할지 리플레이 엔진이 읽을 때 할지 미확정</td></tr>
-          <tr><td>ACM 인증서 발급/도메인 확정</td><td>진행 중 — team1-acm-cloudfront(CloudFront용, us-east-1), team1-acm-alb(접수API ALB용, ap-northeast-2) 명명만 확정, 실제 발급·다이어그램 표기는 미완료</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <h3 style="font-size:15px;margin:20px 0 8px;">문서화 안 돼 있던 내부 의존관계</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0;">접수API(orderapi) 파드 환경변수에 <span class="mono">RECORDER_URL=http://recorder:8082</span>가 있다 — Kafka(orders/executions) 경로와 별개로 접수API가 기록기를 K8s 내부 서비스로 직접 HTTP 호출한다. 같은 환경변수 목록에 <span class="mono">ORDER_RECORDS_BUCKET</span>·<span class="mono">PROMETHEUS_URL</span>도 있는데 정확한 용도(주문 기록을 접수API도 쓰는지, Prometheus를 왜 아웃바운드로 호출하는지)는 코드까지 보지 않고는 단정할 수 없어 사실관계만 남겨둔다.</p>
   </section>
 
   <footer class="page">
