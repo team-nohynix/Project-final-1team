@@ -88,6 +88,22 @@ const replayProgressPercent = computed(() => {
   return Math.min(100, Math.round((Number(summary.value.accepted) / total) * 100))
 })
 
+// 남은 시간 — estimatedDurationDisplay(예상 총 소요)에서 이미 지난 시간만큼
+// 뺀 것(2026-08-26 요청). accepted/total 진행률로 역산하지 않고 시간 기반으로
+// 계산하는 이유는, 배속 재생은 실제 이벤트 간격을 그대로 압축한 것이라
+// "지금까지 걸린 시간/전체 예상 시간"이 접수 건수 비율보다 원래도 더
+// 정확한 진행률의 근거이기 때문(estimatedDurationDisplay와 같은 데이터를
+// 재사용).
+const replayRemainingDisplay = computed(() => {
+  if (!preview.value?.maxEventSpanSeconds || !runInfo.value?.startedAt) return ''
+  const speedVal = Number(speed.value) || 1
+  const totalSec = preview.value.maxEventSpanSeconds / speedVal
+  const elapsedSec = (Date.now() - new Date(runInfo.value.startedAt).getTime()) / 1000
+  const remaining = totalSec - elapsedSec
+  if (remaining <= 0) return '거의 완료'
+  return `남은 시간 약 ${formatSecondsToHMS(remaining)}`
+})
+
 async function fetchReplayPreview(date: string) {
   previewError.value = null
   previewLoading.value = true
@@ -206,7 +222,13 @@ function loadFromSession() {
     const ri = sessionStorage.getItem(SS_KEYS.runInfo)
     if (ri) {
       const parsed = JSON.parse(ri)
-      if (parsed) runInfo.value = parsed
+      // 종료 상태(COMPLETED/FAILED/STOPPED)는 복원 안 함 — 새로 접속했는데
+      // 예전에 끝난 실행의 "중지됨"/"완료" 배지가 그대로 남아 있어서 마치
+      // 방금 뭔가 실행한 것처럼 보이는 문제(2026-08-26 제보). 아래
+      // onMounted의 재개 로직도 IN_PROGRESS만 신경 쓰므로, 종료 상태를
+      // 복원해도 실제로 쓰이는 곳이 이 상태 카드 표시뿐이었다 — 과거 결과는
+      // "결과 자세히 보기"(test-results)에서 정식으로 봐야 한다.
+      if (parsed && parsed.status === 'IN_PROGRESS') runInfo.value = parsed
     }
     const sr = sessionStorage.getItem(SS_PREFIX + 'stopRequested')
     if (sr) stopRequested.value = JSON.parse(sr)
@@ -362,7 +384,17 @@ async function stopReplay() {
   }
 }
 
+// pollLastRun은 setInterval(3초)로 불립니다 — 이 안의 fetchRecorderSummary가
+// DB 부하가 커지면 몇 분씩 걸릴 수 있는데, 가드 없이는 매 3초마다 이전 호출이
+// 안 끝난 채로 새 호출이 또 쌓여서 recorder MySQL에 같은 집계 쿼리가 수십 개
+// 동시에 몰리는 사고로 이어진다(2026-08-26 실측 — SHOW PROCESSLIST로 같은
+// orderSummaryByMarket 쿼리가 40개 넘게 겹쳐 실행 중인 것 확인, 이게
+// "집계 조회 실패 500/504" 원인이었음). DashboardView.vue의
+// refreshInFlight/integrityCheckInFlight와 같은 패턴.
+let pollInFlight = false
 async function pollLastRun() {
+  if (pollInFlight) return
+  pollInFlight = true
   try {
     const res = await fetchLastRun()
     if (!res.found) {
@@ -415,6 +447,8 @@ async function pollLastRun() {
     }
   } catch (e: any) {
     errorMessage.value = e.message || String(e)
+  } finally {
+    pollInFlight = false
   }
 }
 
@@ -506,7 +540,6 @@ function goToResults() {
 
         <div class="actions">
           <button class="btn-primary" :disabled="isStarting || isPolling || !canStartReplay" @click="onStart">재생 시작</button>
-          <div v-if="isPolling" style="margin-top:8px;color:#cfe6ff">이미 실행 중입니다 — 재생이 종료될 때까지 기다려주세요.</div>
           <button class="btn-dark" :disabled="isStarting" @click="onPrecheck">사전 점검</button>
           <button
             class="btn-stop"
@@ -522,6 +555,12 @@ function goToResults() {
           <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
           <p v-if="precheckMessage" class="success">{{ precheckMessage }}</p>
           <p v-if="startMessage" class="info">{{ startMessage }}</p>
+          <!-- "이미 실행 중" 문구는 방금 사용자 본인이 시작을 눌러도(그 순간
+               isPolling이 true가 됨) 똑같이 떴다 — "이미"라는 단어가 마치
+               사용자 모르는 다른 실행이 진작부터 돌고 있었던 것처럼 읽혀
+               혼란을 줬다(2026-08-26). 실제 의미는 "지금 재생 중이니 버튼이
+               비활성화됐다"는 안내일 뿐이라 표현만 바꾼다. -->
+          <p v-if="isPolling" class="info">재생이 진행 중입니다 — 종료될 때까지 기다려주세요.</p>
         </div>
       </section>
 
@@ -549,8 +588,8 @@ function goToResults() {
               <div class="preview-main">총 {{ preview.totalOrders.toLocaleString() }}건 재생 예정 · {{ preview.marketsWithRecords }}/{{ preview.marketsTotal }}개 마켓</div>
             </div>
             <div class="preview-line" style="margin-top:8px">
-              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×):</span>
-              <span class="preview-value"> {{ estimatedDurationDisplay }}</span>
+              <span class="preview-label">예상 소요 시간 (배속 {{ speed }}×): </span>
+              <span class="preview-value">{{ estimatedDurationDisplay }}</span>
             </div>
           </div>
 
@@ -576,8 +615,10 @@ function goToResults() {
 
         <div v-if="runInfo?.status === 'IN_PROGRESS' && preview?.totalOrders" class="replay-progress">
           <div class="progress-info">
-            <span>재생 진행률</span>
-            <span class="progress-count">{{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)</span>
+            <span>재생 진행률 </span>
+            <span class="progress-count">
+              {{ (summary?.accepted || 0).toLocaleString() }}/{{ preview.totalOrders.toLocaleString() }}건 ({{ replayProgressPercent }}%)<template v-if="replayRemainingDisplay"> · {{ replayRemainingDisplay }}</template>
+            </span>
           </div>
           <div class="progress-bar-track">
             <div class="progress-bar-fill" :style="{ width: replayProgressPercent + '%' }"></div>

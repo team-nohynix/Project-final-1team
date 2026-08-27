@@ -190,9 +190,18 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 		// 둘 다 기본값(COMPLETED)으로 취급합니다. 세션 반납 자체를 막을 만큼
 		// 중요한 값이 아닙니다.
 		json.NewDecoder(r.Body).Decode(&req)
+		// 2026-08-26 버그 수정: FAILED만 확인하고 STOPPED을 빠뜨려서, 사용자가
+		// "중지" 버튼으로 직접 멈춘 실행(trader/replayengine이 status="STOPPED"로
+		// 보고)도 전부 COMPLETED로 저장되고 있었다 — "실행 결과" 화면에서
+		// Message는 "사용자 요청으로 정지됨"인데 배지는 "정상 종료"로 뜨는
+		// 불일치로 발견됨(Message는 req.Message를 그대로 통과시키니 맞았지만,
+		// Status는 이 분기에서 걸러지지 않아 기본값 COMPLETED로 굳어졌다).
 		outcome := session.RunOutcome{Status: session.RunStatusCompleted, Message: req.Message}
-		if req.Status == session.RunStatusFailed {
+		switch req.Status {
+		case session.RunStatusFailed:
 			outcome.Status = session.RunStatusFailed
+		case session.RunStatusStopped:
+			outcome.Status = session.RunStatusStopped
 		}
 
 		record, finalized, err := store.Release(r.Context(), sessionID, outcome)
@@ -218,6 +227,18 @@ func releaseSessionHandler(store session.Store, producer kafkaclient.Publisher, 
 	}
 }
 
+// windowTimeFormat — 2026-08-27, "주문 유실"/"매수매도 총량 불일치"가 매 실행마다
+// 꼬리에서 몇 건씩 허수로 잡히던 사고 대응. 프론트가 startedAt/endedAt을 그대로
+// recorder의 orders/summary·orders/integrity 쿼리 [from, to) 경계로 씁니다(예:
+// DashboardView.vue/LoadTestReplayView.vue 둘 다 문자열을 그대로 전달) — 그런데
+// time.RFC3339("2006-01-02T15:04:05Z07:00")는 초 단위까지만 표현하는 포맷이라,
+// 실행이 끝나는 바로 그 초에 들어온 주문들(실측: 00:25:10.000~00:25:10.322
+// 사이 13건)이 잘려나가 "유실"로 잘못 잡혔다. trade_order.submitted_at이
+// datetime(3)(밀리초 3자리)이므로 그 정밀도에 맞춘다 — 값이 0이어도(정각) 항상
+// ".000"을 붙여 고정폭으로 만든다(RFC3339Nano는 0일 때 소수점을 아예 생략해서
+// 프론트/쿼리가 파싱 로직을 둘 다 대응해야 하는 번거로움이 생긴다).
+const windowTimeFormat = "2006-01-02T15:04:05.000Z07:00"
+
 // lastRunResponse는 GET /v1/sessions/last-run의 응답 본문입니다 — 프론트의
 // 페이퍼 트레이딩 "실행 결과" 화면이 쓰는 실행 상태/시작·종료 시각/오류
 // 메시지입니다(주문 접수/체결/미체결 수는 recorder의 별도 엔드포인트가 줌 —
@@ -240,13 +261,13 @@ func toLastRunResponse(record session.RunRecord) lastRunResponse {
 		RunID:     record.RunID,
 		Owner:     record.Owner,
 		Status:    record.Status,
-		StartedAt: record.StartedAt.Format(time.RFC3339),
+		StartedAt: record.StartedAt.Format(windowTimeFormat),
 		Message:   record.Message,
 		Speed:     record.Speed,
 		Date:      record.Date,
 	}
 	if !record.EndedAt.IsZero() {
-		resp.EndedAt = record.EndedAt.Format(time.RFC3339)
+		resp.EndedAt = record.EndedAt.Format(windowTimeFormat)
 	}
 	return resp
 }

@@ -2,6 +2,14 @@
 # serverAddress만 AWS 모니터링 EC2(monitor.jhyang.click:9090)에서 클러스터 내부
 # Prometheus(kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090)로
 # 교체, 나머지 트리거/threshold/replica 범위는 실측 근거 그대로 유지.
+#
+# 2026-08-27: AWS 쪽 2026-08-26 후속 수정 2건을 이식 —
+# (1) minReplicaCount>0이면 cooldownPeriod가 아니라 K8s HPA 기본 scaleDown
+#     stabilizationWindowSeconds(300초)가 실제 속도를 결정한다는 걸 확인, 60초로 단축.
+# (2) recorder minReplicaCount 1->2: stabilization window를 60초로 줄였더니 threshold
+#     근처에서 스케일업/다운이 잦아졌고(flapping), min=1이라 그 전환마다 recorder가
+#     순간적으로 0개 파드가 되는 구간이 생겨 recorder-api 502로 이어짐(AWS 실측).
+#     matching-engine이 겪었던 것과 같은 문제라 같은 방법(바닥을 2로)으로 고침.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -12,6 +20,11 @@ spec:
     name: matching-engine
   minReplicaCount: 2
   maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
   triggers:
     - type: prometheus
       metadata:
@@ -34,10 +47,15 @@ metadata:
 spec:
   scaleTargetRef:
     name: recorder
-  minReplicaCount: 1
+  minReplicaCount: 2
   maxReplicaCount: 10
   pollingInterval: 15
   cooldownPeriod: 60
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
   triggers:
     - type: prometheus
       metadata:

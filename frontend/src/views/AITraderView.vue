@@ -469,6 +469,57 @@ const runEndedAt = ref<string | null>(null)
 // run speed observed from last-run (backend may include `speed` in last-run response)
 const runSpeed = ref<number | null>(null)
 
+// 진행률/남은 시간 표시용(2026-08-26 요청). 처음엔 LoadTestReplayView.vue의
+// "예상 소요 시간"처럼 GET .../replay-preview(maxEventSpanSeconds)를 재사용
+//했는데, 이 엔드포인트는 그 날짜에 **과거 트레이더 실행이 이미 남겨둔 주문
+// 기록**(order-records 버킷, orderapi/replaypreview.go의 storage.Load)을
+// 읽는 것이었다 — 리플레이(FR-18, "기록된 주문을 다시 재생")를 위해 만든
+// 것이라 방향이 반대다. 그래서 그 날짜의 첫 페이퍼 트레이딩 실행에서는
+// (미리 볼 과거 기록이 없으니) totalOrders=0으로 나와 남은 시간이 계속
+// 안 보이는 버그가 있었다(실측). 대신 trader/main.go 자체를 근거로 쓴다 —
+// `-date`로 받은 날짜를 KST 캘린더 하루(00:00~24:00, 86400초) 그대로
+// 배속 재생하는 구조라(`end := start.Add(24 * time.Hour)`), 그 날의 실제
+// 시세/주문 기록과 무관하게 항상 86400초/배속이 총 소요 시간이다 — API
+// 호출 없이 결정적으로 계산 가능하다. 다만 시작/종료 시각(startTime/
+// endTime)으로 좁혀서 실행한 경우는 반영하지 못해 추정치가 실제보다 길게
+// 나온다 — 어디까지나 근사치(LoadTestReplayView의 예상 소요 시간과 같은
+// 수준의 근사).
+const SECONDS_PER_KST_DAY = 24 * 60 * 60
+
+function formatSecondsToHMS(secTotal: number) {
+  if (!Number.isFinite(secTotal) || secTotal <= 0) return '0초'
+  const s = Math.floor(secTotal)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sRem = s % 60
+  const parts = []
+  if (h) parts.push(`${h}시간`)
+  if (m) parts.push(`${m}분`)
+  parts.push(`${sRem}초`)
+  return parts.join(' ')
+}
+
+function paperEstimatedTotalSeconds(): number {
+  const speedVal = runSpeed.value || Number(speed.value) || 1
+  return SECONDS_PER_KST_DAY / speedVal
+}
+
+function paperProgressPercent(): number {
+  const total = paperEstimatedTotalSeconds()
+  if (!total || !runStartedAt.value) return 0
+  const elapsedSec = (Date.now() - new Date(runStartedAt.value).getTime()) / 1000
+  return Math.max(0, Math.min(100, Math.round((elapsedSec / total) * 100)))
+}
+
+function paperRemainingDisplay(): string {
+  const total = paperEstimatedTotalSeconds()
+  if (!total || !runStartedAt.value) return ''
+  const elapsedSec = (Date.now() - new Date(runStartedAt.value).getTime()) / 1000
+  const remaining = total - elapsedSec
+  if (remaining <= 0) return '거의 완료'
+  return `남은 시간 약 ${formatSecondsToHMS(remaining)}`
+}
+
 // 유저가 중지(Stop)를 요청했는지 여부 — 폴링이나 새로고침으로 보존되어야 함
 const stopRequested = ref(false)
 // stop 요청이 네트워크로 전송 중인지(중복 클릭 방지)
@@ -1165,10 +1216,21 @@ const resetMatchingEngineBook = async () => {
             <div class="result-spinner"></div>
             <div class="result-title">페이퍼 트레이딩 진행 중</div>
             <div class="result-desc">AI 트레이더가 주문을 생성하고 기록하고 있습니다.</div>
-            <!-- 목표 주문 수가 없어 시세 수집처럼 "N/전체" 퍼센트로는 못 보여준다
-                 (트레이딩 세션은 정지할 때까지 계속 도는 워크로드) — 대신 진행
-                 중임을 보여주는 인디터미닛 바를 시세 수집과 같은 트랙 스타일로 둔다. -->
-            <div class="progress-bar-track indeterminate">
+            <!-- 페이퍼 트레이딩도 사실 그 날짜 하루치 시세를 배속 재생하는
+                 것이라(trader -date, 리플레이와 같은 구조) replay-preview로
+                 전체 예상 시간을 알 수 있다(2026-08-26) — 있으면 실제 퍼센트
+                 진행바+남은 시간을, 프리뷰를 아직 못 받아왔거나 실패했으면
+                 예전처럼 인디터미닛 바로 대체 표시한다. -->
+            <template v-if="paperEstimatedTotalSeconds()">
+              <div class="progress-info">
+                <span>재생 진행률</span>
+                <span class="progress-count">{{ paperProgressPercent() }}%<template v-if="paperRemainingDisplay()"> · {{ paperRemainingDisplay() }}</template></span>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" :style="{ width: paperProgressPercent() + '%' }"></div>
+              </div>
+            </template>
+            <div v-else class="progress-bar-track indeterminate">
               <div class="progress-bar-fill-indeterminate"></div>
             </div>
             <div v-if="typedPaperTradingResult">
@@ -1214,6 +1276,9 @@ const resetMatchingEngineBook = async () => {
                   </tbody>
                 </table>
               </div>
+            </div>
+            <div v-else class="result-desc">
+              페이퍼 트레이딩 준비 중입니다
             </div>
           </template>
 
@@ -1648,6 +1713,7 @@ const resetMatchingEngineBook = async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
 }
 .progress-count {
@@ -1751,8 +1817,6 @@ const resetMatchingEngineBook = async () => {
 }
 .market-table {
   margin-top: 12px;
-  max-height: 420px;
-  overflow-y: auto;
   border-radius: 8px;
   border: 1px solid #163247;
 }

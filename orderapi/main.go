@@ -41,7 +41,30 @@ const (
 // sessionTTL은 세션 락의 Redis 만료 시간입니다 — 클라이언트(trader/replayengine)는
 // 이 값의 1/3 주기로 하트비트를 보내야 하고(session.Client.Claim이 응답에 실어주는
 // ttlSeconds를 그대로 씀), 크래시로 하트비트가 끊기면 이 시간 뒤 자동으로 풀립니다.
-const sessionTTL = 30 * time.Second
+//
+// **30초 → 120초 — 2026-08-27, 정상 완료된 리플레이가 "하트비트 없이 만료"로
+// FAILED 처리되던 사고 대응.** replayengine은 하트비트와 주문 제출(마켓당
+// 고루틴, 최대 20개 동시)이 같은 *http.Client(=같은 커넥션 풀)를 공유한다
+// (submitter.go/main.go 참고). orderapi는 단일 인스턴스라, 가장 큰 마켓(실측
+// XRP, 86,271건) 처리 구간처럼 대량 주문 제출이 몰리는 순간엔 하트비트
+// PUT 요청도 같이 밀려서 30초 TTL을 넘겨 지연될 수 있다 — 클라이언트 쪽에서는
+// "실패"가 아니라 그냥 "느리게 성공"이라 에러 로그도 안 남는데, Redis 쪽
+// activeKey는 이미 만료된 뒤라 그 사이 들어온 GET /v1/sessions/last-run
+// 폴링(대시보드든 운영 확인용이든) 하나가 하필 그 틈을 봐서 세션을 영구
+// FAILED로 확정시켜버렸다(실측: 양쪽 샤드 모두 실제로는 정상 완료·반납
+// 로그를 남겼는데도 최종 상태는 FAILED). 하트비트 주기는 이 값의 1/3이므로
+// 120초로 늘리면 개별 하트비트가 40초까지 지연돼도 여유가 있다 — 크래시
+// 감지가 최대 2분까지 늦어지는 트레이드오프는, 이 프로젝트의 부하테스트
+// 특성(대량 동시 요청이 정상적인 트래픽 패턴) 앞에서는 충분히 감수할 만하다.
+const sessionTTL = 120 * time.Second
+
+// storeSweepInterval/storeSweepMaxAge — order.Store/idempotency.Store 주석 참고
+// (2026-08-27 메모리 축출 사고 대응). maxAge 1시간은 정상적인 취소/멱등 재확인
+// 시나리오보다 넉넉합니다.
+const (
+	storeSweepInterval = 10 * time.Minute
+	storeSweepMaxAge   = 1 * time.Hour
+)
 
 func main() {
 	cfg := LoadConfig()
@@ -50,6 +73,22 @@ func main() {
 
 	store := order.NewStore()
 	idem := idempotency.NewStore()
+	// order.Store/idempotency.Store 둘 다 지금까지 지운 적이 없어 프로세스가
+	// 오래 살아있고 대형 리플레이가 여러 번 돌면(오늘 실측) 무한정 자라 노드
+	// 메모리 축출까지 갔습니다(order.go/idempotency.go 주석 참고, 2026-08-27).
+	// 취소/멱등성 재확인은 실질적으로 최근 주문에서만 일어나므로 넉넉한
+	// maxAge(1시간)로 주기적으로 정리합니다.
+	go func() {
+		ticker := time.NewTicker(storeSweepInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			removedOrders := store.Sweep(storeSweepMaxAge)
+			removedIdem := idem.Sweep(storeSweepMaxAge)
+			if removedOrders > 0 || removedIdem > 0 {
+				log.Printf("메모리 정리: 오래된 주문 %d건, 멱등성 캐시 %d건 제거", removedOrders, removedIdem)
+			}
+		}
+	}()
 	producer, err := kafkaclient.NewOrderProducer(ctx, cfg.KafkaBroker, cfg.OrdersTopic, cfg.KafkaUseIAMAuth)
 	if err != nil {
 		log.Fatalf("주문 프로듀서 생성 실패: %v", err)
@@ -69,12 +108,24 @@ func main() {
 	}
 	defer execConsumer.Close()
 	go func() {
-		err := execConsumer.Run(context.Background(), func(ctx context.Context, ev kafkaclient.ExecutionEvent) error {
-			store.ApplyFill(ev.BuyOrderID, ev.Quantity)
-			store.ApplyFill(ev.SellOrderID, ev.Quantity)
-			return nil
-		})
-		log.Fatalf("executions 컨슈머 종료: %v", err)
+		// Run이 에러로 끝나도(예: MSK가 idle 커넥션을 끊어서 오프셋 커밋이
+		// "use of closed network connection"으로 실패하는 경우, 2026-08-27
+		// 프로덕션에서 정확히 2시간마다 재현 확인됨) 이건 컨슈머 하나의
+		// 일시적 네트워크 문제일 뿐입니다. 예전엔 여기서 log.Fatalf로 프로세스
+		// 전체를 죽였는데, orderapi는 세션 상태를 인메모리로 들고 단일
+		// 인스턴스로만 도는 구조라(위 주석 참고) 재시작되는 짧은 시간 동안
+		// 주문 접수/취소/세션 조회까지 전부 503이 나는 진짜 장애로 번졌습니다.
+		// FetchMessage/CommitMessages는 다음 호출에서 알아서 재연결하므로
+		// Run을 다시 부르기만 하면 복구됩니다.
+		for {
+			err := execConsumer.Run(context.Background(), func(ctx context.Context, ev kafkaclient.ExecutionEvent) error {
+				store.ApplyFill(ev.BuyOrderID, ev.Quantity)
+				store.ApplyFill(ev.SellOrderID, ev.Quantity)
+				return nil
+			})
+			log.Printf("executions 컨슈머 종료, 재연결 후 재시작: %v", err)
+			time.Sleep(2 * time.Second)
+		}
 	}()
 
 	redisOpts := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword}
@@ -174,7 +225,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("Kafka Dialer 생성 실패 (강제 초기화용): %v", err)
 		}
-		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", resetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
+		mux.HandleFunc("POST /v1/admin/reset-matching-engine-book", startResetMatchingEngineBookHandler(redisClient, deployments, matchingEngineDeploymentName, kafkaDialer, cfg.KafkaBroker, cfg.OrdersTopic))
+		mux.HandleFunc("GET /v1/admin/reset-matching-engine-book/status", resetMatchingEngineBookStatusHandler())
 		log.Printf("K8s 연동 활성화 — POST /v1/admin/reset-matching-engine-book 사용 가능 (namespace=%s, deployment=%s)", matchingEngineNamespace, matchingEngineDeploymentName)
 	}
 

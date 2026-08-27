@@ -14,7 +14,7 @@ func TestLocalStorageSaveLoadRoundTrip(t *testing.T) {
 	batch := BatchFile{Market: "KRW-BTC", Range: toRange(start, end), Candles: BatchCandles{
 		Days: []CandleOHLCV{{TS: 1, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}},
 	}}
-	if _, err := storage.SaveBatch(batch, start, end); err != nil {
+	if _, err := storage.SaveBatch(batch, start, end, true); err != nil {
 		t.Fatalf("SaveBatch 실패: %v", err)
 	}
 
@@ -57,7 +57,7 @@ func TestLocalStorageExists(t *testing.T) {
 	}
 
 	batch := BatchFile{Market: "KRW-BTC", Range: toRange(start, end)}
-	if _, err := storage.SaveBatch(batch, start, end); err != nil {
+	if _, err := storage.SaveBatch(batch, start, end, true); err != nil {
 		t.Fatalf("SaveBatch 실패: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestLocalStorageExists(t *testing.T) {
 	}
 
 	stream := StreamFile{Market: "KRW-BTC", Range: toRange(start, end)}
-	if _, err := storage.SaveStream(stream, start, end); err != nil {
+	if _, err := storage.SaveStream(stream, start, end, true); err != nil {
 		t.Fatalf("SaveStream 실패: %v", err)
 	}
 

@@ -37,14 +37,19 @@ func vectorResultWithPod(pod, value string) string {
 }
 
 func TestClusterMetricsHandlerHappyPath(t *testing.T) {
+	// 홈서버는 exported_namespace/k8s-nodes-cadvisor(외부 Prometheus federated
+	// scrape 전용) 대신 namespace/kube_node_info를 쓴다 — clustermetrics.go의
+	// 2026-08-26 홈서버 전용 수정 주석 참고.
 	results := map[string]string{
-		`count(up{job="k8s-nodes-cadvisor"} == 1)`:                                         vectorResult("7"),
-		`sum(kube_pod_status_phase{exported_namespace="backend", phase="Running"})`:         vectorResult("4"),
-		`sum(matching_engine_book_size)`:                                                    vectorResult("0"),
-		`sum by (pod) (kube_pod_container_status_restarts_total{exported_namespace="backend"})`: vectorResultWithPod("kube-state-metrics-559fcf9d4-2sb", "3"),
-		`kube_deployment_status_replicas{exported_namespace="backend", deployment="matching-engine"}`: vectorResult("2"),
-		`kube_deployment_status_replicas{exported_namespace="backend", deployment="recorder"}`:        vectorResult("1"),
-		`count(kube_node_spec_taint{key="workload", value="backend"})`:                     vectorResult("3"),
+		`count(kube_node_info)`:                                                     vectorResult("7"),
+		`sum(kube_pod_status_phase{namespace="backend", phase="Running"})`:           vectorResult("4"),
+		`sum(matching_engine_book_size)`:                                             vectorResult("0"),
+		`sum by (pod) (kube_pod_container_status_restarts_total{namespace="backend"})`: vectorResultWithPod("kube-state-metrics-559fcf9d4-2sb", "3"),
+		`kube_deployment_status_replicas{namespace="backend", deployment="matching-engine"}`: vectorResult("2"),
+		`kube_deployment_status_replicas{namespace="backend", deployment="recorder"}`:        vectorResult("1"),
+		`count(kube_node_spec_taint{key="workload", value="backend"})`:               vectorResult("3"),
+		`sum(matching_engine_lag)`:                                                   vectorResult("5"),
+		`sum(recorder_consumer_lag)`:                                                 vectorResult("6"),
 	}
 	srv := fakePrometheus(t, results)
 	defer srv.Close()
@@ -81,6 +86,12 @@ func TestClusterMetricsHandlerHappyPath(t *testing.T) {
 	}
 	if got.Autoscaling.KarpenterNodes != 3 {
 		t.Errorf("Autoscaling.KarpenterNodes = %d, want 3", got.Autoscaling.KarpenterNodes)
+	}
+	if got.MatchingLag != 5 {
+		t.Errorf("MatchingLag = %d, want 5", got.MatchingLag)
+	}
+	if got.RecorderLag != 6 {
+		t.Errorf("RecorderLag = %d, want 6", got.RecorderLag)
 	}
 }
 

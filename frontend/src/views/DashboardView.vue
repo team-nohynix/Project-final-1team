@@ -157,7 +157,7 @@ const metricCards = computed(() => {
       color: '#ffb84d',
     },
     {
-      label: `전체 처리 p99 (${e2eWin})`,
+      label: `주문 처리 p99 (${e2eWin})`,
       value: m && m.e2eP99SampleCount > 0 ? `${displayValue(m.e2eP99Ms)}ms` : '--',
       description: m && m.e2eP99SampleCount > 0 ? `표본 ${displayValue(m.e2eP99SampleCount)}건` : '',
       color: '#20c8e8',
@@ -453,6 +453,18 @@ async function fetchIntegrityCheck() {
 
   const summary = await summaryRes.json()
   const integrity = await integrityRes.json()
+
+  // recorder가 202 COMPUTING을 줄 수 있습니다(2026-08-26 추가) — 정합성
+  // 검사 쿼리가 무거워서(수백만 행 range 스캔) 이번 요청 안에 못 끝내면
+  // 백그라운드로 계속 계산하면서 "아직 없음"을 알려주는 응답입니다. 이걸
+  // integrity.duplicateExecutions 등을 ?? 0으로 그냥 채우면 "이상 없음"처럼
+  // 잘못 보이므로, COMPUTING이면 명시적으로 대기 상태로 표시합니다 — 다음
+  // 폴링(60초 뒤)에서 캐시가 채워지면 정상 값이 옵니다.
+  if (integrity.status === 'COMPUTING') {
+    integrityData.value = null
+    integrityNote.value = '정합성 검사를 계산 중입니다 — 잠시 후 다시 표시됩니다.'
+    return
+  }
 
   // 오래된 실행(이 필드가 생기기 전 기록)이라 date가 없으면 "주문 유실"만
   // 표시를 못 하고 나머지 세 지표는 그대로 보여줍니다.
@@ -791,6 +803,17 @@ const flowNodesDef = [
 ]
 const FLOW_SVC_COLOR = { orderapi: '#4a90ff', matching: '#ffb84d', recorder: '#33e6a8' }
 const FLOW_SCALE_RANGE = { matching: { min: 2, max: 10 }, recorder: { min: 1, max: 10 } }
+// FLOW_LAG_KEYS — orderapi GET /v1/cluster-metrics의 matchingLag/recorderLag
+// 필드와 KEDA 임계치(각 ScaledObject의 threshold) 매핑. orderapi/Kafka 토픽
+// 노드는 컨슈머가 아니라 랙 개념이 없어 여기 없다.
+const FLOW_LAG_KEYS = {
+  matching: { field: 'matchingLag', threshold: 500 },
+  recorder: { field: 'recorderLag', threshold: 1000 },
+}
+function flowFormatLag(v) {
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k'
+  return String(v)
+}
 const FLOW_BRANCH_START = 0.388
 const FLOW_BRANCH_END = 0.424
 const FLOW_MERGE_START = 0.813
@@ -906,8 +929,12 @@ function flowResizeCanvas() {
 function flowSpawnPair(tps, color, mode, w) {
   const rate = Math.max(tps, 0)
   const perFrame = Math.min(Math.sqrt(rate) / 1.9, 3.5)
+  // 예전엔 rate가 0에 가까워도 "화면이 죽어 보이지 않게" 1%/프레임 확률로
+  // 점 하나를 흘려보냈는데, 이게 isRealtime 게이팅과 무관하게 항상 작동해서
+  // 유휴 상태(호출부가 rate=0을 넘기는 경우)에도 계속 점이 생겼다(2026-08-26
+  // 사용자 리포트 — 아무것도 안 하는데 점이 지나다님). rate=0은 항상 0개여야
+  // 한다.
   let n = Math.floor(perFrame) + (Math.random() < perFrame % 1 ? 1 : 0)
-  if (rate < 0.05 && Math.random() < 0.01) n = 1
   for (let i = 0; i < n; i++) {
     const jitter = (Math.random() - 0.5) * 0.75
     const speed = 1.3 + Math.random() * 0.9
@@ -1084,12 +1111,16 @@ function drawFlowFrame() {
     const ny = cy + (flowLaneCenterFrac(nd.x, nd.lane) - 0.5) * 2 * laneSpan
     const bw = flowNodeBoxWidth(ctx, nd.label, nd.sub)
     // 통로 두께가 레플리카 수만큼 넓어지면(scale.matching/recorder) 고정
-    // 34px 박스가 그 안에서 상대적으로 작아 보이는 문제(2026-08-25 사용자
-    // 지적) — 박스 높이를 그 지점 통로 반두께에 비례해서 같이 키운다.
-    // 30~48px로 clamp — 통로가 가장 얇을 때도 라벨이 읽히고, 가장 두꺼울
-    // 때도 박스가 통로를 넘어설 만큼 과하게 커지지 않게.
+    // 박스가 그 안에서 상대적으로 작아 보이는 문제(2026-08-25 사용자 지적) —
+    // 박스 높이를 그 지점 통로 반두께에 비례해서 같이 키운다. 44~64px로
+    // clamp(2026-08-26, 여백이 없어 답답해 보인다는 지적으로 30~48에서
+    // 상향) — 통로가 가장 얇을 때도 라벨이 읽히고, 가장 두꺼울 때도 박스가
+    // 통로를 넘어설 만큼 과하게 커지지 않게.
     const bandHalfPx = flowBandHalfFrac(nd.x, nd.lane, scale) * h
-    const bh = Math.min(Math.max(bandHalfPx * 1.1, 30), 48)
+    // 랙 뱃지가 붙는 노드(matching/recorder)는 3번째 텍스트 줄이 들어가므로
+    // 최소 높이를 12px 더 준다(2026-08-26) — 나머지 노드는 기존 44px 그대로.
+    const minBh = FLOW_LAG_KEYS[nd.key] ? 56 : 44
+    const bh = Math.min(Math.max(bandHalfPx * 1.25, minBh), 64)
     const drawCx = Math.min(Math.max(nx, bw / 2 + 4), w - bw / 2 - 4)
     const bx = drawCx - bw / 2
     const by = ny - bh / 2
@@ -1107,6 +1138,19 @@ function drawFlowFrame() {
     ctx.fillStyle = '#7f93a8'
     ctx.font = '500 9px -apple-system, BlinkMacSystemFont, sans-serif'
     ctx.fillText(nd.sub, drawCx, ny + 11)
+
+    // 컨슈머 랙 뱃지(2026-08-26 추가) — 그라파나 원본엔 있었지만 처음 이식할
+    // 때(8/24) 소스 데이터가 없어 뺐던 것. matching-engine/recorder만 Kafka
+    // 컨슈머라 랙이 의미 있다 — KEDA가 스케일 트리거로 쓰는 것과 같은 임계치
+    // (matching-engine-scaledobject.yaml=500, recorder-scaledobject.yaml=1000)를
+    // 넘으면 빨간색으로 경고한다.
+    const lagInfo = FLOW_LAG_KEYS[nd.key]
+    if (lagInfo) {
+      const lagVal = clusterMetrics.value?.[lagInfo.field] ?? 0
+      ctx.fillStyle = lagVal >= lagInfo.threshold ? '#ff8a8a' : '#5fb8e0'
+      ctx.font = '600 9px -apple-system, BlinkMacSystemFont, sans-serif'
+      ctx.fillText(`랙 ${flowFormatLag(lagVal)}`, drawCx, ny + 23)
+    }
   }
 
   // "레플리카: 매칭 X · 기록기 Y"는 아래 "클러스터 현황" 패널에 이미 있는
@@ -1296,8 +1340,8 @@ onBeforeUnmount(() => {
       </h4>
       <div v-if="autoscalingBars.length" class="autoscaling-bars">
         <div v-for="bar in autoscalingBars" :key="bar.key" class="autoscaling-bar-col">
-          <div class="autoscaling-bar-value">{{ displayValue(bar.current) }}</div>
           <div class="autoscaling-bar-track">
+            <div class="autoscaling-bar-value" :class="{ 'is-covered': bar.percent >= 70 }">{{ displayValue(bar.current) }}</div>
             <div class="autoscaling-bar-fill" :class="`bar-${bar.key}`" :style="{ height: bar.percent + '%' }"></div>
           </div>
           <div class="autoscaling-bar-label">{{ bar.label }}<template v-if="bar.maxLabel"> ({{ bar.maxLabel }})</template></div>
@@ -1891,12 +1935,28 @@ onBeforeUnmount(() => {
 }
 
 .autoscaling-bar-value {
-  font-size: 20px;
+  position: absolute;
+  top: 8px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 18px;
   font-weight: 700;
   color: #2ed39a;
+  z-index: 1;
+  transition: color 0.3s ease;
+}
+
+/* 채움 막대가 숫자 위치까지 차오르면(기본 텍스트 색과 막대 색이 비슷해
+   숫자가 안 보이던 문제, 2026-08-26 실측 제보) 흰색으로 바꿔 대비를
+   유지한다 — 막대 높이(top:8px 기준 텍스트 영역)와 겹치기 시작하는
+   지점을 percent>=70으로 근사했다. */
+.autoscaling-bar-value.is-covered {
+  color: #ffffff;
 }
 
 .autoscaling-bar-track {
+  position: relative;
   width: 100%;
   height: 110px;
   background: #0d1b2a;

@@ -28,12 +28,12 @@ func fakeKey(market string, start, end time.Time) string {
 	return market + "|" + start.String() + "|" + end.String()
 }
 
-func (f *fakeStorage) SaveBatch(b dataset.BatchFile, start, end time.Time) (string, error) {
+func (f *fakeStorage) SaveBatch(b dataset.BatchFile, start, end time.Time, overwrite bool) (string, error) {
 	f.batches[fakeKey(b.Market, start, end)] = b
 	return "fake://" + b.Market + "/batch", nil
 }
 
-func (f *fakeStorage) SaveStream(s dataset.StreamFile, start, end time.Time) (string, error) {
+func (f *fakeStorage) SaveStream(s dataset.StreamFile, start, end time.Time, overwrite bool) (string, error) {
 	f.streams[fakeKey(s.Market, start, end)] = s
 	return "fake://" + s.Market + "/stream", nil
 }

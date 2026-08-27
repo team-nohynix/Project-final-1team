@@ -41,12 +41,12 @@ func NewS3Storage(bucket string) Storage {
 	}
 }
 
-func (s *s3Storage) SaveBatch(b BatchFile, start, end time.Time) (string, error) {
-	return s.putIfAbsent(b, b.Market, start, end, "batch")
+func (s *s3Storage) SaveBatch(b BatchFile, start, end time.Time, overwrite bool) (string, error) {
+	return s.put(b, b.Market, start, end, "batch", overwrite)
 }
 
-func (s *s3Storage) SaveStream(st StreamFile, start, end time.Time) (string, error) {
-	return s.putIfAbsent(st, st.Market, start, end, "stream")
+func (s *s3Storage) SaveStream(st StreamFile, start, end time.Time, overwrite bool) (string, error) {
+	return s.put(st, st.Market, start, end, "stream", overwrite)
 }
 
 func (s *s3Storage) LoadBatch(market string, start, end time.Time) (BatchFile, error) {
@@ -100,18 +100,23 @@ func (s *s3Storage) Exists(market string, start, end time.Time) (ExistsResult, e
 	return res, nil
 }
 
-// putIfAbsent는 CLAUDE.md의 멱등성 설계대로, 같은 키의 파일이 이미 있으면
-// 재생성/재업로드 없이 기존 파일을 그대로 서빙합니다.
-func (s *s3Storage) putIfAbsent(v any, market string, start, end time.Time, kind string) (string, error) {
+// put은 overwrite=false면 CLAUDE.md의 멱등성 설계대로 같은 키의 파일이 이미
+// 있으면 재생성/재업로드 없이 기존 파일을 그대로 서빙합니다(putIfAbsent).
+// overwrite=true면 기존 파일 유무를 아예 확인하지 않고 항상 새로 업로드합니다
+// — 2026-08-26, "시세 수집 요청"을 다시 눌러도 Upbit만 다시 호출되고 실제
+// 저장 파일은 예전 그대로였던 문제 대응(SaveBatch/SaveStream 주석 참고).
+func (s *s3Storage) put(v any, market string, start, end time.Time, kind string, overwrite bool) (string, error) {
 	ctx := context.Background()
 	key := s.objectKey(market, start, end, kind)
 
-	exists, err := s.headExists(key)
-	if err != nil {
-		return "", err
-	}
-	if exists {
-		return s.uri(key), nil
+	if !overwrite {
+		exists, err := s.headExists(key)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return s.uri(key), nil
+		}
 	}
 
 	body, err := json.MarshalIndent(v, "", "  ")

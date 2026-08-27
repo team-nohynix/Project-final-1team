@@ -135,6 +135,15 @@ type clusterMetricsResponse struct {
 	MatchingBookSize   int64                `json:"matchingBookSize"`
 	PodRestarts        []podRestartDTO      `json:"podRestarts"`
 	Autoscaling        autoscalingStatusDTO `json:"autoscaling"`
+	// MatchingLag/RecorderLag는 2026-08-26 추가 — 실시간 처리 흐름 다이어그램의
+	// 랙 뱃지용. matching-engine-scaledobject.yaml/recorder-scaledobject.yaml이
+	// KEDA 스케일링 기준으로 이미 쓰고 있는 것과 정확히 같은 PromQL을 재사용한다
+	// (sum(matching_engine_lag)/sum(recorder_consumer_lag)) — 이 다이어그램을
+	// 처음 이식할 때(8/24) "소스 데이터가 없어 제외"했던 두 항목 중 하나인데,
+	// 이제 clusterMetricsHandler가 이미 같은 Prometheus에 붙어있으니 쿼리
+	// 두 개만 추가하면 된다.
+	MatchingLag int64 `json:"matchingLag"`
+	RecorderLag int64 `json:"recorderLag"`
 }
 
 // clusterMetricsHandler는 위 7개 PromQL을 병렬로 날립니다 — 순차로 하면
@@ -161,8 +170,9 @@ func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 			wg                                                    sync.WaitGroup
 			activeNodes, runningPods, bookSize, matchingReplicas float64
 			recorderReplicas, karpenterNodes                     float64
+			matchingLag, recorderLag                             float64
 			restartSamples                                       []promSample
-			errs                                                 [7]error
+			errs                                                 [9]error
 		)
 
 		run := func(i int, fn func() error) {
@@ -201,6 +211,14 @@ func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 			karpenterNodes, err = prom.queryScalar(ctx, `count(kube_node_spec_taint{key="workload", value="backend"})`)
 			return
 		})
+		run(7, func() (err error) {
+			matchingLag, err = prom.queryScalar(ctx, `sum(matching_engine_lag)`)
+			return
+		})
+		run(8, func() (err error) {
+			recorderLag, err = prom.queryScalar(ctx, `sum(recorder_consumer_lag)`)
+			return
+		})
 		wg.Wait()
 
 		for _, err := range errs {
@@ -233,6 +251,8 @@ func clusterMetricsHandler(prom *promQuerier) http.HandlerFunc {
 				Recorder:       replicaStatusDTO{Current: int64(recorderReplicas), Max: promRecorderMaxReplicas},
 				KarpenterNodes: int64(karpenterNodes),
 			},
+			MatchingLag: int64(matchingLag),
+			RecorderLag: int64(recorderLag),
 		})
 	}
 }

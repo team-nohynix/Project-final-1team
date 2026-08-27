@@ -12,7 +12,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
-	"strings"
+	"sync"
 	"time"
 
 	"recorder/store"
@@ -33,15 +33,6 @@ const (
 	seriesWindow    = 10 * time.Minute
 	seriesBucket    = time.Minute
 	seriesBucketFmt = "2006-01-02T15:04:00Z" // 분 단위로 잘라 표시(초는 항상 00)
-
-	// mergeMaxExecutedAt이 한 번의 IN(...) 쿼리에 담는 최대 주문 ID 개수.
-	// MySQL의 플레이스홀더 개수 제한(65,535)을 밑돌면서도 여유를 크게 남긴
-	// 값 — p99Window(5분) 동안 FILLED된 주문 수가 이 한도를 넘으면 예전엔
-	// 그대로 65,535개 한도를 넘겨 "Error 1390: Prepared statement contains
-	// too many placeholders"로 대시보드 지표 조회 전체가 실패했다(2026-08-25,
-	// 초당 240건 넘는 부하테스트 도중 실제로 5분 창에 6만 건 넘게 쌓여서
-	// 재현). 청크로 나눠 여러 번 조회하면 이 한도와 무관해진다.
-	maxExecutedAtChunkSize = 5000
 
 	// ordersByStatusWindow은 OrdersByStatus 전용 창입니다(seriesWindow과
 	// 별개). 2026-08-21에 "세션 전체 누적처럼 보이게" 24시간으로 늘렸다가
@@ -255,16 +246,19 @@ type MetricsBucket struct {
 // 정의(다소 자의적일 수 있어 명시): OrderAcceptTps/ExecutionTps는 최근
 // tpsWindow(60초) 동안의 접수/체결 건수를 60으로 나눈 순간 평균입니다.
 // PendingOrders는 아직 종결(FILLED/CANCELED)되지 않은 주문 수(ACCEPTED +
-// PARTIALLY_FILLED)의 스냅샷입니다. E2EP99Ms는 "주문 접수 시각 →
-// 그 주문을 완전 체결시킨 마지막 executed_at" 구간을 최근
-// p99WindowMinutes(5분) 안에 FILLED된 주문들에서 표본으로 삼아 계산합니다 —
-// 매수/매도 중 나중에 들어와 체결을 촉발한 쪽(공격적 주문)에게는 실제
-// "시스템 처리 지연"에 가깝지만, 오래 대기하다 체결된 지정가(수동적) 주문
-// 쪽에서 보면 "시장에서 기다린 시간"까지 섞여 들어갈 수 있습니다 — 현재
-// 스키마엔 "매칭 시작/큐 대기" 같은 중간 단계 타임스탬프가 없어 더 정밀하게
-// 나눌 방법이 없습니다(recorder/server.go traceHandler 주석의 5단계 파이프라인
-// 부재와 같은 근본 원인). RunningEnginePods는 ListEngines 결과의 distinct
-// engineInstanceId 수를 그대로 씁니다.
+// PARTIALLY_FILLED)의 스냅샷입니다. E2EP99Ms는 최근 p99WindowMinutes(5분)
+// 안에 일어난 체결(execution)마다 "그 체결을 촉발한 쪽(taker — 매수·매도
+// 주문 중 더 늦게 접수된 쪽)의 접수 시각 → executed_at" 구간을 표본으로
+// 계산합니다(2026-08-26 재설계). taker는 도착하자마자 이미 있던 반대편
+// 주문과 즉시 매칭되므로 이 구간엔 "시장에서 기다린 시간"이 섞이지
+// 않습니다 — 예전엔 FILLED된 "주문" 각각의 자기 접수 시각을 썼는데, 그러면
+// 오래 대기하다 체결된 수동적(maker) 주문의 대기 시간까지 그대로 p99에
+// 섞여 NFR-03(500ms)과 비교가 안 되는 값(실측 100초대)이 나왔습니다. 여전히
+// 완벽한 "매칭 시작/큐 대기" 단계별 지연은 아닙니다(현재 스키마에 그런
+// 중간 타임스탬프가 없음, recorder/server.go traceHandler 주석의 5단계
+// 파이프라인 부재와 같은 근본 원인) — 하지만 시장 대기 시간을 배제한
+// 근사치로는 이전보다 훨씬 낫습니다. RunningEnginePods는 ListEngines
+// 결과의 distinct engineInstanceId 수를 그대로 씁니다.
 type DashboardMetrics struct {
 	OrderAcceptTps    float64 `json:"orderAcceptTps"`
 	ExecutionTps      float64 `json:"executionTps"`
@@ -482,75 +476,73 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	}
 	m.OrdersByStatus = statusByStatus
 
-	// E2E P99: 최근 p99Window 안에 FILLED된 주문마다 (마지막 체결 시각 - 접수
-	// 시각)을 표본 하나로 삼는다. DashboardMetrics 타입 주석 참고 — 완벽한
-	// "시스템 처리 지연"은 아니지만 현재 스키마로 낼 수 있는 최선의 근사치.
+	// E2E P99(taker 기준, 2026-08-26 재설계, 같은 날 두 번째 개정): 최근
+	// p99Window 안에 일어난 체결(execution)마다 GREATEST(매수 접수 시각,
+	// 매도 접수 시각) → executed_at 구간을 표본으로 삼는다 — DashboardMetrics
+	// 타입 주석 참고. "체결"을 표본 단위로 삼으므로(예전처럼 "주문" 단위가
+	// 아님) 표본 하나당 관련 주문이 최대 둘(매수/매도)뿐이라 taker/maker를
+	// 섞을 일이 없다.
 	//
-	// 원래는 `trade_order o JOIN execution e ON (e.buy_order_id = o.order_id
-	// OR e.sell_order_id = o.order_id)` 한 방 쿼리였다 — OR가 execution의 두
-	// 컬럼에 걸쳐 있어 옵티마이저가 idx_execution_buy_order/
-	// idx_execution_sell_order 어느 쪽도 못 타고 execution 전체(500만행+)를
-	// 매 폴링(10초)마다 스캔했다(2026-08-20, EXPLAIN으로 rows:5,063,699 확인
-	// — pollDashboardMetrics가 DB CPU를 계속 붙잡고 있던 원인). 대신 ①먼저
-	// idx_trade_order_status_submitted로 최근 창의 FILLED 주문만 좁게 골라낸
-	// 뒤 ②execution을 buy_order_id/sell_order_id 각각 자기 인덱스로 따로
-	// 조회해서 Go에서 합친다 — OR-JOIN 자체를 없애 최근 창 크기에만 비례하게
-	// 만든다(schema.sql의 idx_trade_order_status_submitted 주석 참고).
-	// window가 있으면(위 TPS와 같은 이유) 최근 p99Window 대신 그 [From,To)
-	// 구간 전체에서 FILLED된 주문을 표본으로 삼는다 — idx_trade_order_status_submitted
-	// (status, submitted_at) 인덱스는 절대 구간 조건에도 그대로 쓰인다.
-	var orderRows *sql.Rows
+	// **두 번째 개정 이유**: 최초 재설계는 "execution을 시간으로 거른 뒤,
+	// 관련 주문들의 submitted_at을 trade_order PK로 별도 배치(IN 절, 최대
+	// 5000개씩 청크) 조회"하는 2단계 방식이었다 — OR-JOIN("trade_order o
+	// JOIN execution e ON (e.buy_order_id = o.order_id OR e.sell_order_id =
+	// o.order_id)"가 execution 전체(500만행+)를 스캔했던 사고, 2026-08-20
+	// EXPLAIN으로 rows:5,063,699 확인)을 피하려던 것이었다. 그런데 실측 부하
+	// 시험(2026-08-26, 초당 백여 건대 체결)에서 5분 창에 관련 주문이 수만~
+	// 수십만 개까지 쌓이면서, 청크 하나당 왕복 하나씩(최대 5000개/청크) 수십
+	// 번 왕복이 필요해졌고, 그 누적 지연이 recorder-api의 요청 컨텍스트
+	// 타임아웃(CloudFront 오리진 응답 한계)을 넘겨 "context canceled"로
+	// 대시보드 지표 조회 자체가 반복 실패했다(대시보드가 멈춘 것처럼 보였지만
+	// 실제 주문 처리/취소는 정상 진행 중이었음 — DB 직접 조회로 확인).
+	//
+	// 고친 방법: OR가 아니라 buy_order_id/sell_order_id 각각에 대한 별도
+	// INNER JOIN 조건(둘 다 trade_order.order_id PK와의 단순 동등 비교)으로
+	// 바꿔 왕복을 하나로 합쳤다 — OR-JOIN과 달리 이건 각 JOIN이 독립적인 PK
+	// 룩업이라 인덱스를 정상적으로 탄다(2026-08-20 사고의 원인이었던 "OR라서
+	// 인덱스를 못 탄다"는 이 구조엔 해당하지 않음). 한쪽 주문이 아직
+	// trade_order에 안 들어와 있으면(독립 리더 레이스, recorder/store/
+	// apply.go의 ResolveMode가 다루는 것과 같은 상황) INNER JOIN이 그 행을
+	// 자연스럽게 제외한다 — 예전의 수동 skip과 동일한 효과.
+	var execRows *sql.Rows
 	var err error
+	const e2eJoinSelect = `
+		SELECT e.executed_at, ob.submitted_at, os.submitted_at
+		FROM execution e
+		JOIN trade_order ob ON ob.order_id = e.buy_order_id
+		JOIN trade_order os ON os.order_id = e.sell_order_id
+	`
 	if window != nil {
-		orderRows, err = q.db.QueryContext(ctx, `
-			SELECT order_id, submitted_at FROM trade_order
-			WHERE status = 'FILLED' AND submitted_at >= ? AND submitted_at < ?
-		`, window.From, window.To)
+		execRows, err = q.db.QueryContext(ctx, e2eJoinSelect+`WHERE e.executed_at >= ? AND e.executed_at < ?`,
+			window.From, window.To)
 	} else {
-		orderRows, err = q.db.QueryContext(ctx, `
-			SELECT order_id, submitted_at FROM trade_order
-			WHERE status = 'FILLED' AND submitted_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE
-		`, int(p99Window.Minutes()))
+		// DB 서버 시각 기준(UTC_TIMESTAMP())으로 계산 — 앱 파드 시계와의 편차
+		// 위험을 피하려고 예전과 마찬가지로 SQL 쪽에서 "지금"을 구한다.
+		execRows, err = q.db.QueryContext(ctx, e2eJoinSelect+`WHERE e.executed_at >= UTC_TIMESTAMP() - INTERVAL ? MINUTE`,
+			int(p99Window.Minutes()))
 	}
 	if err != nil {
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 	}
-	submittedAt := make(map[string]time.Time)
-	var orderIDs []string
-	for orderRows.Next() {
-		var id string
-		var t time.Time
-		if err := orderRows.Scan(&id, &t); err != nil {
-			orderRows.Close()
-			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
-		}
-		submittedAt[id] = t
-		orderIDs = append(orderIDs, id)
-	}
-	if err := orderRows.Err(); err != nil {
-		orderRows.Close()
-		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 주문 조회 실패: %w", err)
-	}
-	orderRows.Close()
-
-	maxExecutedAt := make(map[string]time.Time, len(orderIDs))
-	if len(orderIDs) > 0 {
-		if err := q.mergeMaxExecutedAt(ctx, "buy_order_id", orderIDs, maxExecutedAt); err != nil {
-			return DashboardMetrics{}, err
-		}
-		if err := q.mergeMaxExecutedAt(ctx, "sell_order_id", orderIDs, maxExecutedAt); err != nil {
-			return DashboardMetrics{}, err
-		}
-	}
-
 	var latenciesMs []float64
-	for _, id := range orderIDs {
-		executedAt, ok := maxExecutedAt[id]
-		if !ok {
-			continue
+	for execRows.Next() {
+		var executedAt, buySub, sellSub time.Time
+		if err := execRows.Scan(&executedAt, &buySub, &sellSub); err != nil {
+			execRows.Close()
+			return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
 		}
-		latenciesMs = append(latenciesMs, float64(executedAt.Sub(submittedAt[id]).Microseconds())/1000.0)
+		taker := buySub
+		if sellSub.After(taker) {
+			taker = sellSub
+		}
+		latenciesMs = append(latenciesMs, float64(executedAt.Sub(taker).Microseconds())/1000.0)
 	}
+	if err := execRows.Err(); err != nil {
+		execRows.Close()
+		return DashboardMetrics{}, fmt.Errorf("E2E 지연시간 대상 체결 조회 실패: %w", err)
+	}
+	execRows.Close()
+
 	m.E2EP99Ms = percentile99(latenciesMs)
 	m.E2EP99SampleCount = len(latenciesMs)
 
@@ -567,50 +559,6 @@ func (q *MySQLQuerier) DashboardMetrics(ctx context.Context, window *TimeWindow)
 	m.Series = series
 
 	return m, nil
-}
-
-// mergeMaxExecutedAt은 column(buy_order_id 또는 sell_order_id)이 orderIDs에
-// 속하는 execution 행들의 executed_at을 조회해 out에 주문별 최댓값으로
-// 병합합니다. buy_order_id/sell_order_id를 OR 하나로 묶지 않고 이렇게 따로
-// 호출해야 각자의 단일 컬럼 인덱스(idx_execution_buy_order/
-// idx_execution_sell_order)를 탈 수 있습니다 — DashboardMetrics 주석 참고.
-// column은 이 파일 안에서 "buy_order_id"/"sell_order_id" 리터럴로만 호출되므로
-// SQL 인젝션 경로가 아닙니다.
-func (q *MySQLQuerier) mergeMaxExecutedAt(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
-	for start := 0; start < len(orderIDs); start += maxExecutedAtChunkSize {
-		end := min(start+maxExecutedAtChunkSize, len(orderIDs))
-		if err := q.mergeMaxExecutedAtChunk(ctx, column, orderIDs[start:end], out); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (q *MySQLQuerier) mergeMaxExecutedAtChunk(ctx context.Context, column string, orderIDs []string, out map[string]time.Time) error {
-	placeholders := strings.Repeat("?,", len(orderIDs))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := make([]any, len(orderIDs))
-	for i, id := range orderIDs {
-		args[i] = id
-	}
-	rows, err := q.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT %s, executed_at FROM execution WHERE %s IN (%s)`, column, column, placeholders,
-	), args...)
-	if err != nil {
-		return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var t time.Time
-		if err := rows.Scan(&id, &t); err != nil {
-			return fmt.Errorf("E2E 지연시간(%s) 조회 실패: %w", column, err)
-		}
-		if cur, ok := out[id]; !ok || t.After(cur) {
-			out[id] = t
-		}
-	}
-	return rows.Err()
 }
 
 // metricsSeries는 최근 seriesWindow(10분)를 seriesBucket(1분) 단위로 잘라
@@ -778,35 +726,54 @@ func percentile99(samplesMs []float64) float64 {
 // COALESCE로 SUM을 감싼 이유: 그 구간에 해당하는 행이 하나도 없으면 MySQL의
 // SUM(CASE...)이 NULL을 반환하는데(COUNT(*)와 달리), 이걸 그대로 *int64로
 // Scan하면 실패합니다 — 0건일 때도 정상적으로 0을 받기 위함입니다.
+// 3개 쿼리(전체 집계/마켓별/사이드별)는 전부 같은 mode+submitted_at 범위를
+// 독립적으로 훑습니다 — IntegrityCheck(2026-08-27, 502/504 원인)와 같은 이유로
+// 순차 실행하면 전체 지연이 세 쿼리의 합이 됩니다. 리플레이 데이터가 쌓일수록
+// (실측: 최근 리플레이 하나로 120만 행) 순차 합산이 CloudFront 타임아웃에
+// 가까워지는 걸 라이브로 확인해 병렬로 바꿉니다(가장 느린 쿼리 하나로 상한).
 func (q *MySQLQuerier) OrderSummary(ctx context.Context, mode string, from, to time.Time) (OrderSummary, error) {
 	if to.IsZero() {
 		to = time.Now().UTC()
 	}
 
 	var s OrderSummary
-	err := q.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END), 0)
-		FROM trade_order
-		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
-	`, mode, from, to).Scan(&s.Accepted, &s.Filled, &s.Unfilled)
-	if err != nil {
-		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", err)
-	}
+	var errs [3]error
+	var wg sync.WaitGroup
+	wg.Add(3)
 
-	byMarket, err := q.orderSummaryByMarket(ctx, mode, from, to)
-	if err != nil {
-		return OrderSummary{}, err
-	}
-	s.ByMarket = byMarket
+	go func() {
+		defer wg.Done()
+		errs[0] = q.db.QueryRowContext(ctx, `
+			SELECT
+				COUNT(*),
+				COALESCE(SUM(CASE WHEN status = 'FILLED' THEN 1 ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN status IN ('ACCEPTED', 'PARTIALLY_FILLED') THEN 1 ELSE 0 END), 0)
+			FROM trade_order
+			WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		`, mode, from, to).Scan(&s.Accepted, &s.Filled, &s.Unfilled)
+	}()
 
-	bySide, err := q.orderSummaryBySide(ctx, mode, from, to)
-	if err != nil {
-		return OrderSummary{}, err
+	go func() {
+		defer wg.Done()
+		s.ByMarket, errs[1] = q.orderSummaryByMarket(ctx, mode, from, to)
+	}()
+
+	go func() {
+		defer wg.Done()
+		s.BySide, errs[2] = q.orderSummaryBySide(ctx, mode, from, to)
+	}()
+
+	wg.Wait()
+
+	if errs[0] != nil {
+		return OrderSummary{}, fmt.Errorf("주문 집계 조회 실패: %w", errs[0])
 	}
-	s.BySide = bySide
+	if errs[1] != nil {
+		return OrderSummary{}, errs[1]
+	}
+	if errs[2] != nil {
+		return OrderSummary{}, errs[2]
+	}
 
 	return s, nil
 }
@@ -891,54 +858,94 @@ func (q *MySQLQuerier) IntegrityCheck(ctx context.Context, mode string, from, to
 
 	var c IntegrityCheck
 
-	// 중복 체결: 한 주문(매수 또는 매도)에 대해 체결된 수량 합이 원래 주문
-	// 수량을 넘는 경우.
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM (
-			SELECT f.order_id FROM (
-				SELECT buy_order_id AS order_id, quantity FROM execution
-				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
-				UNION ALL
-				SELECT sell_order_id AS order_id, quantity FROM execution
-				WHERE mode = ? AND executed_at >= ? AND executed_at < ?
-			) f
-			JOIN trade_order o ON o.order_id = f.order_id
-			GROUP BY f.order_id
-			-- MySQL은 HAVING에서 GROUP BY 대상이 아닌 조인 테이블 컬럼(o.quantity)을
-			-- 집계 없이 직접 참조하면 Error 1054 "Unknown column"을 냅니다(실측,
-			-- 2026-08-24) — o.order_id=f.order_id로 그룹 안에서 항상 같은 값이라
-			-- 실제로는 안전한데도 MySQL이 그 함수적 종속성을 HAVING에서는 안
-			-- 봐줍니다. MAX()로 감싸면(그룹 내 값이 전부 같으니 결과는 동일) 문법
-			-- 요건을 만족시키면서 의미는 그대로입니다.
-			HAVING SUM(f.quantity) > MAX(o.quantity)
-		) over_filled
-	`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", err)
+	// **FORCE INDEX 3개 전부 — 2026-08-26 실측 성능 버그 수정.** orderSummaryByMarket
+	// 이 2026-08-24에 겪은 것과 정확히 같은 문제: mode+executed_at(또는
+	// mode+submitted_at)으로 좁혀지는 이 조건들에 맞는 인덱스가 이미 있는데도
+	// (idx_execution_executed_at, idx_trade_order_mode_submitted), 테이블이
+	// 오늘 대형 부하테스트로 급격히 커지면서(execution 400만행+, trade_order
+	// 500만행+) 옵티마이저 통계가 낡아 EXPLAIN 결과 셋 다 key=NULL(전체
+	// 테이블 스캔, type=ALL)을 골랐다 — 실측으로 20분짜리 리플레이 구간 하나
+	// 조회에 90초+ 걸려 CloudFront 타임아웃(502/504)까지 재현됨. FORCE INDEX로
+	// 강제하면 type=range로 바뀐다(실측 확인). ANALYZE TABLE로 통계만 갱신해도
+	// 일시적으로는 고쳐지지만, 부하테스트가 반복돼 테이블이 계속 급격히
+	// 커지는 이 프로젝트 특성상 통계가 금방 다시 낡으므로 FORCE INDEX가 더
+	// 안정적이다.
+	//
+	// **병렬 실행(같은 날 추가)** — FORCE INDEX를 적용해도 각 쿼리 자체가
+	// 여전히 수십만~수백만 행을 훑는 range 스캔이라 개별로 10~30초씩 걸릴 수
+	// 있는데, 예전처럼 세 쿼리를 순서대로 기다리면 그 셋을 더한 시간(최대
+	// 90초 안팎)이 CloudFront 오리진 타임아웃을 다시 넘길 수 있다(실측
+	// 재현). 세 쿼리는 서로 다른 걸 세는 독립된 읽기라 결과를 합칠 필요가
+	// 없으므로, clustermetrics.go의 clusterMetricsHandler와 같은 패턴으로
+	// goroutine 3개에 병렬로 보내 전체 시간을 "합"이 아니라 "가장 느린 것
+	// 하나"로 줄인다.
+	var wg sync.WaitGroup
+	var errs [3]error
+	run := func(i int, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = fn()
+		}()
 	}
+
+	run(0, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM (
+				SELECT f.order_id FROM (
+					SELECT buy_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
+					WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+					UNION ALL
+					SELECT sell_order_id AS order_id, quantity FROM execution FORCE INDEX (idx_execution_executed_at)
+					WHERE mode = ? AND executed_at >= ? AND executed_at < ?
+				) f
+				JOIN trade_order o ON o.order_id = f.order_id
+				GROUP BY f.order_id
+				-- MySQL은 HAVING에서 GROUP BY 대상이 아닌 조인 테이블 컬럼(o.quantity)을
+				-- 집계 없이 직접 참조하면 Error 1054 "Unknown column"을 냅니다(실측,
+				-- 2026-08-24) — o.order_id=f.order_id로 그룹 안에서 항상 같은 값이라
+				-- 실제로는 안전한데도 MySQL이 그 함수적 종속성을 HAVING에서는 안
+				-- 봐줍니다. MAX()로 감싸면(그룹 내 값이 전부 같으니 결과는 동일) 문법
+				-- 요건을 만족시키면서 의미는 그대로입니다.
+				HAVING SUM(f.quantity) > MAX(o.quantity)
+			) over_filled
+		`, mode, from, to, mode, from, to).Scan(&c.DuplicateExecutions)
+	})
 
 	// 순서 역전: 체결 시각이 그 체결에 관련된 주문(매수 또는 매도)의 접수
 	// 시각보다 이른 경우. LEFT JOIN이라 관련 주문을 못 찾은 쪽은 NULL이 되고,
 	// NULL과의 비교는 항상 FALSE라 그 execution은 이 조건으로는 안 걸립니다
 	// (주문 유실은 별개 지표에서 다룸).
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM execution e
-		LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
-		LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
-		WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
-			AND (e.executed_at < ob.submitted_at OR e.executed_at < os.submitted_at)
-	`, mode, from, to).Scan(&c.SequenceReversals); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("순서 역전 검사 실패: %w", err)
-	}
+	run(1, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM execution e FORCE INDEX (idx_execution_executed_at)
+			LEFT JOIN trade_order ob ON ob.order_id = e.buy_order_id
+			LEFT JOIN trade_order os ON os.order_id = e.sell_order_id
+			WHERE e.mode = ? AND e.executed_at >= ? AND e.executed_at < ?
+				AND (e.executed_at < ob.submitted_at OR e.executed_at < os.submitted_at)
+		`, mode, from, to).Scan(&c.SequenceReversals)
+	})
 
 	// 매수·매도 총량: 각 주문의 quantity-remaining_quantity(=실제 체결량) 합.
-	if err := q.db.QueryRowContext(ctx, `
-		SELECT
-			COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
-		FROM trade_order
-		WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
-	`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled); err != nil {
-		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", err)
+	run(2, func() error {
+		return q.db.QueryRowContext(ctx, `
+			SELECT
+				COALESCE(SUM(CASE WHEN side = 'BUY'  THEN quantity - remaining_quantity ELSE 0 END), 0),
+				COALESCE(SUM(CASE WHEN side = 'SELL' THEN quantity - remaining_quantity ELSE 0 END), 0)
+			FROM trade_order FORCE INDEX (idx_trade_order_mode_submitted)
+			WHERE mode = ? AND submitted_at >= ? AND submitted_at < ?
+		`, mode, from, to).Scan(&c.BuyFilled, &c.SellFilled)
+	})
+
+	wg.Wait()
+	if errs[0] != nil {
+		return IntegrityCheck{}, fmt.Errorf("중복 체결 검사 실패: %w", errs[0])
+	}
+	if errs[1] != nil {
+		return IntegrityCheck{}, fmt.Errorf("순서 역전 검사 실패: %w", errs[1])
+	}
+	if errs[2] != nil {
+		return IntegrityCheck{}, fmt.Errorf("매수매도 총량 검사 실패: %w", errs[2])
 	}
 
 	return c, nil

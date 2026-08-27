@@ -43,6 +43,23 @@ const cleanupFetchMaxAttempts = 3
 // 시임(seam)입니다(sessioncleanup_test.go 참고).
 var cleanupFetchRetryDelay = 5 * time.Second
 
+// cleanupSweepMaxPasses/cleanupSweepDelay — 2026-08-26 추가. 자동 정리가 세션
+// 종료 시점의 스냅샷 한 번으로 끝나면, 그 스냅샷 이후에야 recorder의 컨슈머
+// 랙이 풀려 trade_order에 뒤늦게 반영되는 주문("잔류")을 영영 놓친다 —
+// 실측으로 2건→269건→284건씩 반복 발생했고, 매번 운영자가 잠깐 기다렸다가
+// 수동으로 POST /v1/admin/cleanup-unresolved-orders를 다시 눌러서 해소했다.
+// 그 "기다렸다가 다시 돌리기"를 그대로 자동화한다 — 지연을 두고 같은
+// 조회+취소 스윕을 최대 cleanupSweepMaxPasses번 반복하고, 한 번이라도
+// 미종결 주문이 0건으로 수렴하면 그 시점에 바로 끝낸다. 이미 취소된 주문을
+// 다음 스윕에서 다시 조회해 다시 취소 발행해도 멱등이다 — matching은
+// 오더북에 없는 주문의 CANCEL을 무시한다.
+const cleanupSweepMaxPasses = 4
+
+// cleanupSweepDelay는 var입니다(const 아님) — cleanupFetchRetryDelay와 같은
+// 이유로, 테스트가 스윕 사이를 실제로 몇십 초씩 기다리지 않도록 낮춰 쓸 수
+// 있는 테스트 시임입니다(sessioncleanup_test.go의 withFastCleanupSweep 참고).
+var cleanupSweepDelay = 30 * time.Second
+
 // cleanupUnresolvedOrders는 세션 하나가 완전히 끝났을 때(그룹의 마지막
 // 멤버가 반납했을 때) recorder에 남아있는 미종결 주문 전부를 취소합니다
 // (2026-08-19 도입, 2026-08-20에 범위를 "이 세션 몫만"에서 "전체"로 넓힘) —
@@ -112,30 +129,53 @@ func cleanupUnresolvedOrders(ctx context.Context, httpClient *http.Client, recor
 		return
 	}
 
-	orders, err := fetchAllUnresolvedOrdersWithRetry(ctx, httpClient, recorderURL)
-	if err != nil {
-		log.Printf("세션 정리 실패 — 미종결 주문 조회 실패 (%d회 재시도 후 포기, runId=%s): %v", cleanupFetchMaxAttempts, runID, err)
-		note := "미종결 주문 자동 정리가 반복 실패했습니다 — 수동 일괄 정리(POST /v1/admin/cleanup-unresolved-orders) 필요"
-		if noteErr := sessionStore.AppendLastRunNote(ctx, runID, note); noteErr != nil {
-			log.Printf("실행 결과 메시지에 정리 실패 경고 남기기 실패 (runId=%s): %v", runID, noteErr)
+	totalCanceled := 0
+	for pass := 1; pass <= cleanupSweepMaxPasses; pass++ {
+		orders, err := fetchAllUnresolvedOrdersWithRetry(ctx, httpClient, recorderURL)
+		if err != nil {
+			log.Printf("세션 정리 실패 — 미종결 주문 조회 실패 (%d회 재시도 후 포기, %d/%d회차, runId=%s): %v", cleanupFetchMaxAttempts, pass, cleanupSweepMaxPasses, runID, err)
+			note := "미종결 주문 자동 정리가 반복 실패했습니다 — 수동 일괄 정리(POST /v1/admin/cleanup-unresolved-orders) 필요"
+			if noteErr := sessionStore.AppendLastRunNote(ctx, runID, note); noteErr != nil {
+				log.Printf("실행 결과 메시지에 정리 실패 경고 남기기 실패 (runId=%s): %v", runID, noteErr)
+			}
+			return
 		}
-		return
-	}
-	if len(orders) == 0 {
-		log.Printf("세션 정리 완료 — 미종결 주문 없음 (runId=%s)", runID)
-		return
+
+		if len(orders) == 0 {
+			if pass == 1 {
+				log.Printf("세션 정리 완료 — 미종결 주문 없음 (runId=%s)", runID)
+			} else {
+				log.Printf("세션 정리 완료 — %d회차에 잔여 미종결 주문 0건으로 수렴 (누적 %d건 취소, runId=%s)", pass, totalCanceled, runID)
+			}
+			return
+		}
+
+		canceledAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+		canceled := 0
+		for _, o := range orders {
+			if err := producer.PublishCancel(ctx, o.OrderID, o.Market, canceledAt); err != nil {
+				log.Printf("세션 정리 중 취소 발행 실패 (runId=%s, orderId=%s): %v", runID, o.OrderID, err)
+				continue
+			}
+			canceled++
+		}
+		totalCanceled += canceled
+		log.Printf("세션 정리 %d/%d회차 — 미종결 주문 %d/%d건 취소 발행 (runId=%s, 범위=전체 미종결)", pass, cleanupSweepMaxPasses, canceled, len(orders), runID)
+
+		if pass < cleanupSweepMaxPasses {
+			select {
+			case <-time.After(cleanupSweepDelay):
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
 
-	canceledAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	canceled := 0
-	for _, o := range orders {
-		if err := producer.PublishCancel(ctx, o.OrderID, o.Market, canceledAt); err != nil {
-			log.Printf("세션 정리 중 취소 발행 실패 (runId=%s, orderId=%s): %v", runID, o.OrderID, err)
-			continue
-		}
-		canceled++
+	log.Printf("세션 정리 종료 — %d회차까지 스윕했지만 여전히 미종결 주문이 남아있을 수 있음 (누적 %d건 취소, runId=%s)", cleanupSweepMaxPasses, totalCanceled, runID)
+	note := fmt.Sprintf("미종결 주문 자동 정리를 %d회 반복했지만 여전히 남아있을 수 있습니다 — 수동 일괄 정리(POST /v1/admin/cleanup-unresolved-orders)로 확인 필요", cleanupSweepMaxPasses)
+	if err := sessionStore.AppendLastRunNote(ctx, runID, note); err != nil {
+		log.Printf("실행 결과 메시지에 정리 잔여 경고 남기기 실패 (runId=%s): %v", runID, err)
 	}
-	log.Printf("세션 정리 완료 — 미종결 주문 %d/%d건 취소 발행 (runId=%s, 범위=전체 미종결)", canceled, len(orders), runID)
 }
 
 // cleanupAllStatus는 관리용 "미종결 주문 일괄 정리" 작업의 현재/마지막

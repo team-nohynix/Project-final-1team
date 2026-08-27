@@ -22,11 +22,13 @@ func NewLocalStorage(root string) Storage {
 	return &localStorage{root: root}
 }
 
-func (s *localStorage) SaveBatch(b BatchFile, start, end time.Time) (string, error) {
+// overwrite는 여기선 안 씁니다 — os.WriteFile은 원래도 항상 덮어쓰므로
+// (dataset.Storage 인터페이스를 s3Storage와 맞추기 위한 파라미터).
+func (s *localStorage) SaveBatch(b BatchFile, start, end time.Time, overwrite bool) (string, error) {
 	return s.writeJSON(b, b.Market, start, end, "batch")
 }
 
-func (s *localStorage) SaveStream(st StreamFile, start, end time.Time) (string, error) {
+func (s *localStorage) SaveStream(st StreamFile, start, end time.Time, overwrite bool) (string, error) {
 	return s.writeJSON(st, st.Market, start, end, "stream")
 }
 

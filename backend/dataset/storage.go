@@ -12,8 +12,15 @@ var ErrNotFound = errors.New("파일을 찾을 수 없습니다")
 // Storage는 batch/stream JSON을 어딘가에 저장하고 읽어오는 방법을 추상화합니다.
 // dev 환경은 localStorage, prod 환경은 s3Storage를 씁니다 (환경 선택은 main.go에서).
 type Storage interface {
-	SaveBatch(b BatchFile, start, end time.Time) (string, error)
-	SaveStream(s StreamFile, start, end time.Time) (string, error)
+	// overwrite=false는 기존 파일이 있으면 재업로드 없이 그 경로를 그대로
+	// 돌려주는 멱등 동작(putIfAbsent, 온디맨드 경로 — ensureMarketCollected가
+	//씀)이고, overwrite=true는 기존 파일 유무와 무관하게 항상 방금 받아온
+	// 데이터로 덮어씁니다(2026-08-26 추가 — "시세 수집 요청" 버튼을 다시
+	// 눌러도 예전 캐시가 아니라 항상 최신 데이터를 받아오도록 해달라는 요청,
+	// collectAllMarkets가 씀). localStorage는 원래도 항상 덮어쓰므로 이 값을
+	// 무시합니다.
+	SaveBatch(b BatchFile, start, end time.Time, overwrite bool) (string, error)
+	SaveStream(s StreamFile, start, end time.Time, overwrite bool) (string, error)
 	LoadBatch(market string, start, end time.Time) (BatchFile, error)
 	LoadStream(market string, start, end time.Time) (StreamFile, error)
 	// Exists는 market+[start,end) 기간의 batch/stream 파일이 이미 저장돼 있는지

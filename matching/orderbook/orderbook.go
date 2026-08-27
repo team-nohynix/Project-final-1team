@@ -4,6 +4,7 @@ package orderbook
 
 import (
 	"container/list"
+	"log"
 	"sort"
 
 	"github.com/shopspring/decimal"
@@ -107,7 +108,22 @@ func (ob *OrderBook) levelsFor(side Side) map[string]*priceLevel {
 
 // insertResting은 o를 미체결 주문으로 호가창에 편입합니다(매칭 뒤 남은 수량이 있을 때,
 // 또는 매칭 없이 그대로 접수될 때).
+//
+// **OrderID 중복 방어 — 2026-08-27, match.go의 Apply 가드로도 못 막던 나머지 경로.**
+// Apply의 가드(같은 OrderID면 매칭 자체를 건너뜀)는 "새 NEW 이벤트가 두 번 들어오는"
+// 경로만 막는다. 그런데 Restore(스냅샷 복구)는 Apply를 거치지 않고 이 함수를 직접
+// 부른다 — 만약 어떤 경로로든 한 번이라도 elements와 리스트가 어긋난 채(유령 노드)
+// 스냅샷이 저장되면(AllOrders가 elements가 아니라 리스트를 그대로 훑으므로, 유령
+// 노드도 그대로 스냅샷에 실린다), 그 뒤로 이 마켓이 몇 번을 다시 인수되든 Recover가
+// 매번 유령을 충실히 재현하고, Handoff가 그걸 또 그대로 저장해 사고가 영구화된다.
+// insertResting 자체를 멱등하게 만들어 두 경로(Apply의 잔량 편입, Restore) 모두
+// 같은 안전망을 갖게 한다 — 이미 있는 OrderID면 조용히 무시.
 func (ob *OrderBook) insertResting(o *Order) {
+	if _, exists := ob.elements[o.OrderID]; exists {
+		log.Printf("경고: insertResting 중복 방어 발동 (market=%s orderId=%s) — 정상 상황이면 절대 발동하면 안 됨", ob.Market, o.OrderID)
+		return
+	}
+
 	price := normalizePrice(o.Price)
 	o.Price = price
 	key := price.String()
