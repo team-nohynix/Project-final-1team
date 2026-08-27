@@ -394,6 +394,47 @@ func TestLastRunHandlerFound(t *testing.T) {
 	}
 }
 
+// TestLastRunHandlerPreservesSubSecondPrecision — 2026-08-27, "주문 유실"/
+// "매수매도 총량 불일치"가 실행이 끝나는 바로 그 초에 들어온 주문들을 잘라내
+// 매 실행마다 몇 건씩 허수로 잡히던 사고의 회귀 테스트입니다(실측:
+// 00:25:10.000~00:25:10.322 사이 13건). RFC3339(초 단위)로 포맷하면 이
+// 밀리초가 통째로 사라져, 프론트가 그대로 recorder 쿼리의 [from, to) 경계로
+// 쓰면서 그 구간 주문들이 잘려나갔습니다. EndedAt이 정각이 아닌 밀리초를
+// 가지고 있으면 응답 문자열에도 그대로 남아있어야 합니다.
+func TestLastRunHandlerPreservesSubSecondPrecision(t *testing.T) {
+	started := time.Date(2026, 8, 27, 0, 20, 0, 0, time.UTC)
+	ended := time.Date(2026, 8, 27, 0, 25, 10, 322000000, time.UTC) // 00:25:10.322
+	store := &fakeSessionStore{lastRunFound: true, lastRunRec: session.RunRecord{
+		RunID: "run_1", Owner: "replayengine", Status: session.RunStatusCompleted,
+		StartedAt: started, EndedAt: ended,
+	}}
+	mux := newSessionMux(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/last-run", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	var got lastRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("응답 파싱 실패: %v", err)
+	}
+	if !strings.Contains(got.EndedAt, ".322") {
+		t.Fatalf("EndedAt = %q, want 밀리초(.322)가 남아있어야 함", got.EndedAt)
+	}
+
+	// 프론트가 이 문자열을 그대로 recorder의 orders/summary·orders/integrity
+	// 쿼리 파라미터로 쓰므로, recorder 쪽 time.Parse(time.RFC3339, ...)가 이
+	// 문자열을 밀리초까지 정확히 되살릴 수 있어야 합니다(Go는 레이아웃에 소수점
+	// 자리가 없어도 파싱 시엔 관대하게 받아들이지만, 왕복 자체를 직접 검증).
+	reparsed, err := time.Parse(time.RFC3339, got.EndedAt)
+	if err != nil {
+		t.Fatalf("recorder 쪽 파싱 실패: %v", err)
+	}
+	if !reparsed.Equal(ended) {
+		t.Errorf("재파싱된 시각 = %v, want %v (밀리초 유실)", reparsed, ended)
+	}
+}
+
 func TestLastRunHandlerNeverRun(t *testing.T) {
 	store := &fakeSessionStore{lastRunFound: false}
 	mux := newSessionMux(store)
