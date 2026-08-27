@@ -88,7 +88,7 @@ resource "aws_iam_role_policy" "github_actions_terraform_plan_lockfile" {
 # (cicd-terraform.tf의 SecretsManagerRecorderDbUrl 참고).
 data "aws_iam_policy_document" "github_actions_terraform_plan_secretsmanager" {
   statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"]
     resources = [aws_secretsmanager_secret.recorder_mysql_db_url.arn]
   }
 }
@@ -195,9 +195,23 @@ data "aws_iam_policy_document" "github_actions_terraform_apply_policy" {
   # 2026-08-27: 위 목록엔 secretsmanager:*가 없다(GetSecretValue는 위 "*"에도
   # 일부러 안 넣어온 민감 액션 부류) — secrets-manager.tf의 aws_secretsmanager_secret_version이
   # plan/apply 중 refresh로 실제 값을 읽어야 해서, 그 한 시크릿에만 좁혀서 예외를 둔다.
+  # apply는 읽기뿐 아니라 실제로 값/설명/태그를 쓸 수도 있어야 한다 — CI에서
+  # GetSecretValue, 그다음 GetResourcePolicy 순서로 하나씩 막힌 걸 실측하고 나서,
+  # 와일드카드(secretsmanager:*) 대신 실제로 쓰는 액션만 하나씩 나열했다(계정
+  # 전체가 아니라 이 시크릿 하나로 리소스를 좁혔어도, 위 TerraformManagedServices의
+  # "서비스 단위로 좁히기" 원칙에 맞춰 액션도 최대한 좁힌다).
   statement {
-    sid       = "SecretsManagerRecorderDbUrl"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    sid = "SecretsManagerRecorderDbUrl"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetResourcePolicy",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecret",
+      "secretsmanager:TagResource",
+      "secretsmanager:UntagResource",
+      "secretsmanager:UpdateSecretVersionStage",
+    ]
     resources = [aws_secretsmanager_secret.recorder_mysql_db_url.arn]
   }
 }
