@@ -1,0 +1,76 @@
+# secrets-store-csi-driver-provider-aws — 공식 helm 차트가 없어서(업스트림 설치
+# 가이드도 raw manifest 적용을 권장) 다른 add-on들과 달리 helm_release가 아니라
+# 여기 plain YAML로 관리한다(nodepool-*.yaml과 같은 패턴). csi-secrets-store.tf의
+# 드라이버 helm_release와 짝을 이룬다.
+#
+# nodeSelector/affinity는 드라이버 DaemonSet(csi-secrets-store.tf의 linux.nodeSelector/
+# affinity)과 완전히 동일하게 맞춘다 — Fargate 노드만 제외, 나머지(시스템/Karpenter
+# backend/recorder)는 전부 포함해야 recorder가 뜨는 노드에서도 프로바이더가 뜬다.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-secrets-store-provider-aws
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: csi-secrets-store-provider-aws
+  namespace: kube-system
+  labels:
+    app: csi-secrets-store-provider-aws
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: csi-secrets-store-provider-aws
+  template:
+    metadata:
+      labels:
+        app: csi-secrets-store-provider-aws
+    spec:
+      serviceAccountName: csi-secrets-store-provider-aws
+      hostNetwork: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: eks.amazonaws.com/compute-type
+                    operator: NotIn
+                    values: ["fargate"]
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: provider-aws-installer
+          image: public.ecr.aws/aws-secrets-manager/secrets-store-csi-driver-provider-aws:3.1.3
+          imagePullPolicy: Always
+          args:
+            - --provider-volume=/var/run/secrets-store-csi-providers
+          resources:
+            requests:
+              cpu: 50m
+              memory: 100Mi
+            limits:
+              cpu: 50m
+              memory: 100Mi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - mountPath: /var/run/secrets-store-csi-providers
+              name: providervol
+            - mountPath: /var/lib/kubelet/pods
+              mountPropagation: HostToContainer
+              name: mountpoint-dir
+      volumes:
+        - name: providervol
+          hostPath:
+            path: /var/run/secrets-store-csi-providers
+        - name: mountpoint-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: DirectoryOrCreate
