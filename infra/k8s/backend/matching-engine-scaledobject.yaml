@@ -1,61 +1,30 @@
 # matching-engine을 컨슈머 랙(matching_engine_lag, matching-engine이 스스로 노출하는
-# Prometheus 게이지 — 담당 파티션들의 합계, 백프레셔 플래그와 같은 값)으로 스케일한다.
-# CPU 대신 이걸 쓰는 이유: 부하가 CPU가 아니라 처리 속도 자체에 걸리는 경우(예: Kafka
-# I/O 대기) CPU는 멀쩡한데 주문만 밀릴 수 있어서 — 실제로 밀려 있는 양을 직접 봐야
-# 한다(2026-08-12 결정). sum()으로 전체 인스턴스의 랙을 더한 값을 기준으로 삼는다 —
-# 인스턴스가 늘어날수록 FR-11 재분배로 담당 파티션이 쪼개지면서 인스턴스당 랙은
-# 자연히 줄어드는데, 합계는 "아직 못 따라잡은 전체 양"을 그대로 반영한다.
+# Prometheus 게이지 — 담당 파티션들의 합계)으로 스케일한다. CPU 대신 이걸 쓰는 이유:
+# 부하가 CPU가 아니라 처리 속도 자체에 걸리는 경우(Kafka I/O 대기 등) CPU는 멀쩡한데
+# 주문만 밀릴 수 있어서 — 실제로 밀려 있는 양을 직접 봐야 한다. sum()으로 전체 인스턴스의
+# 랙을 더한 값을 기준으로 삼는다 — 인스턴스가 늘어날수록 FR-11 재분배로 담당 파티션이
+# 쪼개지면서 인스턴스당 랙은 자연히 줄어드는데, 합계는 "아직 못 따라잡은 전체 양"을
+# 그대로 반영한다. threshold=500은 실측 전 잠정값.
 #
-# threshold=500은 잠정값 — 이 프로젝트의 다른 워터마크들(matching/backpressure의
-# 5000/1000 등)과 마찬가지로 실측 부하 시험 전까지는 근거 없는 시작값이다.
+# 전제: KEDA가 클러스터에 설치돼 있어야 한다(Terraform 관리 밖, helm_release로 karpenter.tf/
+# k8s-addons.tf와 같은 패턴).
 #
-# 전제: KEDA가 클러스터에 설치돼 있어야 한다(Terraform 관리 밖, 다른 Helm 설치들과
-# 같은 방식) — helm repo add kedacore https://kedacore.github.io/charts &&
-# helm install keda kedacore/keda --namespace keda --create-namespace
+# minReplicaCount=2 — 1개면 버스트 유입 시 그 1개 파드가 20개 마켓 물량을 스케일업(15~90초)
+# 될 때까지 혼자 받다가 OOMKilled되고, 크래시마다 Kafka 컨슈머 그룹 리밸런스로 다른
+# 파드들의 체결 발행까지 잠깐 실패해 랙/백프레셔로 번진다 — "혼자 다 받는 상황" 자체를
+# 없앤다. (KEDA는 minReplicaCount>0일 땐 cooldownPeriod를 아예 무시하고, 축소 속도는
+# K8s HPA 기본 스케일다운 stabilization window가 결정한다 — 아래 60초.)
 #
-# matching_engine_lag 자체는 matching/metrics.go가 새로 노출하는 값이라, 이 파일을
-# 적용해도 아직 예전 이미지가 떠 있는 동안은 값이 0으로 보인다(HPA가 지표 자체는
-# 정상적으로 읽지만 데이터가 없을 뿐) — matching-latest 이미지가 metrics.go 포함해서
-# 재빌드/재배포된 뒤에야 실제로 스케일링이 동작한다.
+# matching_engine_lag은 "아직 못 읽은 메시지 수"만 재서, 다 읽었지만 체결 상대가 없어
+# 호가창(orderbook.elements)에 무기한 쌓이는 미체결 주문은 못 본다 — 랙과 무관하게
+# 메모리만 계속 자라다가 limit에서 바로 OOMKilled될 수 있다. matching_engine_book_size
+# (담당 마켓 전체 호가창 미체결 주문 수 합계)를 두 번째 트리거로 추가한다 — KEDA는
+# 여러 트리거 중 "가장 많은 레플리카를 요구하는 값"을 따르므로(OR 조건) 둘 중 하나만
+# 넘어도 스케일아웃된다. threshold=20000도 lag와 같은 이유로 실측 전 잠정값 — 인스턴스당
+# 2Gi/2867Mi(matching-engine-deployment.yaml) 한도 안에서 안전한 상한은 아직 미측정.
 #
-# 2026-08-20: serverAddress가 예전 in-cluster kube-prometheus-stack을 가리키고
-# 있었는데, 그 Prometheus를 자체 호스팅 EC2로 완전히 이전(monitoring-ec2.tf)하면서
-# 지워버려서 KEDA가 DNS lookup부터 계속 실패하고 있었다(kubectl describe
-# scaledobject로 확인: "dial tcp: lookup ...monitoring.svc.cluster.local ...
-# no such host") — READY=False로 오토스케일링 자체가 죽어있던 진짜 원인. 새
-# Prometheus(EC2, EIP+도메인)를 가리키도록 고침.
-#
-# 2026-08-20 (계속): minReplicaCount=1이 실측 부하테스트에서 반복 장애로
-# 이어졌다 — 버스트가 잦아들면 곧 1개로 축소되는데(축소 속도는 KEDA
-# cooldownPeriod가 아니라 K8s HPA 기본 스케일다운 동작이 결정함 — KEDA는
-# minReplicaCount>0일 땐 cooldownPeriod를 아예 무시한다, kubectl apply 시
-# 경고로 확인됨: "CooldownPeriod is ... only relevant when minReplicaCount = 0"),
-# 다음 버스트가 오면 그 1개 파드가 20개 마켓 물량을 스케일업(15~90초) 될 때까지
-# 혼자 받다가 매번 OOMKilled(재시작 여러 번 실측). 크래시마다 Kafka 컨슈머 그룹
-# 리밸런스로 다른 파드들의 체결 발행까지 잠깐 실패해서 랙/백프레셔로 번졌다.
-# minReplicaCount를 2로 올려 "혼자 다 받는 상황" 자체를 없앤다 — 이게 실제
-# 효과가 있는 수정이고, cooldownPeriod는 이 조건에서 관여하지 않으므로 굳이
-# 값을 바꾸지 않는다(기본값 유지).
-#
-# 2026-08-21: 랙이 0 근처를 유지하는 상태에서도 OOMKilled가 재현됨(kubectl describe
-# pod로 확인) — 원인은 matching_engine_lag이 "아직 못 읽은 메시지 수"만 재기 때문에,
-# "다 읽었지만 체결 상대가 없어 호가창(orderbook.elements)에 쌓이기만 하는 미체결
-# 주문"은 이 지표로 전혀 못 본다는 것(orderbook.go 확인: 주문은 체결되거나 명시적
-# Cancel 전까지 무기한 보관, TTL/크기 상한 없음). 랙과 무관하게 메모리만 계속
-# 자라다가 limit에 부딪히면 아무 경고 없이 바로 OOMKilled됨 — KEDA 입장에서는
-# "정상"으로 보이는 채로 사고가 남. matching_engine_book_size(matching/metrics.go,
-# marketRegistry.TotalBookSize 경유 — 담당 마켓 전체 호가창 미체결 주문 수 합계)를
-# 두 번째 트리거로 추가해 이 종류의 압박도 스케일아웃 신호가 되도록 한다. KEDA는
-# ScaledObject의 여러 트리거 중 "가장 많은 레플리카를 요구하는 값"을 따르므로(OR
-# 조건), 랙 트리거와 이 트리거 둘 중 하나만 넘어도 스케일아웃된다.
-# threshold=20000은 위 lag=500/recorder=1000과 같은 이유로 실측 전 잠정값 — 인스턴스당
-# 2Gi/2867Mi(matching-engine-deployment.yaml) 한도 안에서 실제로 안전한 상한이 얼마인지
-# 아직 측정 안 됨. 다음 부하테스트에서 book_size 대비 실제 메모리 사용량을 관찰해 조정.
-# 2026-08-26: 스케일다운 속도 개선 요청 — minReplicaCount=2(>0)라 위 cooldownPeriod
-# 관련 설명대로 KEDA cooldownPeriod가 아니라 K8s HPA 기본 스케일다운 stabilization
-# window(300초/5분)가 실제 속도를 결정한다. minReplicaCount=2 바닥이 "혼자 다
-# 받다가 OOMKilled"(위 2026-08-20 사고) 재발을 이미 막아주므로, 굳이 5분씩 안전
-# 마진을 둘 필요가 줄었다고 판단해 60초로 단축한다.
+# stabilizationWindowSeconds=60 — minReplicaCount=2 바닥이 "혼자 다 받다가 OOMKilled"
+# 재발을 이미 막아주므로, K8s HPA 기본값(300초)만큼 안전 마진을 둘 필요가 줄었다고 판단.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

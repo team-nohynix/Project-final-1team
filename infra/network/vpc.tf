@@ -1,4 +1,4 @@
-# 데이터 계층만 3 AZ(a/b/d), 나머지는 2 AZ(a/b). 단일 EKS 클러스터 안에서 노드그룹(backend)과
+# 전 계층 2 AZ(a/b). 단일 EKS 클러스터 안에서 노드그룹(backend)과
 # Fargate Profile 3종(collector/aitrader/replay)이 이 서브넷 경계를 워크로드 격리 단위로 쓴다.
 
 resource "aws_vpc" "team1_vpc" {
@@ -162,7 +162,9 @@ resource "aws_subnet" "team1_eks_replay_b" {
   }
 }
 
-# 데이터 계층 (RDS/ElastiCache/MSK) — RDS만 3 AZ 전부 사용
+# 데이터 계층 (ElastiCache/MSK, a/b 2 AZ) — 원래 RDS 3번째 노드용으로 2d에
+# team1-data-d(10.10.52.0/24)가 있었으나, RDS를 자체 호스팅 MySQL EC2(mysql-ec2.tf)로
+# 전환(rds.tf 참고)하면서 그 서브넷을 쓰는 리소스가 하나도 안 남아 통째로 제거했다.
 
 resource "aws_subnet" "team1_data_a" {
   vpc_id            = aws_vpc.team1_vpc.id
@@ -183,17 +185,5 @@ resource "aws_subnet" "team1_data_b" {
   tags = {
     Team = "team1"
     Name = "team1-data-b"
-  }
-}
-
-# RDS 3번째 노드 전용. db.m6gd.large가 2c를 지원하지 않아 2d 사용(root 스택 rds.tf).
-resource "aws_subnet" "team1_data_d" {
-  vpc_id            = aws_vpc.team1_vpc.id
-  cidr_block        = "10.10.52.0/24"
-  availability_zone = "ap-northeast-2d"
-
-  tags = {
-    Team = "team1"
-    Name = "team1-data-d"
   }
 }

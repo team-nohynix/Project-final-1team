@@ -1,17 +1,8 @@
-# RDS(Multi-AZ 클러스터, db.m6gd.large=vCPU 2개) 대신 자체 호스팅 MySQL EC2.
-#
-# 배경: 50배속 부하테스트에서 recorder의 쓰기량(WriteIOPS 2,000~2,800/초)이
-# RDS CPU를 지속적으로 99%까지 밀어붙이는 걸 실측했다. recorder의 executions
-# 쓰기 배치화(recorder/store/mysql.go, 2026-08-21)로 배치당 왕복 횟수는
-# 800→3회로 줄였지만, 근본 원인인 "인스턴스 자체의 vCPU 부족"은 별개 문제로
-# 남아있었다. RDS 인스턴스 클래스만 올리는 게 더 간단하고 안전하지만, 팀
-# 결정으로 EC2에 직접 구축하는 쪽을 선택했다(비용 문제로 기존 RDS는 먼저
-# 삭제 — rds.tf 참고).
-#
-# 기존 데이터는 버려도 된다고 확인받아 마이그레이션(덤프/복원) 없이 빈
-# 스키마로 새로 시작한다. monitoring-ec2.tf와 완전히 같은 패턴(SSH 키 없이
-# SSM만, S3 설정 버킷으로 user_data 16KB 한도 우회, AMI 고정)을 그대로
-# 재사용한다.
+# RDS(Multi-AZ 클러스터, db.m6gd.large=vCPU 2개) 대신 자체 호스팅 MySQL EC2 — 부하테스트에서
+# recorder의 쓰기량이 RDS CPU를 지속적으로 밀어붙여, 인스턴스 클래스를 올리는 대신 팀
+# 결정으로 EC2에 직접 구축하는 쪽을 선택했다(비용 문제로 기존 RDS는 먼저 삭제 — rds.tf 참고).
+# monitoring-ec2.tf와 같은 패턴(SSH 키 없이 SSM만, S3 설정 버킷으로 user_data 16KB 한도
+# 우회, AMI 고정)을 재사용한다.
 
 resource "random_password" "mysql_root" {
   length  = 32
@@ -172,13 +163,11 @@ resource "aws_security_group" "team1_sg_mysql_ec2" {
 
 # --- EC2 ---------------------------------------------------------------------
 
-# **매일 destroy→apply 운영 시 데이터는 매번 사라진다(2026-08-24, 의도적으로
-# 고친 적 없음 — 알고 넘어가기로 한 부분)** — RDS와 달리 순수 EC2+EBS라
-# terraform destroy 시 스냅샷 없이 볼륨째로 지워지고, 다시 만들면 schema.sql로
-# 빈 스키마부터 시작한다(아래 user_data). 부하테스트용 디스포저블 데이터라
-# 보통 문제 없지만, "어제 테스트 결과를 남겨두고 싶다"면 별도로 EBS 스냅샷을
-# 만들거나 mysqldump를 S3에 백업해뒀다가 복원하는 절차가 추가로 필요하다 —
-# 지금은 그 자동화가 없다.
+# **destroy→apply 운영 시 데이터는 매번 사라진다(의도적으로 그대로 둔 부분)** — RDS와
+# 달리 순수 EC2+EBS라 terraform destroy 시 스냅샷 없이 볼륨째로 지워지고, 다시 만들면
+# schema.sql로 빈 스키마부터 시작한다(아래 user_data). 부하테스트용 디스포저블 데이터라
+# 보통 문제 없지만, 데이터를 남기려면 별도로 EBS 스냅샷이나 mysqldump→S3 백업/복원
+# 절차가 필요하다 — 지금은 그 자동화가 없다.
 resource "aws_instance" "mysql" {
   ami                    = data.aws_ami.al2023_mysql.id
   instance_type          = "m6i.2xlarge" # 8vCPU/32GiB — RDS(db.m6gd.large, 2vCPU)의 4배
@@ -192,11 +181,9 @@ resource "aws_instance" "mysql" {
   root_block_device {
     volume_size = 50
     volume_type = "gp3"
-    # iops 3000→6000, 2026-08-24 — innodb_flush_log_at_trx_commit=2로 fsync
-    # "빈도"는 줄였지만, 실제로 fsync가 발생할 때의 "지연"은 여전히 프로비저닝된
-    # IOPS에 좌우된다(docker-compose.yml.tpl 주석 참고). gp3 온라인 볼륨
-    # 수정이라 인스턴스 재시작/다운타임 없이 반영되고, 인스턴스 클래스를
-    # 올리는 것과 달리 비용 임팩트도 작다(추가 3000 IOPS ≈ 월 15달러 수준).
+    # innodb_flush_log_at_trx_commit=2로 fsync "빈도"는 줄였지만, 실제 fsync
+    # 발생 시의 "지연"은 여전히 프로비저닝된 IOPS에 좌우된다(docker-compose.yml.tpl
+    # 참고). gp3 온라인 볼륨 수정이라 다운타임 없이 반영된다.
     iops       = 6000
     throughput = 250
   }
@@ -241,15 +228,10 @@ output "mysql_root_password" {
   sensitive = true
 }
 
-# recorder-db-secret — 원래 이 MySQL EC2를 만들 때 `kubectl create secret generic
-# recorder-db-secret --from-literal=DATABASE_URL=...`로 손으로 만들어져 있던 것을
-# terraform으로 옮겼다(2026-08-24, "EKS/MySQL을 통째로 지웠다 올려도 원상복구되게").
-# random_password.mysql_root는 destroy→apply 할 때마다 새로 생성되는데(고정 시드가
-# 없어서), 그 비밀번호가 바뀔 때마다 이 시크릿을 손으로 다시 만들어줘야 했던 게 원래
-# 문제였음 — 이제 password도 이 리소스도 같은 terraform apply 안에서 항상 같이
-# 갱신되므로 그 문제가 사라진다. DSN 형식(parseTime=true&loc=UTC)은 실제 배포된
-# 시크릿에서 그대로 확인한 것(recorder/main.go의 sql.Open이 기대하는 형식,
-# go-sql-driver/mysql DATETIME 스캔에 parseTime 필요).
+# recorder-db-secret — random_password.mysql_root는 destroy→apply 할 때마다 새로
+# 생성되므로(고정 시드 없음), password와 이 Secret을 같은 terraform apply 안에서 항상
+# 같이 갱신한다. DSN 형식(parseTime=true&loc=UTC)은 recorder/main.go의 sql.Open이
+# 기대하는 형식(go-sql-driver/mysql DATETIME 스캔에 parseTime 필요).
 resource "kubernetes_secret" "recorder_db" {
   metadata {
     name      = "recorder-db-secret"

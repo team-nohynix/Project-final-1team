@@ -3,14 +3,14 @@ output "vpc_id" {
 }
 
 output "subnet_ids" {
-  description = "티어별 서브넷 id — data만 a/b/d, 나머지는 a/b. Job 트리거 Lambda는 eks_backend 서브넷을 공유한다."
+  description = "티어별 서브넷 id — 전 계층 a/b 2 AZ. Job 트리거 Lambda는 eks_backend 서브넷을 공유한다."
   value = {
     public        = { a = aws_subnet.team1_public_a.id, b = aws_subnet.team1_public_b.id }
     eks_backend   = { a = aws_subnet.team1_eks_backend_a.id, b = aws_subnet.team1_eks_backend_b.id }
     eks_collector = { a = aws_subnet.team1_eks_collector_a.id, b = aws_subnet.team1_eks_collector_b.id }
     eks_aitrader  = { a = aws_subnet.team1_eks_aitrader_a.id, b = aws_subnet.team1_eks_aitrader_b.id }
     eks_replay    = { a = aws_subnet.team1_eks_replay_a.id, b = aws_subnet.team1_eks_replay_b.id }
-    data          = { a = aws_subnet.team1_data_a.id, b = aws_subnet.team1_data_b.id, d = aws_subnet.team1_data_d.id }
+    data          = { a = aws_subnet.team1_data_a.id, b = aws_subnet.team1_data_b.id }
   }
 }
 

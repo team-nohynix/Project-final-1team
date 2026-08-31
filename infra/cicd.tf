@@ -3,7 +3,7 @@
 # (PR/다른 브랜치까지 열어주려면 트러스트 정책의 sub 조건을 넓히면 된다).
 #
 # OIDC 프로바이더는 계정에 URL당 1개만 존재 가능 — 공유 계정이라 다른 팀이 이미 만들어둔
-# 것을 그대로 참조한다(직접 만들려다 EntityAlreadyExists로 확인).
+# 것을 그대로 참조한다.
 data "aws_iam_openid_connect_provider" "github_actions" {
   url = "https://token.actions.githubusercontent.com"
 }
@@ -22,14 +22,11 @@ data "aws_iam_policy_document" "github_actions_assume" {
     }
     # prod 브랜치 push로 전체 CI/CD(프론트 S3, 이미지 ECR, k8s 롤아웃 재시작)를 돌린다 —
     # main은 예전 backend 전용 워크플로 흔적, 새 워크플로는 prod만 쓰지만 트러스트는
-    # 굳이 좁히지 않고 남겨둔다(레포에 남아있는 워크플로 파일 자체가 실제 방아쇠라
-    # 여기 조건 하나만으로 뭐가 도는지 결정되지 않음).
+    # 굳이 좁히지 않고 남겨둔다.
     #
-    # 2026-08-18: GitHub가 sub 클레임 포맷을 바꿔서 owner/repo 둘 다 뒤에 불변 숫자 ID가
-    # 붙는다(repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:...) — repo ID(@1314526744)만 추가하고
-    # owner ID(@101383021)는 빠뜨려서 전체 CI/CD가 계속 실패하고 있었다(실제 OIDC 토큰의
-    # sub 클레임을 디버그 job으로 직접 확인해서 찾음). 예전 포맷 두 개는 이제 안 쓰이는
-    # 걸로 보이지만, 혹시 GitHub가 롤백하는 경우를 대비해 남겨둔다.
+    # GitHub Actions OIDC의 sub 클레임은 owner/repo 뒤에 불변 숫자 ID가 붙는 포맷
+    # (repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:...)과 ID 없는 예전 포맷 둘 다 온다 —
+    # 둘 다 매칭해둔다.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"

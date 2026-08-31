@@ -4,10 +4,9 @@ services:
     restart: unless-stopped
     environment:
       # 반드시 큰따옴표로 감싼다 — random_password.mysql_root의 override_special에
-      # "#"가 포함돼있어서(mysql-ec2.tf), 비밀번호가 우연히 "#"로 시작하면
-      # 따옴표 없는 YAML 스칼라에서 그 뒤 전체가 주석 처리돼 값이 빈 문자열이
-      # 되고, MySQL 컨테이너가 "password option is not specified"로 계속
-      # 재시작한다(2026-08-25, EKS 전체 destroy→apply 리허설 중 실측).
+      # "#"가 포함돼있어서(mysql-ec2.tf), 비밀번호가 우연히 "#"로 시작하면 따옴표
+      # 없는 YAML 스칼라에서 그 뒤 전체가 주석 처리돼 값이 빈 문자열이 되고, MySQL
+      # 컨테이너가 "password option is not specified"로 계속 재시작한다.
       MYSQL_ROOT_PASSWORD: "${mysql_root_password}"
       MYSQL_DATABASE: team1_truss
     ports:
@@ -19,14 +18,13 @@ services:
       - /etc/mysql-init:/docker-entrypoint-initdb.d:ro
     command:
       - --max_connections=200
-      # 2026-08-24, 실측 튜닝(Grafana 대시보드 "미처리 주문" 백로그 원인 조사
-      # 중 발견) — RDS→EC2 이전(infra/rds.tf 참고) 이후 인스턴스 RAM(m6i.2xlarge,
-      # 30GiB)에 맞는 InnoDB 튜닝이 안 돼 있었다. RDS는 인스턴스 클래스에 맞춰
-      # 파라미터 그룹을 어느 정도 자동으로 잡아주지만, 자체 호스팅 MySQL은
-      # 수동으로 안 맞추면 기본값(128MB 버퍼풀 등)을 그대로 쓴다.
+      # RDS→EC2 이전(infra/rds.tf 참고) 이후 인스턴스 RAM(m6i.2xlarge, 30GiB)에
+      # 맞는 InnoDB 튜닝이 필요하다 — RDS는 인스턴스 클래스에 맞춰 파라미터 그룹을
+      # 어느 정도 자동으로 잡아주지만, 자체 호스팅 MySQL은 수동으로 안 맞추면
+      # 기본값(128MB 버퍼풀 등)을 그대로 쓴다.
       #
       # innodb_buffer_pool_size=22G — 30GiB 중 OS/도커/커넥션(max_connections=200)
-      # 여유를 남기고 나머지를 InnoDB 캐시로. 기존 128MB(기본값)에서 실측.
+      # 여유를 남기고 나머지를 InnoDB 캐시로.
       - --innodb-buffer-pool-size=22G
       # innodb_flush_log_at_trx_commit=2 — 기본값(1)은 커밋마다 redo log를
       # 디스크에 fsync한다. 2로 바꾸면 커밋마다 OS 캐시에만 쓰고 실제 fsync는

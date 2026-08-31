@@ -2,11 +2,9 @@
 # kube-system은 team1-ng-system(EC2)에서 상시 실행되므로 여기 셀렉터에 넣지 않는다.
 
 # Fargate 파드는 network 스택에서 만든 team1_sg_eks_cluster가 아니라 EKS가 자동
-# 생성하는 클러스터 SG(vpc_config[0].cluster_security_group_id)를 쓴다 — ALB에서
-# 시세 수집기(collector)로 인그레스를 열 때 이걸 실제로 놓쳐서 헬스체크가
-# Target.Timeout으로 실패하는 걸 라이브로 확인했다(VPC 엔드포인트 때 겪은 것과
-# 같은 함정). 이 SG는 root 스택 리소스(aws_eks_cluster.team1)라 여기서 바로 참조
-# 가능 — network 스택 쪽 VPC 엔드포인트 때처럼 순환 의존 문제가 없다.
+# 생성하는 클러스터 SG(vpc_config[0].cluster_security_group_id)를 쓴다. 이 SG는
+# root 스택 리소스(aws_eks_cluster.team1)라 여기서 바로 참조 가능 — network 스택
+# 쪽처럼 순환 의존 문제가 없다.
 resource "aws_security_group_rule" "team1_collector_from_alb_real_sg" {
   type                     = "ingress"
   security_group_id        = aws_eks_cluster.team1.vpc_config[0].cluster_security_group_id
@@ -17,15 +15,10 @@ resource "aws_security_group_rule" "team1_collector_from_alb_real_sg" {
   description              = "Public ALB to market-data collector Fargate pod (EKS auto-created cluster SG, not our own)"
 }
 
-# 같은 함정, 세 번째로 발견: CoreDNS는 백엔드 노드그룹(EC2, SG=team1_sg_eks_backend —
-# 런치 템플릿이 자동생성 SG를 대체함)에서 도는데, network 스택의
-# team1_cluster_to_backend 규칙은 우리가 만든 (안 쓰이는) team1_sg_eks_cluster만
-# 허용한다. Fargate 파드(시세 수집기 등)가 실제로 쓰는 이 진짜 자동생성 SG가
-# 빠져 있어서 Fargate 파드의 모든 DNS 조회(api.upbit.com 포함)가 CoreDNS 자체에
-# 도달을 못 해 i/o timeout으로 죽는 걸 라이브로 확인했다(시세 수집기가 몇 분째
-# 응답 없이 걸려있던 진짜 원인). 기존 컨트롤플레인<->노드 규칙과 같은 포트 범위로
-# 맞춘다(0-65535/all, DNS만 열 이유가 없음 — Fargate도 결국 클러스터 SG의 다른
-# 용도를 공유하는 게 정상 설계).
+# CoreDNS는 백엔드 노드그룹(EC2, SG=team1_sg_eks_backend)에서 도는데, network 스택의
+# team1_cluster_to_backend 규칙은 우리가 만든(안 쓰이는) team1_sg_eks_cluster만
+# 허용한다. Fargate 파드가 실제로 쓰는 위 자동생성 SG를 허용해야 Fargate 파드의
+# DNS 조회가 CoreDNS에 도달한다 — 컨트롤플레인<->노드 규칙과 같은 포트 범위(0-65535/all).
 resource "aws_security_group_rule" "team1_backend_from_fargate_real_sg" {
   type                     = "ingress"
   security_group_id        = data.terraform_remote_state.network.outputs.security_group_ids.eks_backend
@@ -36,12 +29,9 @@ resource "aws_security_group_rule" "team1_backend_from_fargate_real_sg" {
   description              = "Fargate pods (real EKS auto-created cluster SG) to backend node group (CoreDNS etc.)"
 }
 
-# 네 번째, 같은 함정의 반대 방향: orderapi(team1_sg_eks_backend)가 시세 수집기를
-# 대시보드 헬스체크용으로 http://backend.collector:8080/... 직접 호출하도록
-# 2026-08-25에 추가했는데(orderapi/systemstatus.go), 이 SG 갭 때문에 SYN이 그냥
-# 버려져 3초 타임아웃마다 "down"으로 표시되는 걸 실측으로 확인(ENI 조회 —
-# 콜렉터 파드 인바운드가 team1_sg_alb_public 하나뿐이었음). ALB→Fargate 규칙만
-# 있고 backend 노드그룹→Fargate 규칙이 없었던 것.
+# 반대 방향: orderapi(team1_sg_eks_backend)가 시세 수집기를 대시보드 헬스체크용으로
+# http://backend.collector:8080/...로 직접 호출한다 — ALB→Fargate 규칙만으로는
+# backend 노드그룹→Fargate 경로가 안 열려 있었다.
 resource "aws_security_group_rule" "team1_fargate_from_backend_real_sg" {
   type                     = "ingress"
   security_group_id        = aws_eks_cluster.team1.vpc_config[0].cluster_security_group_id

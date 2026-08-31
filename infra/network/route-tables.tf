@@ -125,19 +125,3 @@ resource "aws_route_table_association" "team1_data_b" {
   subnet_id      = aws_subnet.team1_data_b.id
   route_table_id = aws_route_table.team1_data_b.id
 }
-
-# 데이터 — d (RDS 전용 AZ)
-
-resource "aws_route_table" "team1_data_d" {
-  vpc_id = aws_vpc.team1_vpc.id
-
-  tags = {
-    Team = "team1"
-    Name = "team1-data-rt-d"
-  }
-}
-
-resource "aws_route_table_association" "team1_data_d" {
-  subnet_id      = aws_subnet.team1_data_d.id
-  route_table_id = aws_route_table.team1_data_d.id
-}

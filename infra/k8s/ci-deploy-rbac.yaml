@@ -2,17 +2,10 @@
 # kubernetes_groups=["team1-github-actions-deploy"]로 매핑해뒀다. 여기서 그
 # 그룹에 실제 권한을 준다.
 #
-# 2026-08-20: 원래는 `kubectl rollout restart`(이미지 재배포)용으로 deployments/
-# replicasets patch + 상태 확인용 get/list/watch만 줬고, 매니페스트 자체(readinessProbe,
-# resources, env 등)는 사람이 리뷰해서 직접 kubectl apply하는 걸 전제로 좁혀뒀었다.
-# 그런데 실제로는 이 세션 내내 그 "사람이 직접 apply"를 계속 깜빡하기 쉬웠고
-# (git엔 반영됐는데 라이브엔 안 반영되는 상태가 여러 번 발생), CI가 이미지를 새로
-# push해도 rollout restart만으로는 기존 파드 스펙 그대로 재시작될 뿐이라 이 문제를
-# 못 잡는다는 걸 확인했다 — 그래서 파이프라인이 매 배포마다 매니페스트도 같이
-# kubectl apply하도록 바꾸기로 함(사용자 요청). Deployment/Service에 create/update
-# 권한을 추가한다 — Ingress/RBAC/Secret 같은 더 민감한 리소스는 이 그룹에 안 주고
-# 여전히 사람이 직접 적용한다(WAF ACL·인증서 연결 등 훨씬 드물게, 신중하게 바뀌어야
-# 하는 리소스라 자동화 범위 밖에 남겨둠).
+# CI가 매 배포마다 Deployment/Service 매니페스트를 직접 kubectl apply하므로 create/
+# update 권한을 준다 — Ingress/RBAC/Secret 같은 더 민감한 리소스는 이 그룹에 안 주고
+# 사람이 직접 적용한다(WAF ACL·인증서 연결 등 훨씬 드물게, 신중하게 바뀌어야 하는
+# 리소스라 자동화 범위 밖에 남겨둠).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

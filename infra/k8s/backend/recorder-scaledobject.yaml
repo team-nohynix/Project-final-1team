@@ -1,35 +1,18 @@
 # recorder를 컨슈머 랙(recorder_consumer_lag, recorder/metrics.go가 노출 —
-# orders/executions 리더 각각)으로 스케일한다(2026-08-20, matching-engine과 같은
-# 이유로 추가 — 부하 테스트 중 recorder 혼자 백프레셔에 걸려 orderapi가 신규
-# 주문을 429로 거절하는데 레플리카는 1개뿐이라 사용자가 "왜 스케일 아웃 안
-# 되냐"고 지적해서 발견함).
+# orders/executions 리더 각각)으로 스케일한다 — matching-engine과 같은 이유.
 #
-# matching-engine과 달리 recorder는 FR-11 같은 파티션-마켓 고정 배정이 없는
-# 표준 Kafka 컨슈머 그룹(recorder-orders/recorder-executions/recorder-assignments,
+# matching-engine과 달리 recorder는 FR-11 같은 파티션-마켓 고정 배정이 없는 표준
+# Kafka 컨슈머 그룹(recorder-orders/recorder-executions/recorder-assignments,
 # recorder/main.go)이라 레플리카를 늘리면 Kafka가 파티션을 알아서 재분배한다 —
-# orders/executions/assignments 토픽 전부 20개 파티션이라(실측 확인, kafka-go
-# conn.ReadPartitions) 5개 레플리카까지는 여유 있게 병렬화된다.
+# orders/executions/assignments 토픽 전부 20개 파티션이라 5개 레플리카까지는
+# 여유 있게 병렬화된다.
 #
 # threshold=1000은 recorder 자신의 백프레셔 상위 워터마크(backpressureHighWatermark
 # = 2000, recorder/main.go)의 절반 — 백프레셔가 실제로 걸려서 orderapi가 429를
-# 뱉기 전에 먼저 스케일 아웃을 시도해보려는 것. matching-engine의 500과 마찬가지로
-# 실측 부하 시험 전까지는 근거 없는 시작값이다.
-# 2026-08-26: 스케일다운 속도 개선 요청 — minReplicaCount=1(>0)이라 위
-# cooldownPeriod는 사실 KEDA가 무시한다(matching-engine-scaledobject.yaml의
-# 2026-08-20 설명과 동일 — kubectl apply 시 "only relevant when
-# minReplicaCount = 0" 경고로 확인됨). 실제 스케일다운 속도는 K8s HPA 기본
-# stabilization window(300초)가 결정하므로 이걸 60초로 단축한다.
+# 뱉기 전에 먼저 스케일 아웃을 시도해보려는 것. 실측 부하 시험 전까지는 잠정값이다.
 #
-# 2026-08-26 (같은 날, 추가): minReplicaCount를 1 -> 2로 올렸다 — stabilization
-# window를 60초로 줄인 뒤, 부하가 threshold(1000) 근처에서 걸쳐 있으면 78분
-# 동안 9번(스케일업 5, 스케일다운 4) 오갈 만큼 flapping이 심해졌는데,
-# min=1이라 그 전환마다 recorder가 순간적으로 0개 파드 구간을 만들어
-# recorder-api 502로 이어졌다(실측, 대시보드 "집계 조회 실패: 502" 제보로
-# 발견). matching-engine이 겪었던 것과 정확히 같은 문제(2026-08-20,
-# matching-engine-scaledobject.yaml의 "혼자 다 받는 상황" 사고)를 같은
-# 방법으로 고친다 — 바닥을 2로 올려 전환 중에도 항상 최소 1개는 떠 있게
-# 만드는 게, stabilization window를 다시 늘려 전환 자체를 줄이는 것보다
-# 근본적이다(전환 빈도가 아니라 전환이 안전한지의 문제이므로).
+# minReplicaCount=2, stabilizationWindowSeconds=60 — matching-engine-scaledobject.yaml과
+# 같은 이유(바닥이 1이면 스케일 전환 중 순간적으로 0개 파드 구간이 생겨 502로 이어진다).
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

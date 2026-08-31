@@ -112,7 +112,7 @@
     <div class="statbar">
       <div class="stat"><div class="k">Region</div><div class="v">ap-northeast-2</div></div>
       <div class="stat"><div class="k">VPC</div><div class="v">team1-vpc · 10.10.0.0/16</div></div>
-      <div class="stat"><div class="k">Availability Zone</div><div class="v">2a · 2b · 2d</div></div>
+      <div class="stat"><div class="k">Availability Zone</div><div class="v">2a · 2b</div></div>
       <div class="stat"><div class="k">컴퓨트</div><div class="v">EKS 1 + 시스템 노드그룹 1 + Karpenter + Fargate ×3</div></div>
       <div class="stat"><div class="k">DB</div><div class="v">EC2 자체 MySQL (단일, RDS 아님)</div></div>
     </div>
@@ -123,7 +123,7 @@
 
     <figure>
       <div class="diagram-frame">
-        <svg viewBox="0 0 1560 1500" role="img" aria-label="Truss VPC 네트워크 배치도(실측): CloudFront(truss.jhyang.click) 하나가 경로 기반으로 S3 프론트엔드·접수API ALB·시세수집기 ALB에 라우팅한다. VPC 10.10.0.0/16 안에 ap-northeast-2a, 2b, 2d 세 가용영역이 있다. 컴퓨트는 워크로드별 서브넷 4쌍(backend/collector/aitrader/replay)으로 나뉘며, backend 서브넷에는 taint 없는 고정 시스템 노드그룹(t3.medium)과 Karpenter가 관리하는 backend 노드풀(c6i.large, taint=workload:backend)이 같이 있고 매칭엔진·접수API·기록기가 전부 이 Karpenter 노드에서 돈다. RDS는 없고 EC2 위에 자체 MySQL을 직접 운영한다(단일 AZ, 이중화 없음). data-d 서브넷은 RDS 배치 예정이었으나 실제로는 쓰이지 않는다. 모니터링은 관리형 AMP/AMG가 아니라 EC2 위의 자체 호스팅 Prometheus와 K8s 위의 Grafana(별도 ALB)다.">
+        <svg viewBox="0 0 1560 1500" role="img" aria-label="Truss VPC 네트워크 배치도(실측): CloudFront(truss.jhyang.click) 하나가 경로 기반으로 S3 프론트엔드·접수API ALB·시세수집기 ALB에 라우팅한다. VPC 10.10.0.0/16 안에 ap-northeast-2a, 2b 두 가용영역이 있다. 컴퓨트는 워크로드별 서브넷 4쌍(backend/collector/aitrader/replay)으로 나뉘며, backend 서브넷에는 taint 없는 고정 시스템 노드그룹(t3.medium)과 Karpenter가 관리하는 backend 노드풀(c6i.large, taint=workload:backend)이 같이 있고 매칭엔진·접수API·기록기가 전부 이 Karpenter 노드에서 돈다. RDS는 없고 EC2 위에 자체 MySQL을 직접 운영한다(단일 AZ, 이중화 없음). 모니터링은 관리형 AMP/AMG가 아니라 EC2 위의 자체 호스팅 Prometheus와 K8s 위의 Grafana(별도 ALB)다.">
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -318,17 +318,6 @@
             <text x="855" y="827" text-anchor="middle" font-size="10" fill="var(--ink)">MSK ENI · team1-truss-msk</text>
           </g>
 
-          <!-- ============ AZ-d (미사용) ============ -->
-          <g>
-            <rect x="1020" y="340" width="280" height="200" rx="8" fill="none" stroke="var(--border-strong)" stroke-dasharray="5 4"/>
-            <text x="1035" y="360" font-size="12.5" font-weight="800" fill="var(--ink)">AZ · ap-northeast-2d</text>
-            <rect x="1035" y="375" width="250" height="140" rx="6" fill="none" stroke="var(--border-strong)" stroke-dasharray="3 3"/>
-            <text x="1160" y="425" text-anchor="middle" font-size="10.5" fill="var(--ink-muted)">team1-data-d · 10.10.52.0/24</text>
-            <text x="1160" y="442" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">과거엔 RDS 3번째 노드가 있었음</text>
-            <text x="1160" y="456" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">(스냅샷 team1-rds-final-before-</text>
-            <text x="1160" y="469" text-anchor="middle" font-size="9.5" fill="var(--ink-muted)">subnet-migration 잔존) 지금은 유휴</text>
-          </g>
-
           <!-- ============ 관리형 부가 서비스 + S3 + SQS ============ -->
           <text x="36" y="920" font-size="12" font-weight="800" fill="var(--ink)">모니터링 (관리형 AMP/AMG 아님 — EC2 자체 호스팅)</text>
           <rect x="36" y="930" width="230" height="56" rx="6" fill="var(--cat-neutral-fill)" stroke="var(--cat-neutral-stroke)"/>
@@ -410,7 +399,7 @@
       <span class="sw"><span class="dot" style="background:var(--cat-stream-stroke)"></span>메시징(MSK)</span>
       <span class="sw"><span class="dot" style="background:var(--cat-edge-stroke)"></span>엣지(Route53/CloudFront/ALB)</span>
     </div>
-    <p style="font-size:12.5px;color:var(--ink-muted);margin:10px 4px 0;">2026-08-27 AWS CLI/kubectl 실측 반영. 이전 설계안(RDS Multi-AZ 클러스터, 관리형 AMP/AMG, 워크로드별 서브넷 통합 등)은 실제 배포와 달라 전면 교체함 — 8장 "실측 인프라 노트" 참고.</p>
+    <p style="font-size:12.5px;color:var(--ink-muted);margin:10px 4px 0;">AWS CLI/kubectl 실측 반영. 이전 설계안(RDS Multi-AZ 클러스터, 관리형 AMP/AMG, 워크로드별 서브넷 통합 등)은 실제 배포와 달라 전면 교체함 — 8장 "실측 인프라 노트" 참고.</p>
   </section>
 
   <section id="flow">
@@ -619,7 +608,7 @@
             <path d="M1330,415 L1310,415 Q1300,415 1300,425 L1300,621 Q1300,631 1290,631 L782,631" marker-end="url(#arrow2)"/>
             <text x="1296" y="520" text-anchor="end" font-size="9.5" fill="var(--flow-s3)" class="lbl">GetObject</text>
 
-            <!-- 시세수집기 → AI트레이더: S3도 Kafka도 아니고 시세수집기가 내는 매니페스트/파일 API를 AI트레이더가 HTTP로 직접 풀(pull)한다(requirements.md 2026-08-12 정정, 실측 collector ALB /v1/* 경로와 일치). col3 내부 우회(x=960) — 기록기 행을 관통하지 않게 오른쪽 여백을 돈다 -->
+            <!-- 시세수집기 → AI트레이더: S3도 Kafka도 아니고 시세수집기가 내는 매니페스트/파일 API를 AI트레이더가 HTTP로 직접 풀(pull)한다(requirements.md, 실측 collector ALB /v1/* 경로와 일치). col3 내부 우회(x=960) — 기록기 행을 관통하지 않게 오른쪽 여백을 돈다 -->
             <path d="M782,555 L950,555 Q960,555 960,545 L960,420 Q960,410 950,410 L782,410" stroke="var(--cat-compute-stroke)" marker-end="url(#arrow2)"/>
             <text x="964" y="480" font-size="8.5" fill="var(--cat-compute-stroke)" class="lbl">HTTP GET (매니페스트/파일 API)</text>
 
@@ -917,16 +906,13 @@
 
   <section id="realitynotes">
     <h2>8. 실측 인프라 노트</h2>
-    <p style="font-size:12.5px;color:var(--ink-muted);margin:0 0 20px;">AWS CLI(<span class="mono">aws sts/ec2/eks/rds/elasticache/elbv2/cloudfront/route53/wafv2/acm/sqs/lambda/s3/ecr/cloudwatch/sns/secretsmanager/kms</span>)와 <span class="mono">kubectl</span>로 직접 조회해 확인한 사실만 적었다. 완전성은 <span class="mono">resourcegroupstaggingapi get-resources</span>로 <span class="mono">Team=team1</span> 태그가 붙은 리소스 전체(약 40개 서비스·유형, fleet 이력 제외 160여 개)를 한 번에 뽑아 서비스별로 대조하는 방식으로 확인했다 — 개별 서비스 API만 훑어서는 놓쳤던 항목(아래 Secrets Manager, RDS 스냅샷 등)이 이 방법으로 드러났다. 설계 의도·근거가 아니라 지금 이 순간 배포된 상태의 기록이며, 서로 다른 조회 결과가 충돌할 때는 더 최근에 조회한 값을 우선했다(예: MSK 브로커 주소).</p>
+    <p style="font-size:12.5px;color:var(--ink-muted);margin:0 0 20px;">AWS CLI/kubectl로 직접 조회해 확인한, 설계 문서만으로는 드러나지 않는 사실들. 이 인프라는 이후 비용 문제로 전체 삭제됐다 — 아래는 삭제 이전 마지막 상태의 기록이다.</p>
 
-    <h3 style="font-size:15px;margin:0 0 8px;">RDS 대신 EC2 자체 MySQL — 과거엔 RDS가 있었다</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">현재 RDS 인스턴스·클러스터는 계정에 team1 리소스로 하나도 없다(<span class="mono">describe-db-instances</span>/<span class="mono">describe-db-clusters</span> 둘 다 빈 결과). 대신 <span class="mono">team1-mysql</span> EC2(m6i.2xlarge, ap-northeast-2a 단일 인스턴스)에 MySQL을 직접 설치해 운영 중이다. Multi-AZ·자동 백업·자동 페일오버 등 RDS의 관리형 기능은 전혀 없다. 다만 <span class="mono">team1-rds-final-before-subnet-migration</span>이라는 RDS 스냅샷이 아직 남아 있어(태그 전수조사로 발견) — 이름 그대로 서브넷 마이그레이션 직전에 RDS가 실제로 존재했고, 그 시점에 최종 스냅샷을 뜬 뒤 삭제했다는 걸 보여준다. <span class="mono">team1-data-d</span> 서브넷(10.10.52.0/24)이 그 RDS 3번째 노드용이었던 흔적이다.</p>
+    <h3 style="font-size:15px;margin:0 0 8px;">RDS 대신 EC2 자체 MySQL</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">team1-mysql</span> EC2(m6i.2xlarge, 단일 인스턴스)에 MySQL을 직접 설치해 운영 — RDS 인스턴스·클러스터는 없다. Multi-AZ·자동 백업·자동 페일오버 등 RDS의 관리형 기능은 전혀 없다. 데이터 계층은 data-a/data-b 2 AZ.</p>
 
-    <h3 style="font-size:15px;margin:20px 0 8px;">Secrets Manager — 2026-08-27, K8s Secret에서 다시 전환</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">처음엔 "미사용"이라고 적었는데, <span class="mono">list-secrets</span> 결과만 봐서 그랬다 — 태그 전수조사로 <span class="mono">team1/backend/secrets</span>·<span class="mono">team1/monitoring/grafana-admin</span> 두 시크릿이 <span class="mono">DeletedDate: 2026-07-28</span>로 삭제 처리돼 있는 걸 발견했다(생성 7/22·7/27, 삭제 7/28 — RDS→EC2 MySQL와 같은 시기의 "관리형에서 자체 운영으로" 흐름). 이후 팀 요청으로 Secrets Manager를 다시 도입했다: 현재 DB 접속 문자열을 <span class="mono">team1/backend/mysql-db-url</span> 시크릿으로 새로 생성하고, Secrets Store CSI Driver(+ AWS provider)를 설치해 <span class="mono">recorder-db-secret</span> K8s Secret을 여기서 자동 동기화하도록 전환했다. <span class="mono">team1-sa-recorder</span> IRSA 역할에 <span class="mono">secretsmanager:GetSecretValue</span> 정책을 추가했고, recorder Deployment에 CSI 볼륨 마운트를 붙여 두 파드 모두 무중단 롤링 재시작으로 전환 완료했다(재시작 후 0회 재기동, 정상 기동 로그 확인). 앱 코드·env var 이름은 바뀌지 않았다 — K8s Secret이 이제 AWS가 채워주는 것으로 바뀌었을 뿐이다.</p>
-
-    <h3 style="font-size:15px;margin:20px 0 8px;">태그 전수조사로 추가 확인된 것</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">Elastic IP 3개(<span class="mono">team1-nat-eip-a/b</span> — NAT용, <span class="mono">team1-eip-monitoring</span> — team1-monitoring EC2의 공인 IP 43.202.105.104). EKS 애드온 4종(<span class="mono">amazon-cloudwatch-observability, coredns, kube-proxy, vpc-cni</span> — aws-load-balancer-controller와 karpenter는 애드온이 아니라 별도 Deployment로 설치됨). backend 네임스페이스 IRSA 역할 4개(<span class="mono">team1-sa-ingest-api, team1-sa-kafka-admin, team1-sa-matching-engine, team1-sa-recorder</span> — kafka-admin은 이전에 파악 못 했던 역할). <span class="mono">team1-eks-node-system-lt</span> 런치 템플릿, EKS 컨트롤 플레인 로그 그룹(<span class="mono">/aws/eks/team1-eks/cluster</span>) 확인.</p>
+    <h3 style="font-size:15px;margin:20px 0 8px;">Secrets Manager</h3>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">DB 접속 문자열을 <span class="mono">team1/backend/mysql-db-url</span> 시크릿으로 관리하고, Secrets Store CSI Driver(+ AWS provider)가 <span class="mono">recorder-db-secret</span> K8s Secret으로 자동 동기화한다. <span class="mono">team1-sa-recorder</span> IRSA 역할에 <span class="mono">secretsmanager:GetSecretValue</span> 정책이 붙어 있다. 앱 코드·env var 이름은 그대로 — K8s Secret의 "생성자"만 AWS로 바뀐 것.</p>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">컴퓨트 — 시스템 노드그룹과 Karpenter는 별개</h3>
     <div class="table-scroll">
@@ -934,29 +920,29 @@
         <thead><tr><th>리소스</th><th class="name">실측값</th><th>비고</th></tr></thead>
         <tbody>
           <tr><td>관리형 노드그룹</td><td class="name">team1-ng-system, t3.medium, min=max=2(고정), taint 없음</td><td>CoreDNS·aws-node·ALB컨트롤러·Karpenter컨트롤러·KEDA·CSI 드라이버 등 시스템 파드 전용 — 워크로드는 여기서 안 돎</td></tr>
-          <tr><td>Karpenter NodePool #1</td><td class="name">team1-backend, c6i.large, taint=workload:backend</td><td>CPU 160 vCPU 한도, 매칭엔진·접수API만 여기서 실행(현재 3대)</td></tr>
-          <tr><td>Karpenter NodePool #2</td><td class="name">team1-recorder, c6i.xlarge(4vCPU/8GiB), taint=workload:recorder</td><td>CPU 8 vCPU 한도, 기록기 전용 — team1-backend와 분리된 별도 노드풀(현재 2대). 이전엔 셋이 한 풀을 공유한다고 파악했으나 그 사이 팀이 분리한 것으로 보임</td></tr>
+          <tr><td>Karpenter NodePool #1</td><td class="name">team1-backend, c6i.large, taint=workload:backend</td><td>CPU 160 vCPU 한도, 매칭엔진·접수API만 여기서 실행</td></tr>
+          <tr><td>Karpenter NodePool #2</td><td class="name">team1-recorder, c6i.xlarge(4vCPU/8GiB), taint=workload:recorder</td><td>CPU 8 vCPU 한도, 기록기 전용 — team1-backend와 분리된 별도 노드풀</td></tr>
           <tr><td>Karpenter 축소 정책</td><td class="name">consolidateAfter 5m, WhenEmptyOrUnderutilized</td><td>5분 이상 비거나 저활용인 노드를 자동 통합·제거, 1회 최대 전체 노드의 10%까지만</td></tr>
           <tr><td>Karpenter 노드 만료</td><td class="name">expireAfter 720h(30일)</td><td>30일마다 강제 교체</td></tr>
-          <tr><td>Fargate Profile</td><td class="name">team1-fp-collector / team1-fp-aitrader / team1-fp-replay</td><td>Terraform 명명은 team1-eks-fp-*였으나 실제로는 eks- 접두사 없음</td></tr>
+          <tr><td>Fargate Profile</td><td class="name">team1-fp-collector / team1-fp-aitrader / team1-fp-replay</td><td></td></tr>
         </tbody>
       </table>
     </div>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">파드 단위 오토스케일링(KEDA)</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">matching-engine</span>(min 2 / max 10)과 <span class="mono">recorder</span>(min 2 / max 10, 재확인 시점 기준 — 이전 확인 때는 min 1이었음) 둘 다 KEDA ScaledObject가 붙어 있고 트리거는 Prometheus 쿼리다. <span class="mono">orderapi</span>는 KEDA 대상이 아니다.</p>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">matching-engine</span>(min 2 / max 10)과 <span class="mono">recorder</span>(min 2 / max 10) 둘 다 KEDA ScaledObject가 붙어 있고 트리거는 Prometheus 쿼리다. <span class="mono">orderapi</span>는 KEDA 대상이 아니다.</p>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">모니터링 — 관리형 AMP/AMG 아님, EC2 하나에 Prometheus+Grafana 동거</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">team1-monitoring</span> EC2(t3.medium) 보안그룹 규칙에 "Prometheus"(9090), "Grafana"(80, 3000) 설명이 그대로 박혀 있어 확인했다 — Prometheus와 Grafana가 같은 인스턴스에서 같이 뜬다. <span class="mono">monitor.jhyang.click</span>이 이 인스턴스의 공인 IP(43.202.105.104)를 직접 가리킨다. 반면 Route53의 <span class="mono">grafana.jhyang.click</span> 레코드는 <span class="mono">k8s-team1shared-*</span> ALB를 가리키는데, 그 ALB는 계정에 더 이상 존재하지 않는다 — 예전엔 K8s 위에서 Grafana를 돌리다가 지금의 EC2 방식으로 옮기면서 이 레코드를 정리하지 않은 것으로 보이는, 실질적으로 끊긴 링크다.</p>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">team1-monitoring</span> EC2(t3.medium)에 Prometheus(9090)와 Grafana(80, 3000)가 같은 인스턴스에서 같이 뜬다. <span class="mono">monitor.jhyang.click</span>이 이 인스턴스의 공인 IP를 직접 가리킨다.</p>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">시세 전달 경로 — Kafka도 S3도 아니고 HTTP pull</h3>
     <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;">AI트레이더는 시세수집기가 내는 매니페스트/파일 API를 HTTP로 직접 호출해서 시세를 받는다. 시세수집기는 <span class="mono">team1-truss-market-data</span> 버킷에도 원본을 쓰지만, 이건 보관용이고 AI트레이더가 실시간으로 읽는 경로가 아니다. 시세수집기는 자체 Public ALB(<span class="mono">truss-collector.jhyang.click</span>)로도 노출되며, CloudFront(<span class="mono">truss.jhyang.click</span>)가 <span class="mono">/v1/*</span> 경로를 여기로 라우팅한다.</p>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">진입점 — CloudFront 하나가 경로 기반으로 전부 라우팅</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">truss.jhyang.click</span> CloudFront 배포 하나가 기본 경로(S3 프론트엔드), <span class="mono">/order-api/*</span>·<span class="mono">/recorder-api/*</span>(접수API ALB), <span class="mono">/v1/*</span>(시세수집기 ALB)를 CloudFront Function으로 접두사를 벗겨가며 라우팅한다. WAF(<span class="mono">team1-waf-alb</span>)는 CloudFront가 아니라 두 ALB에 직접 붙어 있다(<span class="mono">get-web-acl-for-resource</span>로 확인, CloudFront의 WebACL은 빈 값). ACM 인증서는 "team1-acm-*"라는 별도 이름이 아니라 <span class="mono">jhyang.click</span> 와일드카드 인증서 하나를 리전별로 재사용한다.</p>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0 0 8px;"><span class="mono">truss.jhyang.click</span> CloudFront 배포 하나가 기본 경로(S3 프론트엔드), <span class="mono">/order-api/*</span>·<span class="mono">/recorder-api/*</span>(접수API ALB), <span class="mono">/v1/*</span>(시세수집기 ALB)를 CloudFront Function으로 접두사를 벗겨가며 라우팅한다. WAF(<span class="mono">team1-waf-alb</span>)는 CloudFront가 아니라 두 ALB에 직접 붙어 있다. ACM 인증서는 <span class="mono">jhyang.click</span> 와일드카드 인증서 하나를 리전별로 재사용한다.</p>
 
     <h3 style="font-size:15px;margin:20px 0 8px;">문서화 안 돼 있던 내부 의존관계</h3>
-    <p style="font-size:13.5px;color:var(--ink-muted);margin:0;">접수API(orderapi) 파드 환경변수에 <span class="mono">RECORDER_URL=http://recorder:8082</span>가 있다 — Kafka(orders/executions) 경로와 별개로 접수API가 기록기를 K8s 내부 서비스로 직접 HTTP 호출한다. 같은 환경변수 목록에 <span class="mono">ORDER_RECORDS_BUCKET</span>·<span class="mono">PROMETHEUS_URL</span>도 있는데 정확한 용도(주문 기록을 접수API도 쓰는지, Prometheus를 왜 아웃바운드로 호출하는지)는 코드까지 보지 않고는 단정할 수 없어 사실관계만 남겨둔다.</p>
+    <p style="font-size:13.5px;color:var(--ink-muted);margin:0;">접수API(orderapi) 파드 환경변수에 <span class="mono">RECORDER_URL=http://recorder:8082</span>가 있다 — Kafka(orders/executions) 경로와 별개로 접수API가 기록기를 K8s 내부 서비스로 직접 HTTP 호출한다.</p>
   </section>
 
   <footer class="page">

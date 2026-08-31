@@ -462,11 +462,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.TF_APPLY_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
       - run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      # 2026-08-31: orderapi-ingress.yaml/backend-ingress.yaml의 security-groups/
+      # certificate-arn/wafv2-acl-arn 리터럴 하드코딩을 걷어내면서 추가 — 이 세 값을
+      # terraform state(root output)에서 직접 읽어와 아래 envsubst 단계에 넘긴다.
+      # TF_APPLY_ROLE이 이미 terraform-apply에서 이 state를 쓰는 롤이라 read용
+      # 별도 권한이 필요 없다.
+      - name: Ingress 어노테이션용 terraform output 읽기
+        working-directory: infra
+        run: |
+          terraform init -input=false
+          {
+            echo "ALB_PUBLIC_SG_ID=$(terraform output -raw alb_public_security_group_id)"
+            echo "ALB_CERTIFICATE_ARN=$(terraform output -raw acm_alb_certificate_arn)"
+            echo "WAF_ALB_ACL_ARN=$(terraform output -raw waf_alb_web_acl_arn)"
+          } >> "$GITHUB_ENV"
       # 네임스페이스부터 먼저 — 그 안의 리소스들이 존재를 전제로 한다.
       # backend는 이제 terraform(kubernetes_namespace.backend, k8s-addons.tf)이
       # 만들지만, 그 파일도 같이 적용해두면(멱등) 라벨 등이 어긋날 일이 없다.
@@ -481,6 +496,17 @@ jobs:
       # 이미 있어도 안전(kafka-admin-job.yaml 주석 참고).
       - name: Kafka 토픽 부트스트랩 Job 재실행 준비
         run: kubectl delete job kafka-topic-bootstrap -n backend --ignore-not-found
+      # 2026-08-31: 위에서 읽은 3개 값을 실제 Ingress YAML에 박아 넣는다 — 아래
+      # "나머지 전부 적용" 단계가 이 checkout 작업 디렉토리의 파일을 그대로
+      # apply하므로, 여기서 파일을 in-place로 덮어써두면 그 뒤 단계는 손댈 필요가
+      # 없다. 변수 목록을 명시해서(envsubst '$VAR ...') 이 세 개 말고 다른
+      # "${...}" 문자열은 실수로도 안 건드리게 한다.
+      - name: Ingress ARN/SG 플레이스홀더 치환
+        run: |
+          for f in infra/k8s/backend/orderapi-ingress.yaml infra/k8s/collector/backend-ingress.yaml; do
+            envsubst '${ALB_PUBLIC_SG_ID} ${ALB_CERTIFICATE_ARN} ${WAF_ALB_ACL_ARN}' < "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+          done
       - name: 나머지 전부 적용 (RBAC/서비스어카운트/인그레스/ScaledObject/Deployment/Kafka 토픽)
         run: |
           kubectl apply -f infra/k8s/backend/

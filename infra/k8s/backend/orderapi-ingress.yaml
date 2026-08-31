@@ -1,12 +1,12 @@
 # 접수 API 퍼블릭 노출 — ALB Controller가 이 Ingress를 보고 실제 ALB를 만든다.
-# 인증서/WAF ARN은 infra/edge.tf의 output(acm_alb_certificate_arn/waf_alb_web_acl_arn)과
-# 동일한 값을 직접 박아넣었다(Ingress는 Terraform 리소스가 아니라 output을 그대로
-# 참조할 수 없음). healthcheck-path는 orderapi에 별도 헬스체크 엔드포인트가 없어서,
-# 실제로 인증 없이 200을 주는 걸 확인한 GET /v1/markets/{market}/orderbook을 쓴다.
-# security-groups도 같은 이유로 리터럴 — infra/network의 output security_group_ids.alb_public과
-# 항상 같은 값이어야 한다. network 모듈을 통째로 재생성(VPC 재구축 등)하면 이 ID가
-# 바뀌므로 반드시 같이 갱신할 것 — 안 그러면 ALB Controller가 "security group not
-# found"로 계속 실패한다(2026-08-26, AWS 인프라 전체 재구축 후 실측).
+# healthcheck-path는 orderapi에 별도 헬스체크 엔드포인트가 없어서, 실제로 인증 없이
+# 200을 주는 걸 확인한 GET /v1/markets/{market}/orderbook을 쓴다.
+#
+# security-groups/certificate-arn/wafv2-acl-arn 세 값은 Ingress가 Terraform 리소스가
+# 아니라 output을 직접 참조 못 해서, bootstrap-k8s job이 적용 직전 `envsubst`로
+# terraform output 값을 채워 넣는다 — 값의 출처는 infra/outputs.tf의
+# alb_public_security_group_id, infra/edge.tf의 acm_alb_certificate_arn/
+# waf_alb_web_acl_arn.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,11 +16,11 @@ metadata:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/security-groups: sg-030ac623921fb4c59
+    alb.ingress.kubernetes.io/security-groups: ${ALB_PUBLIC_SG_ID}
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}, {"HTTP":80}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-northeast-2:727646470302:certificate/9085e196-5c96-4d18-9214-315810d902e6
-    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:ap-northeast-2:727646470302:regional/webacl/team1-waf-alb/c6550785-ce47-4b4c-a4d2-1ab37f735f1b
+    alb.ingress.kubernetes.io/certificate-arn: ${ALB_CERTIFICATE_ARN}
+    alb.ingress.kubernetes.io/wafv2-acl-arn: ${WAF_ALB_ACL_ARN}
     alb.ingress.kubernetes.io/healthcheck-path: /v1/markets/KRW-BTC/orderbook
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/success-codes: "200"
@@ -31,7 +31,7 @@ spec:
         paths:
           # recorder 조회 API(:8082) — orderapi 자체 라우트와 안 겹쳐서 같은 ALB를
           # 공유한다. ALB Controller는 Ingress 안 paths 목록 순서대로 규칙 우선순위를
-          # 매기므로, 반드시 아래 catch-all "/" 보다 먼저 와야 한다(2026-08-12 추가).
+          # 매기므로, 반드시 아래 catch-all "/" 보다 먼저 와야 한다.
           - path: /v1/trace
             pathType: Prefix
             backend:
@@ -47,7 +47,7 @@ spec:
                 port:
                   number: 8082
           # 대시보드 실시간 지표(docs/frontend-backend-integration.md 3.1,
-          # GET /v1/metrics/dashboard) — 2026-08-12 추가, 위 두 경로와 같은 이유.
+          # GET /v1/metrics/dashboard) — 위 두 경로와 같은 이유.
           - path: /v1/metrics
             pathType: Prefix
             backend:
@@ -56,9 +56,8 @@ spec:
                 port:
                   number: 8082
           # /v1/orders(Prefix)로 두면 orderapi의 POST /v1/orders(실제 주문 접수)까지
-          # recorder로 잘못 라우팅돼 404가 났다(2026-08-19, recorder는 /v1/orders/summary만
-          # 있음 — 실제 배포에서 주문 접수가 계속 실패하고 있었던 원인). recorder가 실제로
-          # 쓰는 정확한 경로로 좁힌다.
+          # recorder로 잘못 라우팅된다(recorder는 /v1/orders/summary만 있음) — recorder가
+          # 실제로 쓰는 정확한 경로로 좁힌다.
           - path: /v1/orders/summary
             pathType: Prefix
             backend:
@@ -66,12 +65,10 @@ spec:
                 name: recorder
                 port:
                   number: 8082
-          # GET /v1/orders/integrity(2026-08-24, "데이터 정합성 검사" 패널) —
-          # 위 /v1/orders/summary와 같은 이유로 좁은 경로를 따로 둔다. 이 규칙이
-          # 없으면 catch-all "/"로 떨어져 orderapi로 가는데, orderapi가 등록해둔
-          # "DELETE /v1/orders/{orderId}" 패턴이 경로 모양(/v1/orders/integrity)만
-          # 보고 매칭돼버려서 405(Method Not Allowed)를 돌려준다 — 404가 아니라
-          # 405라 recorder 라우팅 누락이라는 게 바로 안 드러났다(실제로 겪음).
+          # GET /v1/orders/integrity("데이터 정합성 검사" 패널) — 위 /v1/orders/summary와
+          # 같은 이유로 좁은 경로를 따로 둔다. 이 규칙이 없으면 catch-all "/"로 떨어져
+          # orderapi로 가는데, orderapi가 등록해둔 "DELETE /v1/orders/{orderId}" 패턴이
+          # 경로 모양만 보고 매칭돼버려서 405(Method Not Allowed)를 돌려준다.
           - path: /v1/orders/integrity
             pathType: Prefix
             backend:

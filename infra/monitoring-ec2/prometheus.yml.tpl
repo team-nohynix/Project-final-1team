@@ -27,14 +27,12 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
         action: keep
         regex: "true"
-      # 2026-08-21: 예전엔 서비스 단위 프록시 경로(/services/$name:$port/proxy)로
-      # 주소를 만들었는데, endpoints role은 레플리카(파드)마다 별도 타겟을 발견해도
-      # relabel 후 주소가 전부 똑같아져서 Prometheus가 하나의 타겟으로 합쳐버렸다.
-      # 그 결과 실제로는 매 스크레이프마다 API 서버가 그 서비스 뒤의 파드 중
-      # 하나에게 무작위로 라우팅했고, matching-engine처럼 레플리카가 2개 이상인
-      # 서비스에서 sum(...)이 "둘의 합"이 아니라 "둘 중 하나"를 왔다갔다 하는
-      # 값이 되는 버그로 이어졌다(KEDA의 book_size 스케일링 트리거도 같은 값을
-      # 봄). 파드 단위 프록시 경로(/pods/$podName:$port/proxy)로 바꿔서 레플리카별로
+      # 서비스 단위 프록시 경로(/services/$name:$port/proxy)를 쓰면 endpoints role이
+      # 레플리카(파드)마다 별도 타겟을 발견해도 relabel 후 주소가 전부 똑같아져서
+      # Prometheus가 하나의 타겟으로 합쳐버린다 — 매 스크레이프마다 API 서버가
+      # 그 서비스 뒤의 파드 중 하나에게 무작위로 라우팅해서, 레플리카가 2개 이상인
+      # 서비스에서 sum(...)이 "둘의 합"이 아니라 "둘 중 하나"를 왔다갔다 하는 값이
+      # 된다. 파드 단위 프록시 경로(/pods/$podName:$port/proxy)로 바꿔서 레플리카별로
       # 진짜 별도 타겟이 되게 한다 — target_kind가 Pod가 아닌 엔드포인트(드묾)는
       # 걸러낸다.
       - source_labels: [__meta_kubernetes_endpoint_address_target_kind]

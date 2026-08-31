@@ -117,10 +117,9 @@ def _base_args(body):
         args.append(f"-speed={body['speed']}")
     if body.get("orderBucket"):
         args.append(f"-order-bucket={body['orderBucket']}")
-    # fromTs/toTs(FR-27 구간 지정, Unix ms)는 2026-08-25까지 replay 잡에서만
-    # 뽑아 썼는데, 같은 날 ai-trader(trader) 바이너리에도 -from-ts/-to-ts를
-    # 추가했으므로(trader/replay.filterEventRange 참고) 여기 공통 헬퍼로
-    # 옮겨서 ai-trader/replay 둘 다 body에 실어 보내면 그대로 전달되게 했다.
+    # fromTs/toTs(FR-27 구간 지정, Unix ms) — ai-trader/replay 둘 다
+    # -from-ts/-to-ts를 지원하므로(trader/replay.filterEventRange 참고) 공통
+    # 헬퍼에서 처리해 두 Job 타입 모두 body에 실어 보내면 그대로 전달되게 한다.
     if body.get("fromTs"):
         args.append(f"-from-ts={body['fromTs']}")
     if body.get("toTs"):
@@ -150,17 +149,13 @@ def _build_ai_trader_job(body, message_id):
                             "image": f"{ECR_REPO}:trader-latest",
                             "args": _base_args(body),
                             "envFrom": [{"configMapRef": {"name": "ai-trader-config"}}],
-                            # 이전엔 리소스를 아예 안 줬다 — Fargate가 최소 기본값(0.5GB
-                            # 수준)으로 띄워서, 20개 마켓에 60배속으로 하루치 주문을
-                            # 생성하는 워크로드가 14분 만에 OOMKilled(exit 137)됐다
-                            # (2026-08-25, 실제 부하테스트 중 재현 — matching-engine이
-                            # 예전에 겪은 것과 같은 종류의 문제, infra/k8s/backend/
-                            # matching-engine-deployment.yaml 주석 참고). OOM은
-                            # SIGKILL이라 trader가 세션을 정상 반납(Release)할 기회조차
-                            # 없어서, 프론트 "중지" 버튼이 한참 뒤에도 "이미 종료된
-                            # 실행입니다"만 반복하는 혼란으로 이어졌다. matching-engine의
-                            # 초기 튜닝값(512Mi→그 이상)을 참고해 여유 있게 잡았다 —
-                            # 실측 후 더 조정이 필요할 수 있다.
+                            # Fargate 기본 리소스(0.5GB 수준)로는 20개 마켓에 고배속으로
+                            # 하루치 주문을 생성하는 워크로드가 OOMKilled된다 —
+                            # matching-engine이 겪은 것과 같은 종류의 문제(infra/k8s/backend/
+                            # matching-engine-deployment.yaml 참고). OOM은 SIGKILL이라
+                            # trader가 세션을 정상 반납(Release)할 기회도 없어서, 프론트
+                            # "중지" 버튼이 "이미 종료된 실행입니다"만 반복하는 혼란으로
+                            # 이어진다 — 여유 있게 잡는다.
                             "resources": {
                                 "requests": {"cpu": "250m", "memory": "1Gi"},
                                 "limits": {"cpu": "1", "memory": "2Gi"},

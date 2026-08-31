@@ -286,21 +286,16 @@ output "karpenter_interruption_queue_name" {
   value = aws_sqs_queue.karpenter_interruption.name
 }
 
-# Karpenter 컨트롤러 자체 설치(helm_release, 2026-08-24 추가) — 원래
-# `helm install karpenter oci://public.ecr.aws/karpenter/karpenter ...`로 손으로
-# 설치돼 있던 것을 "EKS를 통째로 지웠다 올려도 원상복구되게" terraform으로 옮겼다.
-# values는 `helm get values karpenter -n kube-system`으로 뽑은 실제 사용자 지정값
-# 그대로(2026-08-24 확인) — clusterEndpoint는 매번 EKS 클러스터가 새로 만들어질 때마다
-# 바뀌므로 하드코딩하지 않고 aws_eks_cluster 리소스 속성을 그대로 참조한다(이게 이
-# 리소스를 helm-releases.tf가 아니라 karpenter.tf에 같이 둔 이유이기도 함 — 관련
-# IAM/SQS 리소스와 나란히).
+# Karpenter 컨트롤러 자체 설치. clusterEndpoint는 EKS 클러스터가 새로 만들어질 때마다
+# 바뀌므로 하드코딩하지 않고 aws_eks_cluster 리소스 속성을 그대로 참조한다 — 이 리소스를
+# 관련 IAM/SQS 리소스와 나란히 karpenter.tf에 둔 이유이기도 하다.
 resource "helm_release" "karpenter" {
   name             = "karpenter"
   namespace        = "kube-system"
   repository       = "oci://public.ecr.aws/karpenter"
   chart            = "karpenter"
-  version          = "1.14.0" # helm list -A로 확인한 실제 배포 버전(2026-08-24)
-  create_namespace = false    # kube-system은 이미 있음
+  version          = "1.14.0"
+  create_namespace = false # kube-system은 이미 있음
 
   values = [yamlencode({
     serviceAccount = {

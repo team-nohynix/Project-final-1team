@@ -29,16 +29,13 @@ spec:
         - name: orderapi
           image: 727646470302.dkr.ecr.ap-northeast-2.amazonaws.com/team1-truss:orderapi-latest
           # 태그가 "orderapi-latest"라 K8s 기본 imagePullPolicy가 IfNotPresent —
-          # matching-engine에서 재배포해도 캐시된 예전 이미지를 쓰는 걸 실측으로
-          # 발견해서 여기도 같이 맞춘다.
+          # 캐시된 예전 이미지를 계속 쓰지 않도록 Always로 맞춘다.
           imagePullPolicy: Always
           ports:
             - containerPort: 8081
           env:
-            # 2026-08-24: MSK 재생성 때마다 바뀌는 값이라 리터럴 대신 terraform이
-            # 관리하는 ConfigMap(infra/k8s-addons.tf의 backend-cluster-config)을
-            # 참조한다 — EKS 전체 destroy→apply 리허설 중 하드코딩 탓에 재연결이
-            # 전부 실패했던 것을 보고 고침.
+            # MSK 재생성 때마다 바뀌는 값이라 리터럴 대신 terraform이 관리하는
+            # ConfigMap(infra/k8s-addons.tf의 backend-cluster-config)을 참조한다.
             - name: KAFKA_BROKER
               valueFrom:
                 configMapKeyRef:
@@ -50,39 +47,36 @@ spec:
               value: "master.team1-truss-redis.q2tpkl.apn2.cache.amazonaws.com:6379"
             - name: REDIS_TLS_ENABLED
               value: "true"
+            # ElastiCache AUTH 토큰(elasticache.tf) — orderapi/config.go가 이미 선택
+            # 환경변수로 읽던 값이라 여기 채우는 것만으로 인증이 켜진다. Secrets Store
+            # CSI Driver가 아래 volumeMounts로 redis-auth-secret K8s Secret을 만들어준다.
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth-secret
+                  key: REDIS_PASSWORD
             - name: JOB_TRIGGER_QUEUE_URL
               value: "https://sqs.ap-northeast-2.amazonaws.com/727646470302/team1-sqs-job-trigger"
-            # 2026-08-20: 이전엔 아예 안 채워져 있어서 startJobHandler가 orderBucket
-            # 기본값을 줄 수도, replay-preview가 S3를 읽을 수도 없었다(둘 다 로컬
-            # 폴백 → trader는 mkdir 권한 에러로 기록 유실, replay-preview는 빈 결과).
+            # startJobHandler의 orderBucket 기본값, replay-preview의 S3 조회가 이 값에
+            # 의존한다 — 비우면 둘 다 로컬 폴백으로 조용히 실패한다.
             - name: ORDER_RECORDS_BUCKET
               value: "team1-truss-order-records"
-            # 2026-08-20: orderapi/sessioncleanup.go(2026-08-19 커밋, 세션 종료 시
-            # 미종결 주문 자동 취소)가 RECORDER_URL이 없으면 조용히 스킵하는데,
-            # 이 값이 여태 빠져 있어서 그 기능이 배포된 뒤로도 계속 no-op이었다 —
-            # 페이퍼 트레이딩을 반복할 때마다 처리 대기 주문이 계속 쌓이던 진짜
-            # 원인. recorder Service(같은 backend 네임스페이스, 8082) 가리키게 채움.
+            # orderapi/sessioncleanup.go(세션 종료 시 미종결 주문 자동 취소)가
+            # RECORDER_URL이 없으면 조용히 스킵한다 — recorder Service(같은 backend
+            # 네임스페이스, 8082)를 가리키게 채운다.
             - name: RECORDER_URL
               value: "http://recorder:8082"
-            # 2026-08-24: GET /v1/metrics/cluster(clustermetrics.go)가 그라파나
-            # team1-overview 대시보드와 같은 PromQL을 그대로 재사용하려고
-            # 모니터링 EC2의 Prometheus를 직접 찌른다(infra/monitoring-ec2.tf,
-            # team1_sg_monitoring이 9090을 0.0.0.0/0로 열어둬서 같은 VPC의
-            # orderapi에서도 NAT 아웃바운드로 도달 가능 — 별도 SG 규칙 불필요).
+            # GET /v1/metrics/cluster(clustermetrics.go)가 그라파나 team1-overview
+            # 대시보드와 같은 PromQL을 재사용하려고 모니터링 EC2의 Prometheus를 직접
+            # 찌른다(infra/monitoring-ec2.tf, team1_sg_monitoring이 9090을 0.0.0.0/0로
+            # 열어둬서 같은 VPC에서 별도 SG 규칙 없이 도달 가능).
             - name: PROMETHEUS_URL
               value: "http://monitor.jhyang.click:9090"
-          # 2026-08-20: 트레이더 Job이 짧은 시간에 대량 주문을 동시 제출할 때(실측: 같은 초에
-          # 50건 이상) 512Mi를 넘겨 OOMKilled됨(exit 137) — 프론트 "페이퍼 트레이딩 실행 실패"의
-          # 실제 원인. matching-engine과 같은 이유로 1Gi로 상향.
-          #
-          # 2026-08-20(밤, 100배속 자동 반복검증 중): 1Gi로도 다시 OOMKilled(23분 실행,
-          # exit 137) — 이번엔 순간 동시 제출량이 아니라 orderapi가 접수된 주문을 전부
-          # order.Store(취소 처리용, orderId->*Order 맵)와 idempotency.Store에 세션이
-          # 끝날 때까지 무기한 들고 있는 구조라서, 100배속 세션 하나에서 주문이 수만 건
-          # 누적되면 그 자체로 메모리를 다 씀 — 근본적으로는 이 두 인메모리 저장소가
-          # 무한정 커지는 게 진짜 원인이고(팀 논의 필요, 처리 완료된 주문을 주기적으로
-          # 비우는 방식으로 고쳐야 함), 오늘 밤은 우선 한도를 넉넉히 올려 이 세션
-          # 길이/물량에서는 안 터지게 함.
+          # order.Store(취소 처리용)와 idempotency.Store가 세션이 끝날 때까지 접수된
+          # 주문을 전부 메모리에 들고 있는 구조라, 고배속 부하테스트에서 주문이 수만
+          # 건 누적되면 그 자체로 메모리를 다 쓴다 — 근본적으로는 두 저장소가 무한정
+          # 커지는 게 원인이고(처리 완료된 주문을 주기적으로 비우는 구조 개선이 필요),
+          # 지금은 한도를 넉넉히 잡아 대응한다.
           resources:
             requests:
               cpu: 200m
@@ -90,17 +84,13 @@ spec:
             limits:
               cpu: "1"
               memory: 3Gi
-          # readinessProbe가 없으면 Kafka/Redis 연결을 맺기 전(main.go의 http.ListenAndServe
-          # 이전 단계)에도 파드가 즉시 Ready로 잡혀서, ALB가 그 틈에 트래픽을 보내면 502가
-          # 난다(2026-08-19, 팀원이 재배포 직후 GET /v1/sessions/last-run 502 리포트 —
-          # 이 세션에서 재배포를 여러 번 시킨 타이밍에 걸린 것으로 확인). ingress의
-          # healthcheck-path와 같은 엔드포인트를 재사용한다.
-          # timeoutSeconds를 명시 안 하면 K8s 기본값 1초가 적용된다 — 이 엔드포인트가
-          # Redis 왕복을 포함하는데, 100배속 부하테스트에서 Redis 응답이 순간적으로
-          # 1초를 넘기면 파드는 멀쩡한데도 ALB에서 빠져 사용자가 503을 받는 걸 실측함
-          # (2026-08-20, 81초 동안 readiness 실패 7회 — 파드 자체는 Ready 조건 정상).
-          # livenessProbe까지 같은 기본값이면 더 심각하게 파드가 불필요하게 재시작될
-          # 수 있어 같이 늘림.
+          # readinessProbe가 없으면 Kafka/Redis 연결을 맺기 전(main.go의
+          # http.ListenAndServe 이전 단계)에도 파드가 즉시 Ready로 잡혀서, ALB가 그
+          # 틈에 트래픽을 보내면 502가 난다 — ingress의 healthcheck-path와 같은
+          # 엔드포인트를 재사용한다. timeoutSeconds를 명시 안 하면 K8s 기본값 1초가
+          # 적용되는데, 이 엔드포인트는 Redis 왕복을 포함해서 부하테스트 중 순간적으로
+          # 1초를 넘기면 파드는 멀쩡한데도 ALB에서 빠져 503이 날 수 있어 늘린다.
+          # livenessProbe도 같은 이유로 같이 늘림.
           readinessProbe:
             httpGet:
               path: /v1/markets/KRW-BTC/orderbook
@@ -119,13 +109,25 @@ spec:
             failureThreshold: 3
           # readinessProbe는 "새 파드가 준비되기 전에 트래픽을 받는" 쪽은 막아주지만,
           # "오래된 파드가 종료되기 시작한 뒤에도 ALB가 잠깐 더 트래픽을 보내는" 반대쪽
-          # 틈은 못 막는다(2026-08-20, readinessProbe 배포 이후에도 재배포 때 502가
-          # 재현돼서 발견) — SIGTERM을 받자마자 바로 죽지 않고 몇 초 버텨서, 그 사이
+          # 틈은 못 막는다 — SIGTERM을 받자마자 바로 죽지 않고 몇 초 버텨서, 그 사이
           # ALB가 타겟 그룹에서 이 파드를 실제로 빼도록 시간을 준다.
           lifecycle:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 8"]
+          # 아무 경로도 이 마운트를 직접 읽지 않는다 — REDIS_PASSWORD는 위 secretKeyRef로
+          # 받는다. CSI secretObjects 동기화를 "트리거"하는 용도일 뿐이다.
+          volumeMounts:
+            - name: secrets-store-redis-auth
+              mountPath: /mnt/secrets-store-redis-auth
+              readOnly: true
+      volumes:
+        - name: secrets-store-redis-auth
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: redis-auth-secret-provider
 ---
 apiVersion: v1
 kind: Service

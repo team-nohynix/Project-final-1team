@@ -119,11 +119,8 @@ resource "aws_security_group" "team1_sg_msk" {
   }
 }
 
-# 2026-08-24: RDS(team1-truss-db)를 삭제하고 EC2 자체 호스팅 MySQL로 옮기면서
-# (root 스택 mysql-ec2.tf) team1_sg_rds가 완전히 orphan이 됐다 — 새 인스턴스는
-# 별도 전용 SG(team1_sg_mysql_ec2, mysql-ec2.tf)를 쓴다. 이 SG를 참조하는
-# 리소스가 하나도 안 남아서(outputs.tf의 security_group_ids.rds 출력도 같이
-# 지움) 통째로 제거한다.
+# MySQL은 RDS가 아니라 EC2 자체 호스팅이라(root 스택 mysql-ec2.tf) 전용 SG
+# (team1_sg_mysql_ec2)를 그쪽에서 따로 쓴다 — 이 파일엔 RDS용 SG가 없다.
 
 resource "aws_security_group" "team1_sg_redis" {
   name        = "team1-sg-redis"
@@ -201,9 +198,8 @@ resource "aws_security_group_rule" "team1_backend_from_alb" {
 }
 
 # recorder 조회 API(:8082, GET /v1/trace/{orderId} 등) — orderapi Ingress와 ALB를
-# 공유하도록 2026-08-12에 붙였는데, 이 규칙이 8081 하나로만 좁혀져 있어서 recorder
-# 타겟그룹이 Target.Timeout으로 계속 unhealthy였다(예전 Fargate SG 갭과 같은 클래스의
-# "포트/SG가 좁게 스코프돼 새 백엔드가 조용히 막히는" 패턴).
+# 공유하는데, 8081 하나만 열려 있으면 recorder 타겟그룹이 Target.Timeout으로
+# unhealthy가 된다.
 resource "aws_security_group_rule" "team1_backend_from_alb_recorder" {
   type                     = "ingress"
   security_group_id        = aws_security_group.team1_sg_eks_backend.id

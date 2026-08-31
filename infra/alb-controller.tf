@@ -1,10 +1,6 @@
 # AWS Load Balancer Controller — Public ALB(접수 API)는 컨트롤러가 Ingress 적용 시 생성한다
 # (K8s 레이어, 컨트롤러 자신의 Ingress 리소스 생성은 여전히 Terraform 밖). IRSA/서브넷
-# 자동탐색 태그에 더해, 컨트롤러 자체 설치(helm_release, 2026-08-24 추가)도 여기서 한다 —
-# 원래 `helm install aws-load-balancer-controller ...`로 손으로 설치돼 있던 것을, "EKS
-# 클러스터를 통째로 지웠다 올려도 원상복구되게" terraform으로 옮겼다. values는 실제 배포된
-# 릴리스에서 `helm get values aws-load-balancer-controller -n kube-system`으로 뽑은
-# 사용자 지정값 그대로(2026-08-24 확인) — 나머지는 차트 기본값.
+# 자동탐색 태그에 더해 컨트롤러 자체 설치(helm_release)도 여기서 한다.
 # policies/alb_controller_policy.json은 AWS 공식 배포본 원본 — 적용 전 최신본 확인 권장.
 
 resource "aws_iam_policy" "alb_controller" {
@@ -90,7 +86,7 @@ resource "helm_release" "aws_load_balancer_controller" {
   namespace  = "kube-system"
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
-  version    = "3.5.0" # 실제 배포된 릴리스와 같은 차트 버전(helm list -A로 확인, 2026-08-24)
+  version    = "3.5.0"
 
   values = [yamlencode({
     clusterName = aws_eks_cluster.team1.name
@@ -106,6 +102,6 @@ resource "helm_release" "aws_load_balancer_controller" {
   })]
 
   # system 노드그룹(taint 없음, 고정 2대)이 실제로 스케줄 가능한 상태여야
-  # 컨트롤러 파드가 뜬다 — eks-nodegroup-system.tf 참고.
+  # 컨트롤러 파드가 뜬다.
   depends_on = [aws_eks_node_group.system, time_sleep.wait_for_eks_auth]
 }

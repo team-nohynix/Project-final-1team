@@ -1,10 +1,5 @@
 # 격리 모니터링 EC2 — 자체 호스팅 Prometheus+Grafana(Docker Compose). AMP/AMG는 안 쓴다
-# (AMG는 이 계정이 속한 조직의 IAM Identity Center SSO 권한이 없어 구조적으로 막힘,
-# infra/k8s/monitoring/prometheus-values.yaml 주석 참고).
-#
-# 이전에 이 자리에 수동으로 만든 EC2(team1-monitoring)가 있었는데 Terraform 관리 밖이라
-# SSH 키도 IAM 프로파일도 없어 아무도 못 고치는 상태였고, prometheus.yml에 미치환
-# ${orderapi_endpoint} 같은 셸 변수가 그대로 박혀 있었다 — 이번엔 재현 가능하게 새로 만든다.
+# (AMG는 이 계정이 속한 조직의 IAM Identity Center SSO 권한이 없어 구조적으로 막힘).
 #
 # 네트워크 격리: 이 EC2는 EKS 노드/파드 보안그룹과 아무 신뢰관계도 맺지 않는다. 스크레이프는
 # EKS API 서버 프록시 경로(/api/v1/.../proxy/metrics)로만 하고, 접근 통제는 오직 IAM
@@ -25,15 +20,10 @@ locals {
     grafana_admin_password = var.monitoring_grafana_admin_password
   })
 
-  # user_data는 여기 나열된 파일 내용을 전부 그대로 박아 넣었었는데, 대시보드
-  # JSON이 커지면서(2026-08-20, 시세 수집기/AI 트레이더 패널 추가 후 61개 패널)
-  # gzip+base64를 거치고도 EC2의 user_data 16,384바이트 한도를 넘어 인스턴스
-  # 생성 자체가 실패했다(RunInstances: "User data is limited to 16384 bytes") —
-  # 대시보드를 조금만 고쳐도 인스턴스가 통째로 재생성되던 문제와 같은 근본
-  # 원인. 이제 이 파일들은 S3(아래 aws_s3_object)에 올려두고, user_data는
-  # 부팅 시 S3에서 내려받기만 한다 — user_data 자체는 몇 줄 안 되니 앞으로
-  # 다시 이 한도에 걸릴 일이 없고, 내용이 바뀌어도(S3 객체만 갱신) EC2가
-  # 재생성되지 않는다.
+  # 대시보드 JSON을 포함한 설정 파일 전체를 user_data에 직접 박으면 gzip+base64를
+  # 거치고도 EC2의 user_data 16,384바이트 한도를 넘긴다 — 대신 파일들은 S3(아래
+  # aws_s3_object)에 올려두고, user_data는 부팅 시 S3에서 내려받기만 한다. 내용이
+  # 바뀌어도(S3 객체만 갱신) EC2가 재생성되지 않는다.
   monitoring_user_data = templatefile("${path.module}/monitoring-ec2/user-data.sh.tpl", {
     aws_region       = "ap-northeast-2"
     eks_cluster_name = aws_eks_cluster.team1.name
@@ -101,8 +91,8 @@ resource "aws_s3_object" "monitoring_dashboard_team1" {
   etag    = filemd5("${path.module}/monitoring-ec2/dashboards/team1-overview.json")
 }
 
-# 프론트 "시스템 종합 현황" 화면과 똑같이 생긴 별도 대시보드(2026-08-19) — 대시보드
-# provider가 폴더 전체를 보므로 객체만 늘리면 됨(grafana-dashboard-provider.yml 참고).
+# 프론트 "시스템 종합 현황" 화면과 똑같이 생긴 별도 대시보드 — 대시보드 provider가
+# 폴더 전체를 보므로 객체만 늘리면 됨(grafana-dashboard-provider.yml 참고).
 resource "aws_s3_object" "monitoring_dashboard_system" {
   bucket  = aws_s3_bucket.monitoring_config.id
   key     = "system-overview.json"
@@ -171,7 +161,7 @@ resource "aws_iam_role_policy" "monitoring_eks_describe" {
 
 # Grafana의 CloudWatch 데이터소스(grafana-datasource.yml)용 — Kafka(MSK)/RDS/Redis는
 # Prometheus exporter가 없고 CloudWatch 지표만 있어서, monitoring.tf의 알람이 보는
-# 것과 같은 지표를 Grafana에서도 직접 조회하려면 필요하다(2026-08-19). 읽기 전용.
+# 것과 같은 지표를 Grafana에서도 직접 조회하려면 필요하다. 읽기 전용.
 data "aws_iam_policy_document" "monitoring_cloudwatch_read" {
   statement {
     actions = [
@@ -297,25 +287,16 @@ resource "aws_eip" "monitoring" {
 
 # --- EC2 ---------------------------------------------------------------------
 
-# 리소스 이름 monitoring_v2: 예전에 수동으로 만들었던 미관리 EC2가 aws_instance.monitoring
-# 이름으로 이미 state에 남아 있어서(관리 밖에서 config 없이 방치된 orphan), 그 주소를 그대로
-# 쓰면 이 config가 그 기존 인스턴스를 "업데이트"하려 든다 — 실수로 그 인스턴스를 건드리지
-# 않도록 새 주소를 쓴다. 기존 orphan(aws_instance.monitoring, aws_security_group.monitoring,
-# data.aws_ami.ubuntu)은 새 인스턴스 정상 동작 확인 후 별도로 정리한다.
 resource "aws_instance" "monitoring_v2" {
   ami = data.aws_ami.al2023.id
-  # 2026-08-21: t3.small(2GB RAM)이 Prometheus+Grafana 두 컨테이너를 감당 못 해
-  # 주기적으로 완전히 멎는(SSM도 응답 없음, docker ps조차 안 됨) 문제가 반복돼
-  # t3.medium(4GB)으로 올림 — pod별 스크레이프로 고치면서(서비스당 타겟 1개 ->
-  # 레플리카 수만큼) 타겟/시계열 수가 늘어난 것과 시기가 겹친다. CPU 크레딧은
-  # 사고 당시에도 넉넉했어서(t3.small 최대치 근처) CPU가 아니라 메모리 쪽
-  # 압박으로 추정.
+  # t3.medium(4GB) — t3.small(2GB)은 Prometheus+Grafana 두 컨테이너를 감당 못 해
+  # 메모리 압박으로 주기적으로 멎는다.
   instance_type          = "t3.medium"
   subnet_id              = data.terraform_remote_state.network.outputs.subnet_ids.public.a
   vpc_security_group_ids = [aws_security_group.team1_sg_monitoring.id]
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
-  # gzip 압축 — 대시보드 JSON이 커지면서 평문 user_data가 EC2의 16KB 한도를 넘겨서
-  # (2026-08-13) 압축으로 전환. EC2가 gzip 매직바이트를 자동 인식해서 부팅 시 그대로 풀어 실행한다.
+  # gzip 압축 — 대시보드 JSON을 포함한 평문 user_data가 EC2의 16KB 한도를 넘긴다.
+  # EC2가 gzip 매직바이트를 자동 인식해서 부팅 시 그대로 풀어 실행한다.
   user_data_base64            = base64gzip(local.monitoring_user_data)
   user_data_replace_on_change = true # user_data는 최초 부팅에만 실행되므로, 바뀌면 재생성해야 실제 반영됨
 
@@ -324,11 +305,10 @@ resource "aws_instance" "monitoring_v2" {
     volume_type = "gp3"
   }
 
-  # data.aws_ami.al2023가 most_recent=true라, AWS가 새 AL2023 AMI를 낼 때마다
-  # ami 값이 바뀌어서 plan/apply가 이 살아있는 인스턴스를 강제로 replace하려 든다
-  # (2026-08-19, CI apply 승인 직전에 발견) — user_data로 재현 가능하니 AMI는
-  # 최초 생성 시점 값으로 고정하고, 나중에 의도적으로 새 AMI를 쓰고 싶으면
-  # 이 lifecycle 블록을 지우고 명시적으로 재생성한다.
+  # data.aws_ami.al2023가 most_recent=true라, AWS가 새 AL2023 AMI를 낼 때마다 ami 값이
+  # 바뀌어서 plan/apply가 이 살아있는 인스턴스를 강제로 replace하려 든다 — AMI는 최초
+  # 생성 시점 값으로 고정하고, 나중에 의도적으로 새 AMI를 쓰고 싶으면 이 lifecycle
+  # 블록을 지우고 명시적으로 재생성한다.
   lifecycle {
     ignore_changes = [ami]
   }

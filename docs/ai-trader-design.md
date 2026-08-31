@@ -218,7 +218,7 @@ LLM을 쓰지 않는 봇은 매 판단 주기마다 아래 규칙을 그대로 �
 판단 로직은 Claude를 호출해 방향 신호를 만든다. 팀이 이미 AWS 인프라(EKS·S3·MySQL(EC2)·ElastiCache)를 사용 중이므로, Anthropic에 별도로 결제하는 대신 **AWS Bedrock**을 경유해 호출한다.
 
 - EKS 파드에 IRSA(IAM Roles for Service Accounts)로 부여된 역할로 인증하며, API 키를 코드나 설정 파일에 남기지 않는다(NFR-18). 파드 단위로 권한을 부여하므로 EC2 인스턴스 프로필보다 최소 권한 원칙에 가깝다
-- 기본 모델은 `claude-sonnet-5`(Bedrock 모델 ID: `anthropic.claude-sonnet-5`)이며, 호출량 대비 비용이 부담되면 `claude-haiku-4-5`로 낮춘다
+- 실제 사용 모델은 `apac.anthropic.claude-3-haiku-20240307-v1:0`(APAC 추론 프로파일)이다 — "가장 저렴한 모델" 팀 결정에 따른 것. 온디맨드로 raw 모델 ID(`anthropic.claude-haiku-4-5*` 등)를 직접 호출하면 "추론 프로파일을 쓰라"고 거부당해(2026-08-12 실측), 대신 이 추론 프로파일을 쓴다 — `infra/k8s/ai-trader/configmap.yaml`의 `BEDROCK_MODEL_ID`, `infra/irsa.tf`의 `sa_ai_trader_bedrock_policy`가 이 값과 라우팅 대상 APAC 리전 foundation-model ARN 기준으로 맞춰져 있다
 - 프롬프트는 역할 프로필(persona, 고정)과 메모리(최근 판단 이력, 매 호출 갱신)로 구성하고, tool_choice로 위 방향 신호 스키마 출력을 강제한다
 - 역할 프로필은 매 호출 동일하므로 프롬프트 캐싱 대상이다
 

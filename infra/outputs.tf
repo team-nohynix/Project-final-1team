@@ -47,6 +47,11 @@ output "job_trigger_queue_url" {
   value = aws_sqs_queue.job_trigger.id
 }
 
+output "alb_public_security_group_id" {
+  description = "infra/k8s/backend/orderapi-ingress.yaml, infra/k8s/collector/backend-ingress.yaml의 alb.ingress.kubernetes.io/security-groups 어노테이션을 CI가 envsubst로 채워 넣을 때 쓰는 값 — network 스택 재생성으로 SG ID가 바뀌어도 YAML을 손으로 갱신할 필요가 없다."
+  value       = data.terraform_remote_state.network.outputs.security_group_ids.alb_public
+}
+
 output "irsa_role_arns" {
   description = "k8s/*.yaml ServiceAccount의 eks.amazonaws.com/role-arn 어노테이션에 넣을 값"
   value = {

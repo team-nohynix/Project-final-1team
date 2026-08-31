@@ -222,7 +222,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   # 프론트가 /recorder-api/*로 부르는 recorder 조회 API(/v1/trace, /v1/matching/engines,
   # /v1/metrics/dashboard, /v1/orders/summary — orderapi-ingress.yaml에서 같은 ALB를
   # 공유)를 접수 API ALB로 프록시. 이 behavior가 없으면 default_cache_behavior(S3)로
-  # 떨어져서 정적 프론트 파일을 찾으려다 실패한다(2026-08-13, 김다현 리포트로 발견).
+  # 떨어져서 정적 프론트 파일을 찾으려다 실패한다.
   ordered_cache_behavior {
     path_pattern           = "/recorder-api/*"
     allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
@@ -310,20 +310,16 @@ resource "aws_s3_bucket_policy" "frontend" {
 # ALB는 Terraform이 아니라 ALB Controller가 k8s/backend/orderapi-ingress.yaml
 # 적용 시 만든다 — 여기서는 그 ALB를 태그(Ingress의 alb.ingress.kubernetes.io/tags
 # 어노테이션과 값이 같아야 함)로 찾아서 DNS/CloudFront 배관만 잇는다. 프론트가
-# 상대경로 /order-api/*로 호출하므로(frontend/src/views/MarketOrderBookView.vue,
-# LoadTestReplayView.vue, AITraderView.vue, TestResultTrackingView.vue 등,
-# 2026-08-20 재확인) CloudFront가 그 경로를 이 ALB로 프록시해야 한다 — CloudFront
-# Function으로 /order-api 접두사를 벗겨서 넘긴다.
+# 상대경로 /order-api/*로 호출하므로 CloudFront가 그 경로를 이 ALB로 프록시해야
+# 한다 — CloudFront Function으로 /order-api 접두사를 벗겨서 넘긴다.
 
 # data "aws_lb"는 태그로 찾다가 하나도 없으면(EKS를 통째로 지웠다 올린 직후,
 # ALB Controller가 아직 Ingress를 못 받아 ALB를 안 만든 시점) "Search returned
 # 0 results"로 에러가 나고, data source 에러는 -target으로 다른 리소스를
-# 골라도 못 피한다 — Terraform이 target과 무관하게 조건 없는 data 블록은
-# 항상 refresh하기 때문(2026-08-24, EKS 전체 destroy→apply 리허설 중 실측 —
-# route53_record만 -target에서 뺐는데도 plan 자체가 이 데이터소스에서 계속
-# 막혔음). data "external"은 스크립트가 뭘 내보내든(빈 값 포함) 그대로
-# 성공 처리라 이 문제를 원천적으로 피한다 — ALB가 없으면 found=false만 주고
-# 넘어가고, 그걸 소비하는 aws_route53_record.api를 count로 조건부 생성한다.
+# 골라도 못 피한다 — Terraform이 target과 무관하게 조건 없는 data 블록은 항상
+# refresh하기 때문이다. data "external"은 스크립트가 뭘 내보내든(빈 값 포함)
+# 그대로 성공 처리라 이 문제를 원천적으로 피한다 — ALB가 없으면 found=false만
+# 주고 넘어가고, 그걸 소비하는 aws_route53_record.api를 count로 조건부 생성한다.
 data "external" "orderapi_alb" {
   program = ["bash", "-c", <<-EOT
     set -euo pipefail
@@ -407,12 +403,10 @@ resource "aws_route53_record" "collector" {
 
 # SPA 클라이언트 라우팅 폴백 — custom_error_response(403/404->200 index.html)
 # 대신 이걸 쓴다. custom_error_response는 배포 전체에 걸려서 어떤 오리진이
-# 낸 404든 다 index.html로 덮어써버리는데, 실제로 /order-api/*의 진짜 404
-# 응답(예: DELETE 존재하지 않는 주문)까지 index.html로 뒤집어씌우는 걸 라이브
-# 테스트로 확인했다 — API 에러 처리가 통째로 깨지는 문제. 오리진에 요청을
-# 보내기 전에 뷰어 요청 단계에서 "정적 파일처럼 안 보이면 index.html로"
-# 미리 재작성하는 방식으로 바꿔서, default_cache_behavior(S3)에만 붙이고
-# /order-api/* 쪽 ordered_cache_behavior는 이 로직을 아예 안 거치게 한다.
+# 낸 404든 다 index.html로 덮어써버려 /order-api/*의 진짜 404 응답까지 뒤집어써
+# API 에러 처리가 깨진다. 오리진에 요청을 보내기 전에 뷰어 요청 단계에서
+# "정적 파일처럼 안 보이면 index.html로" 미리 재작성해서, default_cache_behavior
+# (S3)에만 붙이고 /order-api/* 쪽은 이 로직을 아예 안 거치게 한다.
 resource "aws_cloudfront_function" "spa_fallback" {
   name    = "team1-spa-fallback"
   runtime = "cloudfront-js-2.0"

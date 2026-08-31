@@ -1,4 +1,4 @@
-# orderapi가 POST /v1/admin/reset-matching-engine-book(2026-08-21, orderapi/adminreset.go)에서
+# orderapi가 POST /v1/admin/reset-matching-engine-book(orderapi/adminreset.go)에서
 # matching-engine Deployment에 rollout restart를 걸 수 있게 하는 최소 권한이다.
 # ci-deploy-rbac.yaml(CI가 쓰는 훨씬 넓은 권한 — create/update, services/pods까지)과
 # 다르게, orderapi 파드 자신에게 주는 권한이라 꼭 필요한 것만 남긴다: matching-engine
@@ -21,12 +21,11 @@ rules:
     resources: ["deployments"]
     resourceNames: ["matching-engine"]
     verbs: ["get", "patch"]
-  # 2026-08-24, GET /v1/system-status(orderapi/systemstatus.go) "실시간 처리
-  # 흐름" 패널의 파드 레플리카 수 표시용 — orderapi/recorder Deployment 상태를
-  # 읽기만 하면 되므로(재시작 등 쓰기 권한 불필요) 위 규칙과 분리된 별도
-  # 규칙으로 get만 부여한다. 매칭엔진 규칙에 이름만 추가하면 patch 권한까지
-  # 같이 넓어지므로(한 rule 안의 verbs는 모든 resourceNames에 동일 적용)
-  # 일부러 규칙을 나눴다 — 최소 권한 원칙은 이 파일 도입 취지와 같다.
+  # GET /v1/system-status(orderapi/systemstatus.go) "실시간 처리 흐름" 패널의 파드
+  # 레플리카 수 표시용 — orderapi/recorder Deployment 상태를 읽기만 하면 되므로
+  # 위 규칙과 분리된 별도 규칙으로 get만 부여한다. 매칭엔진 규칙에 이름만 추가하면
+  # patch 권한까지 같이 넓어지므로(한 rule 안의 verbs는 모든 resourceNames에 동일
+  # 적용) 일부러 규칙을 나눴다.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     resourceNames: ["orderapi", "recorder"]
