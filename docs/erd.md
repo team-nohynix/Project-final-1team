@@ -3,6 +3,7 @@
 ## 변경 이력
 | 날짜 | 변경 내용 |
 |---|---|
+| 2026-08-24 | **실제 배포·부하시험 이후 `recorder/schema.sql`에 반영된 물리 스키마 변경을 문서에 반영** — 논리적 엔티티/컬럼 구조는 그대로이나, 두 가지가 새로 추가됨: (1) `EXECUTION(buy_order_id, sell_order_id)` 자연키 유니크 인덱스 — recorder가 DB 커밋 후 Kafka 오프셋 커밋 전에 죽어 배치가 재처리되면서 동일 체결이 새 ID로 중복 저장되던 실제 사고(대시보드 "중복 체결" 지표로 실측 발견)의 대응, (2) `MATCHING_ENGINE_ASSIGNMENT(market_code, engine_instance_id, assigned_at)` 자연키 유니크 인덱스 — 같은 배치 재전달 문제의 저위험 버전(서비스 상태 자체는 이미 자가치유되지만 감사 이력에 중복 행이 쌓이는 것을 방지). 3장·4장에 반영. 그 외 `trade_order`/`execution`에 추가된 조회 성능 인덱스(mode+submitted_at+status, status, submitted_at, status+submitted_at, executed_at 등, RDS CPU 99% 실제 장애 대응)는 논리 모델에 영향 없는 순수 성능 튜닝이라 4장에 요약만 남기고 전체 목록은 `recorder/schema.sql` 주석을 그대로 원본으로 둠 |
 | 2026-08-07(5차) | FR-19 세션 가드 충돌을 `runId` 그룹 모델로 구현·검증 완료 — `orderapi/session`의 `Claim`이 `owner, runID` 두 값을 받아 같은 `runId`의 여러 멤버를 한 그룹으로 묶고, Redis Set으로 그룹 멤버를 추적해 마지막 멤버 반납 시에만 그룹을 해제한다. 라이브 검증 중 세션 ID 구분자로 쓴 `"#"`이 URL 프래그먼트로 해석되는 버그를 발견해 `"."`로 수정. §5의 마지막 남은 항목이 해결돼 §5에 남은 항목 없음 |
 | 2026-08-07(4차) | FR-19 세션 가드 충돌 항목에 팀 결정 반영: 인스턴스 2대부터 시작해 점진적으로 늘리는 스케일 테스트 방식 채택, `matching`의 FR-11 같은 동적 재분배 로직은 만들지 않기로 확정(`replayengine`은 1회성 배치 Job이라 필요 없음). 세션 가드 자체를 어떻게 고칠지는 여전히 다음 작업으로 남음(§5) |
 | 2026-08-07(3차) | **`TRADE_ORDER.source_order_id` 배관 완성** — `trader`가 `orderapi` 응답의 `orderId`를 파싱해 FR-17 기록 파일(`RecordedOrder.OrderID`)에 남기고, `replayengine`이 리플레이 제출 시 그 값을 `POST /v1/orders`의 새 선택 필드 `sourceOrderId`(`docs/api-specification.md` §2.1)로 실어 보내며, `orderapi`가 이를 Kafka NEW 이벤트에 태워 기록기가 `trade_order.source_order_id`(FK 없음, `execution.buy_order_id`/`sell_order_id`와 같은 이유)로 저장한다. `OrderSubmitter.Submit`이 이제 `(orderID string, err error)`를 반환하도록 시그니처가 바뀌었다(`trader/order`) |
@@ -67,19 +68,19 @@ erDiagram
     EXECUTION {
         string execution_id PK
         string market_code FK
-        string buy_order_id FK "매수 주문 번호"
-        string sell_order_id FK "매도 주문 번호"
+        string buy_order_id FK "매수 주문 번호, (buy_order_id,sell_order_id) 조합 유니크(자연키, 2026-08-24)"
+        string sell_order_id FK "매도 주문 번호, 위와 동일 조합의 일부"
         decimal price "체결가(선행 주문가, FR-06)"
         decimal quantity
-        string mode "PAPER_TRADING/REPLAY"
+        string mode "PAPER_TRADING/REPLAY, nullable(양쪽 주문 다 못 찾은 경우)"
         datetime executed_at
     }
 
     MATCHING_ENGINE_ASSIGNMENT {
         string assignment_id PK
         string market_code FK
-        string engine_instance_id "매칭 엔진 인스턴스 식별자"
-        datetime assigned_at
+        string engine_instance_id "매칭 엔진 인스턴스 식별자, (market_code,engine_instance_id,assigned_at) 조합 유니크(자연키, 2026-08-24)"
+        datetime assigned_at "위와 동일 조합의 일부"
         datetime released_at "해제 시각(nullable, NULL이면 현재 담당 중, FR-11)"
     }
 ```
@@ -93,10 +94,10 @@ erDiagram
 접수 API가 처리하는 모든 주문. `mode`로 페이퍼 트레이딩/리플레이를 구분하고(FR-09), 리플레이 주문은 `source_order_id`로 원본 페이퍼 트레이딩 주문을 참조해 "동일 파일 재생 시 총 주문 수·마켓별 비율 동일"(FR-18 검증)을 추적할 수 있게 한다. `client_request_id`는 중복 주문 방지(FR-02) 판별 키다. `status` 값은 `docs/api-specification.md`가 정의하고 `orderapi/order/order.go`가 실제로 쓰는 상수(`ACCEPTED`/`PARTIALLY_FILLED`/`FILLED`/`CANCELED`)와 정확히 일치시켰다 — 이전 초안의 `OPEN`/`CANCELLED`는 실제 코드에 없는 값이었다.
 
 ### EXECUTION
-매칭 엔진이 체결한 결과(FR-06, FR-09). 매수·매도 주문 번호를 각각 참조해 "체결 결과의 매수·매도 주문 번호가 실제 체결 주문과 일치"(FR-09 검증)를 보장한다. 거래 내역 조회(FR-13)는 이 테이블을 최신순으로 조회한다.
+매칭 엔진이 체결한 결과(FR-06, FR-09). 매수·매도 주문 번호를 각각 참조해 "체결 결과의 매수·매도 주문 번호가 실제 체결 주문과 일치"(FR-09 검증)를 보장한다. 거래 내역 조회(FR-13)는 이 테이블을 최신순으로 조회한다. **`(buy_order_id, sell_order_id)` 조합은 실제로 유니크 제약이 걸려 있다(자연키, 2026-08-24)** — 가격-시간 우선 매칭 특성상 한 매수-매도 조합은 논리적으로 한 번만 체결될 수 있다는 성질을 이용해, Kafka 배치 재전달로 동일 체결이 다른 `execution_id`로 중복 저장되는 것을 DB 레벨에서 막는다(4장 참고).
 
 ### MATCHING_ENGINE_ASSIGNMENT
-매칭 엔진 수 증감에 따른 마켓 재분배 이력(FR-11). "한 마켓은 항상 정확히 한 엔진만 담당"(1.2.2) 원칙을 `released_at IS NULL` 조건으로 검증할 수 있다. FR-11은 실제로 구현·검증됐고(`matching/main.go`의 `marketRegistry.Acquire`/`Release`), **2026-08-07부터 실제로 이 테이블에 값이 채워진다**: `matching`이 `Acquire`/`Release` 시점마다 Kafka `assignments` 토픽에 `ASSIGNED`/`RELEASED` 이벤트를 발행하고(`matching/kafkaclient/assignment_producer.go`), 기록기가 그걸 구독해 행을 기록한다(`recorder/store/mysql.go`의 `AssignMarket`/`ReleaseMarket`) — `matching`은 여전히 DB에 직접 쓰지 않는다(role B는 Kafka 경유만, 팀 결정: "기록기가 모든 DB 입력을 담당"). `REPLAY_ENGINE_MARKET`(제거됨, 4장 참고)과 달리 이 배정은 측정된 부하에 따라 동적으로 정해지므로 사후에 재계산할 수 없어서, 기록해둘 실질적인 가치가 있다.
+매칭 엔진 수 증감에 따른 마켓 재분배 이력(FR-11). "한 마켓은 항상 정확히 한 엔진만 담당"(1.2.2) 원칙을 `released_at IS NULL` 조건으로 검증할 수 있다. FR-11은 실제로 구현·검증됐고(`matching/main.go`의 `marketRegistry.Acquire`/`Release`), **2026-08-07부터 실제로 이 테이블에 값이 채워진다**: `matching`이 `Acquire`/`Release` 시점마다 Kafka `assignments` 토픽에 `ASSIGNED`/`RELEASED` 이벤트를 발행하고(`matching/kafkaclient/assignment_producer.go`), 기록기가 그걸 구독해 행을 기록한다(`recorder/store/mysql.go`의 `AssignMarket`/`ReleaseMarket`) — `matching`은 여전히 DB에 직접 쓰지 않는다(role B는 Kafka 경유만, 팀 결정: "기록기가 모든 DB 입력을 담당"). `REPLAY_ENGINE_MARKET`(제거됨, 4장 참고)과 달리 이 배정은 측정된 부하에 따라 동적으로 정해지므로 사후에 재계산할 수 없어서, 기록해둘 실질적인 가치가 있다. **`(market_code, engine_instance_id, assigned_at)` 조합도 유니크 제약이 걸려 있다(자연키, 2026-08-24)** — EXECUTION과 같은 배치 재전달 문제의 저위험 버전으로, `released_at IS NULL` 판정 자체는 이미 자가치유되지만 감사 이력에 중복 행이 쌓이는 것은 막는다.
 
 ## 4. 설계 근거 메모
 
@@ -115,6 +116,8 @@ erDiagram
 - **`TRADE_ORDER.remaining_quantity` 배관 추가(2026-08-06)** — 매칭 엔진이 별도로 발행하지 않고, "기록기"가 체결 반영 트랜잭션 안에서 `remaining_quantity = remaining_quantity - 체결수량`으로 스스로 계산한다(`recorder/store/mysql.go`의 `updateFill` — MySQL은 `UPDATE ... RETURNING`이 없어 `UPDATE`로 잠금+계산+쓰기를 하고 같은 트랜잭션에서 별도 `SELECT`로 `mode`를 읽는다; 그 행의 잠금이 커밋까지 유지되므로 여러 체결이 동시에 들어와도 갱신 레이스가 없다).
 - **FR-19(리플레이 엔진 분산 실행) 세션 가드 충돌 — 구현·검증 완료(2026-08-07)**. `orderapi/session`의 배타성 단위를 "프로세스 1개"에서 "`runId`로 묶인 그룹 1개"로 확장해 해결했다: `Claim(ctx, owner, runID)`가 `runID`를 비워 보내면(예: `trader`, 애초에 안 나뉨) 서버가 하나 생성해 예전과 동일한 "멤버 1개짜리 그룹"으로 동작하고, `replayengine` 샤드들이 새 `-run-id` 플래그로 똑같은 값을 보내면 전부 한 그룹에 합류한다(다른 `runId`/owner는 지금처럼 409). Redis에 `orderapi:session:members:{runID}` Set을 추가해 "그룹에 지금 몇 명이 있는지" 추적하고, 반납 시 이 Set에서 제거한 뒤 **마지막 멤버였을 때만** 그룹 키를 즉시 지운다(멤버가 남아있으면 그룹은 살아있음) — 크래시로 반납을 못 한 멤버는 Set에 유령으로 남지만, TTL 자체는 그룹 전체가 여전히 자연 소멸하므로 정합성엔 문제없다(다만 그 경우 "마지막 반납 시 즉시 해제" 최적화가 한 번 안 먹고 TTL을 기다림 — 감내 가능하다고 판단). **라이브 검증 중 발견한 버그**: 첫 구현은 합성 세션 ID 구분자로 `"#"`을 썼는데, 클라이언트가 URL을 문자열 이어붙이기로만 만들다 보니(URL 인코딩 없음) `#`이 URL 프래그먼트로 해석돼 `curl`/`net/http`가 그 뒤(`/heartbeat` 등)를 통째로 잘라버려 엉뚱한 404/405가 났다 — 구분자를 `"."`로 바꿔 해결. 실제 Redis(`infra/dev-redis`)로 검증: 샤드 2개가 같은 `runId`로 합류 성공, 다른 `runId`는 그룹이 살아있는 동안 계속 409, 마지막 아닌 멤버의 반납은 그룹을 안 건드림, 마지막 멤버 반납 시에만 그룹 키 전부 삭제, 그 직후 새 `runId`가 바로 클레임 성공 — 전부 확인됨.
 - **`MATCHING_ENGINE_ASSIGNMENT`의 크래시 자가치유(2026-08-07)** — 매칭 엔진 인스턴스가 정상 종료 없이 강제로 죽으면 `RELEASED` 이벤트를 보낼 기회가 없어, 그 인스턴스가 담당했던 마켓의 이전 행이 영원히 `released_at IS NULL`로 남는다 — "이 조건으로 지금 담당자를 알 수 있다"는 이 테이블의 존재 목적 자체가 깨지는 실제 버그였다(라이브 검증 중 발견). `AssignMarket`이 새 배정을 기록하기 전에 같은 `market_code`의 기존 열린 행을 먼저 닫도록 고쳐 해결했다 — Kafka 컨슈머 그룹의 `Generation.Start` 계약(새 배정을 받았다는 건 이전 담당자가 이미 완전히 멈췄다는 뜻)이 이 전제를 보장해주기 때문에 안전하다.
+- **`EXECUTION`/`MATCHING_ENGINE_ASSIGNMENT` 자연키 유니크 인덱스 추가 — 실제 배치 재전달 중복 저장 사고 대응(2026-08-24)** — `recorder`는 한 배치(수백 건)를 하나의 MySQL 트랜잭션으로 커밋한 뒤에야 그 배치의 Kafka 오프셋을 커밋한다(`Reader.FetchMessage`+수동 `CommitMessages`, FR-09 "발행 건수=저장 건수" 보장을 위한 기존 설계). 그런데 DB 커밋이 끝나고 오프셋 커밋 전에 프로세스가 죽으면(재배포·스케일아웃 중 여러 파드가 동시에 MySQL/Kafka 접속을 시도하다 실패해 `main()`이 `log.Fatal`로 즉시 종료하는 경우가 실제로 발생) 재시작 후 그 배치가 통째로 재처리된다. `execution_id`가 매번 새 난수라 이 재처리가 완전히 동일한 체결을 새 ID로 또 저장했고, 이 중복은 대시보드의 "중복 체결" 지표(FR 없음 — `CLAUDE.md`의 "데이터 정합성 검사" 절 참고)로 실측 발견됐다. `matching_engine_assignment`도 같은 재전달 경로를 타지만 위험도는 낮다 — `released_at IS NULL` 판정으로 "지금 담당자가 누구인가"는 중복 행이 있어도 자가치유되기 때문에, 이쪽은 서비스 정합성이 아니라 감사 이력이 지저분해지는 것을 막는 목적이다. 두 경우 모두 "논리적으로 한 번만 있을 수 있는 조합"을 자연키로 삼아 `INSERT IGNORE`가 중복을 조용히 걸러내게 했다: `execution`은 가격-시간 우선 매칭 특성상 한 매수-매도 조합이 두 번 체결될 수 없다는 성질을, `matching_engine_assignment`는 같은 엔진이 같은 마켓을 밀리초 단위로 완전히 같은 시각에 "새로" 배정받는 것은 재전달이 아니고서야 불가능하다는 성질을 이용했다. **운영 DB에 이미 쌓인 중복 행이 있는 상태로 이 인덱스를 적용하면 실패한다** — 먼저 중복 행을 정리해야 하며, 그 정리 자체는 운영 DB 데이터 삭제라 별도 검토·승인이 필요한 작업으로 남겨뒀다(`recorder/schema.sql` 주석 참고).
+- **조회 성능 인덱스 다수 추가 — 실제 RDS CPU 99% 장애 대응(2026-08-20)** — `trade_order`/`execution`이 부하시험으로 200만~500만 행을 넘어가면서, `mode`+`[from,to)` 구간 조회(`OrderSummary`/`UnresolvedOrders`), 미체결 주문 상태 필터, 대시보드 폴링(10초마다 도는 TPS/시계열 쿼리)이 인덱스 없이 테이블을 통째로 스캔하고 있었던 것이 실측(CloudWatch `CPUUtilization`, `EXPLAIN`의 `rows` 값)으로 확인됐다. `trade_order`에 `(mode, submitted_at, status)`/`status`/`submitted_at`/`(status, submitted_at)`, `execution`에 `executed_at` 인덱스를 추가해 폴링 비용이 테이블 전체 크기가 아니라 실제 조회 윈도우 안의 행 수에만 비례하도록 바꿨다. 논리적 엔티티/관계에는 영향이 없는 순수 성능 튜닝이라 전체 목록과 각 인덱스의 발견 경위는 `recorder/schema.sql`의 해당 주석을 원본으로 삼고 여기서는 요약만 남긴다.
 - **`TRADE_ORDER.source_order_id` 배관 완성(2026-08-07)** — 2단계로 나눠 구현했다. **(1)** `trader/order/http_submitter.go`가 `orderapi` 응답의 `orderId`를 파싱하도록 고치고, `OrderSubmitter.Submit`이 그 값을 반환하도록 시그니처를 바꿔(`RecordingSubmitter`가 성공한 제출에서만 orderId를 얻을 수 있어야 하므로), `RecordedOrder`에 새 `OrderID` 필드를 추가해 FR-17 기록 파일에 실제로 남긴다. **(2)** `replayengine`이 그 값을 읽어 `POST /v1/orders` 요청 바디에 `sourceOrderId`(선택 필드, `docs/api-specification.md` §2.1)로 실어 보내고, `orderapi`가 `clientRequestId`/`mode`와 같은 패턴으로 이를 Kafka NEW 이벤트에 태워, 기록기가 `trade_order.source_order_id`로 저장한다(`recorder/store/mysql.go`). trader의 신규(페이퍼 트레이딩) 주문은 이 필드가 항상 빈 문자열이라, 요청 바디에도 아예 실리지 않는다(`omitempty`). **FK를 걸지 않은 이유**는 `execution.buy_order_id`/`sell_order_id`와 같다 — 원본 주문과 리플레이 주문은 서로 다른 실행(몇 시간~며칠 간격)에서 발생할 수 있어, 기록기가 원본 주문의 NEW 이벤트를 아직 처리하지 못한 상태로 리플레이 주문의 NEW 이벤트가 먼저 도착할 수 있다 — FK였다면 `INSERT IGNORE`가 이런 경우 행 전체를 조용히 건너뛴다(스키마 주석 참고).
 
 ## 5. 남은 검토 사항 (실제 구현과 대조해 발견, 스키마는 아직 안 바꿈)
